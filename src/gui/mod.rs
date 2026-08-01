@@ -1,0 +1,4324 @@
+//! GPUI 主界面: 曲谱同步 (分块 / 蒙版 / 加底色).
+
+mod canvas;
+mod lists;
+mod tabs;
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use gpui::{
+    actions, canvas, div, point, prelude::*, px, quad, rgb, size, App, Application, Bounds,
+    Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
+};
+use image::{Frame, ImageBuffer, RgbaImage};
+use smallvec::smallvec;
+
+use crate::export::export_groups;
+use crate::model::{is_image_path, is_open_path, is_pdf_path, parse_color_hex, DocState};
+use crate::pdf;
+use crate::project::{self, is_project_path};
+use crate::text_input::{self, TextInput};
+
+use canvas::{hit_edge, region_at, ViewXform};
+use lists::{ListRow, TabInfo};
+use mask_tool::gui::MaskToolApp;
+use apply_bg::gui::ApplyBgApp;
+
+actions!(
+    score_sync,
+    [
+        OpenFile,
+        OpenProject,
+        SaveProject,
+        SaveProjectAs,
+        DetectPage,
+        DetectAll,
+        ToggleAddBlock,
+        ToggleSplitBlock,
+        MergeSelected,
+        DeleteSelected,
+        ExportGroups,
+        ResetGroups,
+        FitView,
+        ShowHelp,
+        ShareIntoGroup,
+        UngroupActive,
+        ConfirmParamEdit,
+        CancelParamEdit,
+    ]
+);
+
+const A4_RATIO: f32 = 210.0 / 297.0;
+const SIDE_PANEL_W: f32 = 340.0;
+const SIDE_PANEL_MIN: f32 = 220.0;
+/// 拖拽排序: 超过此像素位移才进入拖拽态 (防点击抖动出虚影)
+const REORDER_DRAG_SLOP: f32 = 5.0;
+const SIDE_PANEL_MAX: f32 = 720.0;
+const HELP_TEXT: &str = "\
+【分块】快捷键:\n\
+  Ctrl+O 打开图片/PDF | Ctrl+Shift+O 打开工程 | Ctrl+S 保存工程 | Ctrl+Shift+S 另存工程\n\
+  D 识别本页 | A 识别全部页\n\
+  N 添加新块 | S 分割块 | M 合并组合 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
+  E 导出组合 | R 重置本页分组 | F 适应窗口 | H / F1 操作说明\n\
+\n\
+【蒙版】快捷键 (右侧切到蒙版后):\n\
+  B 框选 | P 平移 | E 导出本页图片 | F 适应 | Delete 删除选中\n\
+  Ctrl+A 全选蒙版 | Ctrl+Z/Y 撤重 | Ctrl+滚轮缩放\n\
+\n\
+操作步骤:\n\
+1. 打开/拖入图片或 PDF → 多标签页; PDF 会先转到临时 PNG 再按页加载.\n\
+2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续.\n\
+3. 标签右键菜单「复制本页」可再放一页副本 (反复前/后各编一组).\n\
+4. 每页独立识别分块; 「识别全部页」一次处理所有标签.\n\
+5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
+6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
+7. Ctrl 多选可跨页, 「合并组合」; 脚注可用「共享脚注」让同一块出现在多组导出中.\n\
+8. 组顺序按组内第一块的 (页序, y) 自动排序; 组内可拖拽调序.\n\
+9. 「蒙版」编辑当前组合的竖向拼合图; 蒙版坐标相对拼合图, 各组合独立\n\
+   (共享脚注可在不同组画不同遮盖). 标签栏切换组合; 切回分块会定位到对应页并选中该组.\n\
+10. 「导出组合」按分块排序拼接并套用各组蒙版; 蒙版侧「导出本页图片」只导出当前组合.\n\
+\n\
+其他:\n\
+  空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
+  右侧顶栏可切换「分块 / 蒙版 / 工程」; 工程页可保存打开 .staffcrop 并调用加底色.";
+
+/// 画布编辑工具 (互斥)
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum CanvasTool {
+    #[default]
+    Normal,
+    /// 拖出新块: 首按下为锚定边, 先上/下决定上下边
+    AddBlock,
+    /// 在已有块内切开
+    SplitBlock,
+}
+
+/// 添加新块时, 首条线扮演的角色
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddAnchorRole {
+    /// 首线为上边线, 向下拖出下边
+    Top,
+    /// 首线为下边线, 向上拖出上边
+    Bottom,
+}
+
+/// 右侧工具栏模式 (类似 PS 面板切换)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SideTool {
+    /// 谱表分块: 原子块 / 组合 / 成员
+    Crop,
+    /// 蒙版遮盖 (mask_tool)
+    Mask,
+    /// 工程保存 / 加底色 (apply_bg)
+    Project,
+}
+
+enum DragKind {
+    PagePan { last: Point<Pixels> },
+    Edge {
+        region_id: String,
+        edge: &'static str,
+    },
+    /// 添加新块拖拽: 锚定边 + 活动边
+    AddBlock {
+        anchor_y: i32,
+        role: Option<AddAnchorRole>,
+        cur_y: i32,
+    },
+    MemberReorder {
+        from: usize,
+        /// move 目标下标 (remove 后再 insert 的下标)
+        to: usize,
+        /// 提示线画在哪一项; None = 原位无反应
+        line_at: Option<usize>,
+        /// true = 右边/下边, false = 左边/上边
+        line_after: bool,
+        start_x: f32,
+        start_y: f32,
+        origin_x: f32,
+        origin_y: f32,
+        x: f32,
+        y: f32,
+        armed: bool,
+    },
+    TabReorder {
+        from: usize,
+        to: usize,
+        line_at: Option<usize>,
+        line_after: bool,
+        start_x: f32,
+        start_y: f32,
+        origin_x: f32,
+        origin_y: f32,
+        x: f32,
+        y: f32,
+        armed: bool,
+    },
+    /// 侧栏列表滚动条拖拽
+    Scrollbar {
+        which: ScrollList,
+        grab: f32,
+        vertical: bool,
+    },
+    /// 左右分隔条
+    SideResize {
+        start_x: f32,
+        start_w: f32,
+    },
+    /// 标签栏横向滚动条
+    TabHScroll {
+        grab: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScrollList {
+    Region,
+    Group,
+    Member,
+    /// 蒙版面板: 组合选择列表
+    MaskGroup,
+    /// 操作说明对话框正文
+    Help,
+}
+
+#[derive(Clone)]
+enum DialogKind {
+    Help,
+    Info {
+        title: String,
+        body: String,
+    },
+}
+
+struct TabContextMenu {
+    page_index: usize,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParamEdit {
+    Margin,
+    Threshold,
+}
+
+enum PdfLoadMsg {
+    Page {
+        path: PathBuf,
+        index: usize,
+        total: usize,
+        pdf_name: String,
+    },
+    Done {
+        pdf_name: String,
+        pages: usize,
+    },
+    Err {
+        pdf_name: String,
+        message: String,
+    },
+    AllFinished,
+}
+
+struct ScoreSyncApp {
+    focus_handle: FocusHandle,
+    doc: DocState,
+    render_image: Option<Arc<RenderImage>>,
+    img_w: u32,
+    img_h: u32,
+    zoom: f32,
+    pan: Point<f32>,
+    user_zoomed: bool,
+    view_bounds: Bounds<Pixels>,
+    drag: Option<DragKind>,
+    status: SharedString,
+    hint: SharedString,
+    region_panel_open: bool,
+    side_width: f32,
+    /// 右侧工具: 分块 | 蒙版 | 工程
+    side_tool: SideTool,
+    /// 画布工具: 普通 / 添加新块 / 分割块
+    canvas_tool: CanvasTool,
+    mask_tool: Entity<MaskToolApp>,
+    apply_bg: Entity<ApplyBgApp>,
+    /// 当前蒙版编辑目标: group_id (拼合图)
+    mask_target: Option<String>,
+    dialog: Option<DialogKind>,
+    /// 标签右键菜单
+    tab_menu: Option<TabContextMenu>,
+    /// 原子块 y0-y1 行内编辑
+    edit_y_input: Entity<TextInput>,
+    /// 正在编辑 y 的 region id
+    region_y_edit: Option<String>,
+    /// 边距 / 墨迹阈值 点按编辑
+    param_input: Entity<TextInput>,
+    param_edit: Option<ParamEdit>,
+    /// 画布悬停光标 (边缘/分割)
+    hover_cursor: CursorStyle,
+    region_scroll: ScrollHandle,
+    group_scroll: ScrollHandle,
+    member_scroll: ScrollHandle,
+    mask_group_scroll: ScrollHandle,
+    help_scroll: ScrollHandle,
+    tab_scroll: ScrollHandle,
+    /// 标签页条目屏幕 bounds (供拖拽虚影锚点)
+    tab_bounds: HashMap<usize, Bounds<Pixels>>,
+    /// 组合内成员条目屏幕 bounds
+    member_bounds: HashMap<usize, Bounds<Pixels>>,
+    /// 当前工程文件路径 (Ctrl+S 覆盖保存)
+    project_path: Option<PathBuf>,
+}
+
+impl ScoreSyncApp {
+    fn new(cx: &mut Context<Self>, initial: Vec<PathBuf>) -> Self {
+        let edit_y_input = cx.new(|cx| TextInput::new(cx, "", "例如 94-371"));
+        let param_input = cx.new(|cx| TextInput::new(cx, "", "数字"));
+        let mask_tool = cx.new(|cx| MaskToolApp::new(cx, None));
+        cx.observe(&mask_tool, |_, _, cx| cx.notify()).detach();
+        let apply_bg = cx.new(ApplyBgApp::new);
+        cx.observe(&apply_bg, |_, _, cx| cx.notify()).detach();
+        let mut app = Self {
+            focus_handle: cx.focus_handle(),
+            doc: DocState::new(),
+            render_image: None,
+            img_w: 0,
+            img_h: 0,
+            zoom: 1.0,
+            pan: point(0.0, 0.0),
+            user_zoomed: false,
+            view_bounds: Bounds::default(),
+            drag: None,
+            status: "就绪".into(),
+            hint: "拖入/打开图片、PDF 或工程. Ctrl+S 保存工程. 标签右键可复制本页."
+                .into(),
+            region_panel_open: false,
+            side_width: SIDE_PANEL_W,
+            side_tool: SideTool::Crop,
+            canvas_tool: CanvasTool::Normal,
+            mask_tool,
+            apply_bg,
+            mask_target: None,
+            dialog: None,
+            tab_menu: None,
+            edit_y_input,
+            region_y_edit: None,
+            param_input,
+            param_edit: None,
+            hover_cursor: CursorStyle::Arrow,
+            region_scroll: ScrollHandle::new(),
+            group_scroll: ScrollHandle::new(),
+            member_scroll: ScrollHandle::new(),
+            mask_group_scroll: ScrollHandle::new(),
+            help_scroll: ScrollHandle::new(),
+            tab_scroll: ScrollHandle::new(),
+            tab_bounds: HashMap::new(),
+            member_bounds: HashMap::new(),
+            project_path: None,
+        };
+        if !initial.is_empty() {
+            let projects: Vec<PathBuf> = initial
+                .iter()
+                .filter(|p| is_project_path(p))
+                .cloned()
+                .collect();
+            let others: Vec<PathBuf> = initial
+                .into_iter()
+                .filter(|p| !is_project_path(p))
+                .collect();
+            if let Some(proj) = projects.last() {
+                app.open_project_path(proj.clone(), cx);
+            }
+            if !others.is_empty() {
+                app.load_paths(others, cx);
+            }
+        }
+        app
+    }
+
+    fn xform(&self) -> ViewXform {
+        let vw = f32::from(self.view_bounds.size.width);
+        let vh = f32::from(self.view_bounds.size.height);
+        ViewXform::compute(
+            self.img_w as f32,
+            self.img_h as f32,
+            vw,
+            vh,
+            self.zoom,
+            self.pan,
+            self.user_zoomed,
+        )
+    }
+
+    fn reorder_slop_exceeded(dx: f32, dy: f32) -> bool {
+        dx * dx + dy * dy >= REORDER_DRAG_SLOP * REORDER_DRAG_SLOP
+    }
+
+    fn measure_item_bounds(
+        entity: Entity<Self>,
+        key: usize,
+        is_tab: bool,
+    ) -> impl IntoElement {
+        canvas(
+            move |bounds, _, cx| {
+                entity.update(cx, |this, _| {
+                    if is_tab {
+                        this.tab_bounds.insert(key, bounds);
+                    } else {
+                        this.member_bounds.insert(key, bounds);
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .size_full()
+    }
+
+    fn item_origin(bounds: Option<&Bounds<Pixels>>, mouse_x: f32, mouse_y: f32) -> (f32, f32) {
+        bounds
+            .map(|b| (f32::from(b.origin.x), f32::from(b.origin.y)))
+            .unwrap_or((mouse_x, mouse_y))
+    }
+
+    /// 将「落在 anchor 之前/之后」换算成 remove 后再 insert 的下标.
+    fn reorder_to_index(from: usize, anchor: usize, after: bool) -> usize {
+        if after {
+            if from <= anchor {
+                anchor
+            } else {
+                anchor + 1
+            }
+        } else if from < anchor {
+            anchor - 1
+        } else {
+            anchor
+        }
+    }
+
+    /// 水平列表 (标签): 原位无反应; 左半→该项左边, 右半→该项右边.
+    /// 返回 (to, line_at, line_after).
+    fn resolve_tab_drop(
+        &self,
+        from: usize,
+        x: f32,
+        _y: f32,
+    ) -> (usize, Option<usize>, bool) {
+        let n = self.doc.pages.len();
+        if n == 0 {
+            return (from, None, false);
+        }
+        for i in 0..n {
+            let Some(b) = self.tab_bounds.get(&i) else {
+                continue;
+            };
+            let left = f32::from(b.origin.x);
+            let right = left + f32::from(b.size.width);
+            if x < left || x > right {
+                continue;
+            }
+            if i == from {
+                return (from, None, false);
+            }
+            let mid = (left + right) * 0.5;
+            let after = x >= mid;
+            let to = Self::reorder_to_index(from, i, after);
+            return (to, Some(i), after);
+        }
+        (from, None, false)
+    }
+
+    /// 竖直列表 (成员): 原位无反应; 上半→该项上边, 下半→该项下边.
+    fn resolve_member_drop(
+        &self,
+        from: usize,
+        _x: f32,
+        y: f32,
+    ) -> (usize, Option<usize>, bool) {
+        let n = self.member_list_rows().len();
+        if n == 0 {
+            return (from, None, false);
+        }
+        for i in 0..n {
+            let Some(b) = self.member_bounds.get(&i) else {
+                continue;
+            };
+            let top = f32::from(b.origin.y);
+            let bottom = top + f32::from(b.size.height);
+            if y < top || y > bottom {
+                continue;
+            }
+            if i == from {
+                return (from, None, false);
+            }
+            let mid = (top + bottom) * 0.5;
+            let after = y >= mid;
+            let to = Self::reorder_to_index(from, i, after);
+            return (to, Some(i), after);
+        }
+        (from, None, false)
+    }
+
+    fn screen_in_view(&self, pos: Point<Pixels>) -> (f32, f32) {
+        (
+            f32::from(pos.x) - f32::from(self.view_bounds.origin.x),
+            f32::from(pos.y) - f32::from(self.view_bounds.origin.y),
+        )
+    }
+
+    fn refresh_render(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.doc.current_page() else {
+            self.render_image = None;
+            self.img_w = 0;
+            self.img_h = 0;
+            cx.notify();
+            return;
+        };
+        self.img_w = page.width();
+        self.img_h = page.height();
+        let rgb = &page.image;
+        let (w, h) = (self.img_w, self.img_h);
+        let mut rgba: RgbaImage = ImageBuffer::from_fn(w, h, |x, y| {
+            let p = rgb.get_pixel(x, y);
+            image::Rgba([p[0], p[1], p[2], 255])
+        });
+        // GPUI / Windows 纹理多为 BGRA
+        for px in rgba.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        let frame = Frame::new(rgba);
+        self.render_image = Some(Arc::new(RenderImage::new(smallvec![frame])));
+        self.user_zoomed = false;
+        self.zoom = 1.0;
+        self.pan = point(0.0, 0.0);
+        self.doc.sync_group_colors();
+        self.sync_mask_image(cx);
+        cx.notify();
+    }
+
+    fn sync_mask_image(&mut self, cx: &mut Context<Self>) {
+        if self.side_tool != SideTool::Mask {
+            return;
+        }
+        self.flush_mask_to_doc(cx);
+        let side_w = self.side_width;
+        let target = self.resolve_mask_target();
+        self.mask_target = target.clone();
+        let Some(gid) = target else {
+            self.mask_tool.update(cx, |m, cx| {
+                m.set_embed_side_width(side_w);
+                m.clear_view("请先有可编辑的组合", cx);
+            });
+            return;
+        };
+        let Some(rgb) = self.doc.compose_group(&gid) else {
+            self.mask_tool.update(cx, |m, cx| {
+                m.set_embed_side_width(side_w);
+                m.clear_view("无法拼合该组合", cx);
+            });
+            return;
+        };
+        let masks = self.doc.get_group_masks(&gid).to_vec();
+        let gname = self
+            .doc
+            .groups
+            .iter()
+            .position(|g| g.id == gid)
+            .map(|i| self.doc.groups[i].display_name(i))
+            .unwrap_or_else(|| "组合".into());
+        let n = self
+            .doc
+            .groups
+            .iter()
+            .find(|g| g.id == gid)
+            .map(|g| g.region_ids.len())
+            .unwrap_or(0);
+        let label = format!("{gname} (拼合 {n} 块)");
+        let opacity = self.doc.mask_opacity;
+        self.mask_tool.update(cx, |m, cx| {
+            m.set_embed_side_width(side_w);
+            m.load_rgb(rgb, gid, masks, &label, cx);
+            m.set_opacity(opacity);
+        });
+    }
+
+    fn resolve_mask_target(&self) -> Option<String> {
+        if let Some(ref id) = self.doc.active_group_id {
+            if self.doc.groups.iter().any(|g| &g.id == id) {
+                return Some(id.clone());
+            }
+        }
+        if let Some(ref id) = self.mask_target {
+            if self.doc.groups.iter().any(|g| &g.id == id) {
+                return Some(id.clone());
+            }
+        }
+        self.doc.groups.first().map(|g| g.id.clone())
+    }
+
+    fn flush_mask_to_doc(&mut self, cx: &mut Context<Self>) {
+        let Some(gid) = self.mask_target.clone() else {
+            return;
+        };
+        let (masks, opacity) = self
+            .mask_tool
+            .update(cx, |m, _| (m.masks_clone(), m.opacity()));
+        self.doc.set_group_masks(&gid, masks);
+        self.doc.mask_opacity = opacity;
+    }
+
+    fn set_mask_target(&mut self, group_id: String, cx: &mut Context<Self>) {
+        if self.mask_target.as_ref() == Some(&group_id) {
+            return;
+        }
+        self.flush_mask_to_doc(cx);
+        self.doc.active_group_id = Some(group_id);
+        self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+        self.mask_target = None;
+        self.sync_mask_image(cx);
+        cx.notify();
+    }
+
+    fn set_side_tool(&mut self, tool: SideTool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.side_tool == tool {
+            return;
+        }
+        if self.side_tool == SideTool::Mask {
+            self.flush_mask_to_doc(cx);
+        }
+        self.side_tool = tool;
+        match tool {
+            SideTool::Crop => {
+                // 回到分块: 定位到当前蒙版组合所在页并选中该组
+                self.restore_crop_from_mask_target(cx);
+                self.focus_handle.focus(window);
+                self.status = "分块工具".into();
+                self.hint = "拖入/打开图片、PDF 或工程. Ctrl+S 保存工程.".into();
+            }
+            SideTool::Mask => {
+                self.mask_target = None;
+                self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+                self.sync_mask_image(cx);
+                self.mask_tool.read(cx).focus_handle_ref().focus(window);
+                self.status = "蒙版工具".into();
+                self.hint =
+                    "蒙版编辑当前组合的拼合图. 标签切换组合; Ctrl+A 全选蒙版."
+                        .into();
+            }
+            SideTool::Project => {
+                self.focus_handle.focus(window);
+                self.status = "工程工具".into();
+                self.hint =
+                    "打开/保存 .staffcrop 工程; 下方可对导出目录做加底色批处理.".into();
+            }
+        }
+        cx.notify();
+    }
+
+    /// 从蒙版目标恢复分块页签与选中组合.
+    fn restore_crop_from_mask_target(&mut self, cx: &mut Context<Self>) {
+        let gid = self
+            .mask_target
+            .clone()
+            .or_else(|| self.doc.active_group_id.clone());
+        let Some(gid) = gid else {
+            return;
+        };
+        self.doc.active_group_id = Some(gid.clone());
+        let Some(g) = self.doc.groups.iter().find(|g| g.id == gid).cloned() else {
+            return;
+        };
+        self.doc.selected_region_ids = g.region_ids.iter().cloned().collect();
+        if let Some(rid) = g.region_ids.first() {
+            if let Some((pi, _)) = self.doc.find_region(rid) {
+                if pi != self.doc.current_page_index {
+                    self.doc.current_page_index = pi;
+                    self.refresh_render(cx);
+                    return;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn after_doc_change(&mut self, cx: &mut Context<Self>) {
+        self.doc.sync_group_colors();
+        // 若当前页尺寸变了不必重渲整图, 但区域会重绘
+        if let Some(page) = self.doc.current_page() {
+            if page.width() != self.img_w || page.height() != self.img_h {
+                self.refresh_render(cx);
+                return;
+            }
+        } else {
+            self.render_image = None;
+            self.img_w = 0;
+            self.img_h = 0;
+        }
+        if self.side_tool == SideTool::Mask {
+            self.flush_mask_to_doc(cx);
+            self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+            self.mask_target = None;
+            self.sync_mask_image(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut images = Vec::new();
+        let mut pdfs = Vec::new();
+        let mut projects = Vec::new();
+        for path in paths {
+            if is_project_path(&path) {
+                projects.push(path);
+            } else if is_pdf_path(&path) {
+                pdfs.push(path);
+            } else if is_image_path(&path) {
+                images.push(path);
+            } else {
+                self.dialog = Some(DialogKind::Info {
+                    title: "不支持".into(),
+                    body: format!("无法打开: {}", path.display()),
+                });
+            }
+        }
+
+        // 工程文件优先单独打开 (取最后一个)
+        if let Some(proj) = projects.pop() {
+            self.open_project_path(proj, cx);
+            if projects.is_empty() && images.is_empty() && pdfs.is_empty() {
+                return;
+            }
+        }
+
+        let mut added = 0usize;
+        for path in images {
+            match image::open(&path) {
+                Ok(im) => {
+                    let rgb = im.to_rgb8();
+                    self.doc.add_page(path, rgb, true);
+                    added += 1;
+                }
+                Err(e) => {
+                    self.dialog = Some(DialogKind::Info {
+                        title: "打开失败".into(),
+                        body: format!("{}: {e}", path.display()),
+                    });
+                }
+            }
+        }
+        if added > 0 {
+            self.refresh_render(cx);
+            self.status = format!("已添加 {added} 页, 共 {} 页.", self.doc.pages.len()).into();
+            self.hint = self.status.clone();
+        }
+
+        if !pdfs.is_empty() {
+            self.start_pdf_load(pdfs, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn start_pdf_load(&mut self, pdfs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.status = format!(
+            "PDF 后台渲染中… ({})",
+            pdfs.first()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("pdf")
+        )
+        .into();
+        self.hint = self.status.clone();
+        cx.notify();
+
+        let (tx, rx) = async_channel::unbounded::<PdfLoadMsg>();
+        std::thread::spawn(move || {
+            for pdf in pdfs {
+                let name = pdf
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("pdf")
+                    .to_string();
+                let result = pdf::pdf_pages_to_tmp_images_streaming(&pdf, |i, total, path| {
+                    let _ = tx.send_blocking(PdfLoadMsg::Page {
+                        path,
+                        index: i,
+                        total,
+                        pdf_name: name.clone(),
+                    });
+                });
+                match result {
+                    Ok(n) => {
+                        let _ = tx.send_blocking(PdfLoadMsg::Done {
+                            pdf_name: name,
+                            pages: n,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send_blocking(PdfLoadMsg::Err {
+                            pdf_name: name,
+                            message: e,
+                        });
+                    }
+                }
+            }
+            let _ = tx.send_blocking(PdfLoadMsg::AllFinished);
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Ok(msg) = rx.recv().await {
+                let stop = matches!(msg, PdfLoadMsg::AllFinished);
+                this.update(cx, |view, cx| {
+                    match msg {
+                        PdfLoadMsg::Page {
+                            path,
+                            index,
+                            total,
+                            pdf_name,
+                        } => {
+                            match image::open(&path) {
+                                Ok(im) => {
+                                    let was_empty = view.doc.pages.is_empty();
+                                    let rgb = im.to_rgb8();
+                                    // 首张切过去并刷新; 后续只追加标签, 不打断当前浏览
+                                    view.doc.add_page(path, rgb, was_empty);
+                                    if was_empty {
+                                        view.refresh_render(cx);
+                                    }
+                                    view.status = format!(
+                                        "PDF {pdf_name}: 已载入 {}/{total} 页 (共 {} 页)",
+                                        index + 1,
+                                        view.doc.pages.len()
+                                    )
+                                    .into();
+                                    view.hint = view.status.clone();
+                                }
+                                Err(e) => {
+                                    view.dialog = Some(DialogKind::Info {
+                                        title: "打开失败".into(),
+                                        body: format!("{}: {e}", path.display()),
+                                    });
+                                }
+                            }
+                            cx.notify();
+                        }
+                        PdfLoadMsg::Done { pdf_name, pages } => {
+                            view.status =
+                                format!("PDF {pdf_name} 完成: {pages} 页已载入.").into();
+                            view.hint = view.status.clone();
+                            cx.notify();
+                        }
+                        PdfLoadMsg::Err { pdf_name, message } => {
+                            view.dialog = Some(DialogKind::Info {
+                                title: "PDF 转换失败".into(),
+                                body: format!("{pdf_name}\n{message}"),
+                            });
+                            cx.notify();
+                        }
+                        PdfLoadMsg::AllFinished => {}
+                    }
+                })
+                .ok();
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let files = rfd::FileDialog::new()
+            .set_title("打开图片 / PDF (可多选)")
+            .add_filter(
+                "Images / PDF",
+                &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "pdf"],
+            )
+            .add_filter("PDF", &["pdf"])
+            .add_filter("Images", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"])
+            .pick_files();
+        if let Some(paths) = files {
+            self.load_paths(paths, cx);
+        }
+    }
+
+    fn open_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let file = rfd::FileDialog::new()
+            .set_title("打开工程")
+            .add_filter("Score Sync 工程", &["staffcrop"])
+            .pick_file();
+        if let Some(path) = file {
+            self.open_project_path(path, cx);
+        }
+    }
+
+    fn open_project_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.flush_mask_to_doc(cx);
+        match project::load_project(&path) {
+            Ok(doc) => {
+                self.doc = doc;
+                self.project_path = Some(path.clone());
+                self.drag = None;
+                self.dialog = None;
+                self.tab_menu = None;
+                self.param_edit = None;
+                self.region_y_edit = None;
+                self.side_tool = SideTool::Crop;
+                self.canvas_tool = CanvasTool::Normal;
+                self.mask_target = None;
+                self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+                self.user_zoomed = false;
+                self.zoom = 1.0;
+                self.pan = point(0.0, 0.0);
+                self.refresh_render(cx);
+                self.status = format!(
+                    "已打开工程: {} ({} 页, {} 组)",
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("project"),
+                    self.doc.pages.len(),
+                    self.doc.groups.len()
+                )
+                .into();
+                self.hint = self.status.clone();
+                cx.notify();
+            }
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "打开工程失败".into(),
+                    body: e,
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn save_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.project_path.clone() {
+            self.save_project_to(path, cx);
+        } else {
+            self.save_project_as(window, cx);
+        }
+    }
+
+    fn save_project_as(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.doc.pages.is_empty() {
+            self.dialog = Some(DialogKind::Info {
+                title: "提示".into(),
+                body: "当前没有可保存的页面.".into(),
+            });
+            cx.notify();
+            return;
+        }
+        let mut dlg = rfd::FileDialog::new()
+            .set_title("保存工程")
+            .add_filter("Score Sync 工程", &["staffcrop"]);
+        if let Some(ref p) = self.project_path {
+            if let Some(parent) = p.parent() {
+                dlg = dlg.set_directory(parent);
+            }
+            if let Some(name) = p.file_name() {
+                dlg = dlg.set_file_name(name.to_string_lossy());
+            }
+        } else if let Some(page) = self.doc.pages.first() {
+            if let Some(stem) = page.path.file_stem().and_then(|s| s.to_str()) {
+                dlg = dlg.set_file_name(format!("{stem}.staffcrop"));
+            }
+        }
+        let Some(path) = dlg.save_file() else {
+            return;
+        };
+        self.save_project_to(path, cx);
+    }
+
+    fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.flush_mask_to_doc(cx);
+        match project::save_project(&self.doc, &path) {
+            Ok(saved) => {
+                self.project_path = Some(saved.clone());
+                self.status = format!("工程已保存: {}", saved.display()).into();
+                self.hint = self.status.clone();
+                cx.notify();
+            }
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "保存工程失败".into(),
+                    body: e,
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn fit_to_view(&mut self, cx: &mut Context<Self>) {
+        if self.side_tool == SideTool::Mask {
+            self.mask_tool.update(cx, |m, cx| m.fit_to_view(cx));
+            return;
+        }
+        self.user_zoomed = false;
+        self.zoom = 1.0;
+        self.pan = point(0.0, 0.0);
+        cx.notify();
+    }
+
+    fn run_detect(&mut self, cx: &mut Context<Self>) {
+        if self.doc.current_page().is_none() {
+            self.dialog = Some(DialogKind::Info {
+                title: "提示".into(),
+                body: "请先打开图片.".into(),
+            });
+            cx.notify();
+            return;
+        }
+        let idx = self.doc.current_page_index;
+        self.doc.detect_page(idx, true);
+        let n = self.doc.pages[idx].regions.len();
+        let systems = self.doc.pages[idx]
+            .regions
+            .values()
+            .filter(|r| r.kind == "system")
+            .count();
+        self.status = format!("本页识别到 {n} 块 (system={systems}).").into();
+        self.hint = self.status.clone();
+        self.after_doc_change(cx);
+    }
+
+    fn run_detect_all(&mut self, cx: &mut Context<Self>) {
+        if self.doc.pages.is_empty() {
+            self.dialog = Some(DialogKind::Info {
+                title: "提示".into(),
+                body: "请先打开图片.".into(),
+            });
+            cx.notify();
+            return;
+        }
+        self.doc.detect_all();
+        self.status = format!("已识别全部 {} 页.", self.doc.pages.len()).into();
+        self.hint = self.status.clone();
+        self.after_doc_change(cx);
+    }
+
+    fn toggle_add_block(&mut self, cx: &mut Context<Self>) {
+        self.canvas_tool = if self.canvas_tool == CanvasTool::AddBlock {
+            CanvasTool::Normal
+        } else {
+            CanvasTool::AddBlock
+        };
+        self.drag = None;
+        self.status = if self.canvas_tool == CanvasTool::AddBlock {
+            "添加新块: 按下定一边, 先上移→该边为下边线, 先下移→为上边线, 拖出后松开".into()
+        } else {
+            "已退出添加新块".into()
+        };
+        self.hint = self.status.clone();
+        cx.notify();
+    }
+
+    fn toggle_split_block(&mut self, cx: &mut Context<Self>) {
+        self.canvas_tool = if self.canvas_tool == CanvasTool::SplitBlock {
+            CanvasTool::Normal
+        } else {
+            CanvasTool::SplitBlock
+        };
+        self.drag = None;
+        self.status = if self.canvas_tool == CanvasTool::SplitBlock {
+            "分割块: 在已有块内点击, 于指针位置切成上下两块".into()
+        } else {
+            "已退出分割块".into()
+        };
+        self.hint = self.status.clone();
+        cx.notify();
+    }
+
+    fn add_block_preview_ys(anchor_y: i32, role: Option<AddAnchorRole>, cur_y: i32) -> (i32, i32) {
+        match role {
+            None => (anchor_y, anchor_y),
+            Some(AddAnchorRole::Top) => (anchor_y, cur_y.max(anchor_y)),
+            Some(AddAnchorRole::Bottom) => (cur_y.min(anchor_y), anchor_y),
+        }
+    }
+
+    fn merge_selected(&mut self, cx: &mut Context<Self>) {
+        match self.doc.merge_selected() {
+            Ok(n) => {
+                self.status = format!("已合并 {n} 块为组合.").into();
+                self.hint = self.status.clone();
+                self.after_doc_change(cx);
+            }
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "提示".into(),
+                    body: e.into(),
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn share_into_group(&mut self, cx: &mut Context<Self>) {
+        match self.doc.share_selected_into_active() {
+            Ok(0) => {
+                self.status = "选中块已在当前组中.".into();
+                cx.notify();
+            }
+            Ok(n) => {
+                self.status =
+                    format!("已共享加入 {n} 块到当前组 (仍保留在其他组中).").into();
+                self.hint = self.status.clone();
+                self.after_doc_change(cx);
+            }
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "提示".into(),
+                    body: e.into(),
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn ungroup_active(&mut self, cx: &mut Context<Self>) {
+        match self.doc.ungroup_active() {
+            Ok(()) => {
+                self.status = "已拆开组合.".into();
+                self.after_doc_change(cx);
+            }
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "提示".into(),
+                    body: e.into(),
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.side_tool == SideTool::Mask {
+            self.mask_tool.update(cx, |m, cx| m.delete_selected(cx));
+            self.flush_mask_to_doc(cx);
+            cx.notify();
+            return;
+        }
+        let n = self.doc.delete_selected();
+        if n > 0 {
+            self.status = format!("已删除 {n} 块.").into();
+            self.after_doc_change(cx);
+        }
+    }
+
+    fn reset_groups(&mut self, cx: &mut Context<Self>) {
+        if self.doc.current_page().is_none() {
+            return;
+        }
+        self.doc.reset_current_page_groups();
+        self.status = "已重置本页分组.".into();
+        self.hint = self.status.clone();
+        self.after_doc_change(cx);
+    }
+
+    fn export_groups_ui(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.side_tool == SideTool::Mask {
+            self.flush_mask_to_doc(cx);
+        }
+        if self.doc.groups.is_empty() {
+            self.dialog = Some(DialogKind::Info {
+                title: "提示".into(),
+                body: "没有可导出的内容.".into(),
+            });
+            cx.notify();
+            return;
+        }
+        let Some(out) = rfd::FileDialog::new()
+            .set_title("选择导出目录")
+            .pick_folder()
+        else {
+            return;
+        };
+        match export_groups(&self.doc, &out) {
+            Ok((saved, path)) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "完成".into(),
+                    body: format!(
+                        "已导出 {saved} 个组合到:\n{}\n(已按分块排序拼接并套用各组蒙版)",
+                        path.display()
+                    ),
+                });
+                self.status = format!("已导出 {saved} 个组合.").into();
+            }
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "导出失败".into(),
+                    body: e,
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn show_help(&mut self, cx: &mut Context<Self>) {
+        self.drag = None;
+        self.dialog = Some(DialogKind::Help);
+        cx.notify();
+    }
+
+    fn switch_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.doc.pages.len() {
+            return;
+        }
+        self.doc.current_page_index = index;
+        self.refresh_render(cx);
+    }
+
+    fn close_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.doc.close_page_at(index) {
+            self.refresh_render(cx);
+        }
+    }
+
+    fn copy_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(at) = self.doc.copy_page_at(index) {
+            self.status = format!(
+                "已复制第 {} 页 → 新标签 {}",
+                index + 1,
+                at + 1
+            )
+            .into();
+            self.hint = self.status.clone();
+            self.refresh_render(cx);
+        }
+    }
+
+    fn region_list_rows(&self) -> Vec<ListRow> {
+        let Some(page) = self.doc.current_page() else {
+            return Vec::new();
+        };
+        let pno = self.doc.page_no(&page.id);
+        let mut regions: Vec<_> = page.regions.values().cloned().collect();
+        regions.sort_by_key(|r| (r.y0, r.y1));
+        regions
+            .into_iter()
+            .map(|r| ListRow {
+                selected: self.doc.selected_region_ids.contains(&r.id),
+                color: parse_color_hex(&r.color),
+                label: r.label(Some(pno)).into(),
+                id: r.id,
+            })
+            .collect()
+    }
+
+    fn group_list_rows(&self) -> Vec<ListRow> {
+        self.doc
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let mut labels = Vec::new();
+                let mut pages_in = HashSet::new();
+                for rid in &g.region_ids {
+                    if let Some((_, r)) = self.doc.find_region(rid) {
+                        let pno = self.doc.page_no(&r.page_id);
+                        pages_in.insert(pno);
+                        labels.push(format!("P{pno}:{}:{}-{}", r.kind, r.y0, r.y1));
+                    }
+                }
+                let cross = if pages_in.len() > 1 { "跨页 " } else { "" };
+                let first = g
+                    .region_ids
+                    .first()
+                    .and_then(|rid| self.doc.get_region(rid))
+                    .map(|fr| {
+                        format!(
+                            "首P{} y={} | ",
+                            self.doc.page_no(&fr.page_id),
+                            fr.y0
+                        )
+                    })
+                    .unwrap_or_default();
+                let text = format!(
+                    "{cross}{}  {first}[{}]",
+                    g.display_name(i),
+                    labels.join(", ")
+                );
+                ListRow {
+                    id: g.id.clone(),
+                    label: text.into(),
+                    color: 0x0f172a,
+                    selected: self.doc.active_group_id.as_deref() == Some(g.id.as_str()),
+                }
+            })
+            .collect()
+    }
+
+    fn member_list_rows(&self) -> Vec<ListRow> {
+        let Some(g) = self.doc.active_group() else {
+            return Vec::new();
+        };
+        g.region_ids
+            .iter()
+            .filter_map(|rid| {
+                let r = self.doc.get_region(rid)?;
+                Some(ListRow {
+                    id: rid.clone(),
+                    label: r.label(Some(self.doc.page_no(&r.page_id))).into(),
+                    color: parse_color_hex(&r.color),
+                    selected: false,
+                })
+            })
+            .collect()
+    }
+
+    fn tab_infos(&self) -> Vec<TabInfo> {
+        self.doc
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let has_sel = p
+                    .regions
+                    .keys()
+                    .any(|rid| self.doc.selected_region_ids.contains(rid));
+                let mark = if has_sel { "●" } else { "" };
+                TabInfo {
+                    index: i,
+                    label: format!("{mark}{}:{}", i + 1, p.title()).into(),
+                    active: i == self.doc.current_page_index,
+                }
+            })
+            .collect()
+    }
+
+    fn current_regions_hitlist(&self) -> Vec<(String, i32, i32)> {
+        let Some(page) = self.doc.current_page() else {
+            return Vec::new();
+        };
+        page.regions
+            .values()
+            .map(|r| (r.id.clone(), r.y0, r.y1))
+            .collect()
+    }
+
+    fn on_view_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_some() {
+            return;
+        }
+        if event.button != MouseButton::Left {
+            if event.button == MouseButton::Right {
+                // 空白处右键无操作; 标签右键在标签栏处理
+            }
+            return;
+        }
+        let (sx, sy) = self.screen_in_view(event.position);
+        let xform = self.xform();
+        let (_ix, iy) = xform.screen_to_image(sx, sy);
+        let ctrl = event.modifiers.control;
+
+        if self.canvas_tool == CanvasTool::SplitBlock {
+            let msg = self.doc.split_block_at(iy);
+            self.status = msg.clone().into();
+            self.hint = self.status.clone();
+            if msg.contains("已在") {
+                self.canvas_tool = CanvasTool::Normal;
+            }
+            self.after_doc_change(cx);
+            return;
+        }
+
+        if self.canvas_tool == CanvasTool::AddBlock {
+            let y = iy.round() as i32;
+            self.drag = Some(DragKind::AddBlock {
+                anchor_y: y,
+                role: None,
+                cur_y: y,
+            });
+            self.status = format!("锚定线 y={y}; 上移→下边线, 下移→上边线").into();
+            cx.notify();
+            return;
+        }
+
+        let regions = self.current_regions_hitlist();
+        let tol = xform.edge_tol();
+        if let Some((rid, edge)) = hit_edge(&regions, &self.doc.selected_region_ids, iy, tol) {
+            self.doc.click_region(&rid, ctrl);
+            self.drag = Some(DragKind::Edge {
+                region_id: rid,
+                edge,
+            });
+            self.after_doc_change(cx);
+            return;
+        }
+        if let Some(rid) = region_at(&regions, &self.doc.selected_region_ids, iy) {
+            self.doc.click_region(&rid, ctrl);
+            self.after_doc_change(cx);
+            // 仍可开始平移
+            self.drag = Some(DragKind::PagePan {
+                last: event.position,
+            });
+            return;
+        }
+        self.doc.click_blank(ctrl);
+        self.drag = Some(DragKind::PagePan {
+            last: event.position,
+        });
+        self.after_doc_change(cx);
+    }
+
+    fn on_view_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let (sx, sy) = self.screen_in_view(event.position);
+        let xform = self.xform();
+        let (_ix, iy) = xform.screen_to_image(sx, sy);
+
+        let drag = self.drag.take();
+        match drag {
+            Some(DragKind::Edge { region_id, edge }) => {
+                self.doc.apply_edge_drag(&region_id, edge, iy.round() as i32);
+                self.drag = Some(DragKind::Edge { region_id, edge });
+                self.hover_cursor = CursorStyle::ResizeUpDown;
+                self.after_doc_change(cx);
+                return;
+            }
+            Some(DragKind::AddBlock {
+                anchor_y,
+                mut role,
+                ..
+            }) => {
+                let cur = iy.round() as i32;
+                const LOCK_PX: i32 = 2;
+                if role.is_none() {
+                    let dy = cur - anchor_y;
+                    if dy <= -LOCK_PX {
+                        role = Some(AddAnchorRole::Bottom);
+                    } else if dy >= LOCK_PX {
+                        role = Some(AddAnchorRole::Top);
+                    }
+                }
+                let (y0, y1) = Self::add_block_preview_ys(anchor_y, role, cur);
+                self.status = match role {
+                    None => format!("锚定 y={anchor_y} (再上下移动以确定上下边)").into(),
+                    Some(AddAnchorRole::Top) => {
+                        format!("上边 y={y0} · 下边 y={y1} (首线=上边)").into()
+                    }
+                    Some(AddAnchorRole::Bottom) => {
+                        format!("上边 y={y0} · 下边 y={y1} (首线=下边)").into()
+                    }
+                };
+                self.drag = Some(DragKind::AddBlock {
+                    anchor_y,
+                    role,
+                    cur_y: cur,
+                });
+                self.hover_cursor = CursorStyle::Crosshair;
+                cx.notify();
+                return;
+            }
+            Some(DragKind::PagePan { last }) => {
+                let dx = f32::from(event.position.x) - f32::from(last.x);
+                let dy = f32::from(event.position.y) - f32::from(last.y);
+                self.pan.x += dx;
+                self.pan.y += dy;
+                self.user_zoomed = true;
+                self.drag = Some(DragKind::PagePan {
+                    last: event.position,
+                });
+                cx.notify();
+                return;
+            }
+            other => {
+                self.drag = other;
+            }
+        }
+
+        if matches!(
+            self.canvas_tool,
+            CanvasTool::AddBlock | CanvasTool::SplitBlock
+        ) {
+            self.hover_cursor = CursorStyle::Crosshair;
+        } else {
+            let regions = self.current_regions_hitlist();
+            let tol = xform.edge_tol();
+            if hit_edge(&regions, &self.doc.selected_region_ids, iy, tol).is_some() {
+                self.hover_cursor = CursorStyle::ResizeUpDown;
+            } else {
+                self.hover_cursor = CursorStyle::Arrow;
+            }
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    fn on_view_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_some() {
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
+        if let Some(DragKind::AddBlock {
+            anchor_y,
+            role,
+            cur_y,
+        }) = self.drag.take()
+        {
+            match role {
+                None => {
+                    self.status = "已取消添加新块 (未确定上下边方向)".into();
+                    self.hint = self.status.clone();
+                }
+                Some(_) => {
+                    let (y0, y1) = Self::add_block_preview_ys(anchor_y, role, cur_y);
+                    if y1 < y0 {
+                        self.status = "块高度无效, 已取消.".into();
+                    } else {
+                        let msg = self.doc.add_manual_block(y0, y1);
+                        self.status = msg.into();
+                        self.hint = self.status.clone();
+                        self.canvas_tool = CanvasTool::Normal;
+                        self.after_doc_change(cx);
+                        return;
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
+        if matches!(
+            self.drag,
+            Some(DragKind::Edge { .. }) | Some(DragKind::PagePan { .. })
+        ) {
+            self.drag = None;
+            cx.notify();
+        }
+    }
+
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let delta_y = match event.delta {
+            ScrollDelta::Pixels(p) => f32::from(p.y),
+            ScrollDelta::Lines(l) => l.y * 30.0,
+        };
+        if event.modifiers.control {
+            let (sx, sy) = self.screen_in_view(event.position);
+            let xform = self.xform();
+            let (ix, iy) = xform.screen_to_image(sx, sy);
+            let vw = f32::from(self.view_bounds.size.width);
+            let vh = f32::from(self.view_bounds.size.height);
+            let fit = if self.img_w > 0 && self.img_h > 0 {
+                (vw / self.img_w as f32)
+                    .min(vh / self.img_h as f32)
+                    .max(0.0001)
+            } else {
+                1.0
+            };
+            let factor = if delta_y > 0.0 { 1.15 } else { 1.0 / 1.15 };
+            let current_zoom = if self.user_zoomed { self.zoom } else { 1.0 };
+            self.user_zoomed = true;
+            self.zoom = (current_zoom * factor).clamp(0.05, 40.0);
+            let new_scale = fit * self.zoom;
+            self.pan.x = sx - (vw - self.img_w as f32 * new_scale) * 0.5 - ix * new_scale;
+            self.pan.y = sy - (vh - self.img_h as f32 * new_scale) * 0.5 - iy * new_scale;
+            cx.notify();
+        } else {
+            self.pan.y += delta_y;
+            self.user_zoomed = true;
+            cx.notify();
+        }
+    }
+
+    fn on_view_double_click(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left || event.click_count < 2 {
+            return;
+        }
+        let (sx, sy) = self.screen_in_view(event.position);
+        let xform = self.xform();
+        let (_ix, iy) = xform.screen_to_image(sx, sy);
+        let regions = self.current_regions_hitlist();
+        let tol = xform.edge_tol();
+        if hit_edge(&regions, &self.doc.selected_region_ids, iy, tol).is_some()
+            || region_at(&regions, &self.doc.selected_region_ids, iy).is_some()
+        {
+            return;
+        }
+        self.fit_to_view(cx);
+    }
+
+    fn begin_edit_y(&mut self, rid: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.doc.find_region(&rid).is_none() {
+            return;
+        }
+        if self.param_edit.is_some() {
+            self.apply_param_edit(window, cx);
+        }
+        if self.region_y_edit.as_ref() == Some(&rid) {
+            return;
+        }
+        if self.region_y_edit.is_some() {
+            self.apply_edit_y(window, cx);
+        }
+        let (y0, y1) = {
+            let Some((_, r)) = self.doc.find_region(&rid) else {
+                return;
+            };
+            (r.y0, r.y1)
+        };
+        let text = format!("{y0}-{y1}");
+        self.edit_y_input.update(cx, |input, cx| {
+            input.set_text(text, cx);
+            input.select_all_text(cx);
+        });
+        self.region_y_edit = Some(rid);
+        self.edit_y_input.focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn begin_param_edit(
+        &mut self,
+        kind: ParamEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.region_y_edit.is_some() {
+            self.apply_edit_y(window, cx);
+        }
+        // 切换编辑字段时先提交当前值
+        if self.param_edit.is_some() && self.param_edit != Some(kind) {
+            self.apply_param_edit(window, cx);
+        }
+        let text = match kind {
+            ParamEdit::Margin => self.doc.margin.to_string(),
+            ParamEdit::Threshold => self.doc.ink_threshold.to_string(),
+        };
+        self.param_input.update(cx, |input, cx| {
+            input.set_text(text, cx);
+            input.select_all_text(cx);
+        });
+        self.param_edit = Some(kind);
+        self.param_input.focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn apply_param_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kind) = self.param_edit else {
+            return;
+        };
+        let text = self.param_input.read(cx).text();
+        let text = text.trim();
+        if let Ok(v) = text.parse::<i32>() {
+            match kind {
+                ParamEdit::Margin => self.doc.margin = v.clamp(0, 80),
+                ParamEdit::Threshold => self.doc.ink_threshold = v.clamp(1, 254),
+            }
+        }
+        self.param_edit = None;
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn cancel_param_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.param_edit.is_none() {
+            return;
+        }
+        self.param_edit = None;
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn apply_edit_y(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(region_id) = self.region_y_edit.take() else {
+            return;
+        };
+        let text = self.edit_y_input.read(cx).text();
+        let text = text
+            .trim()
+            .replace(' ', "")
+            .replace(',', "-")
+            .replace('–', "-");
+        self.focus_handle.focus(window);
+        if !text.contains('-') {
+            self.status = "y 范围需为 y0-y1, 例如 94-371".into();
+            cx.notify();
+            return;
+        }
+        let mut parts = text.splitn(2, '-');
+        let a = parts.next().unwrap_or("");
+        let b = parts.next().unwrap_or("");
+        let (Ok(y0), Ok(y1)) = (a.parse::<i32>(), b.parse::<i32>()) else {
+            self.status = "y0 / y1 必须是整数".into();
+            cx.notify();
+            return;
+        };
+        if self.doc.set_region_y(&region_id, y0, y1) {
+            self.status = format!("已改 → y={}-{}", y0.min(y1), y0.max(y1)).into();
+            self.after_doc_change(cx);
+        } else {
+            self.status = "未能修改该块 y 范围".into();
+            cx.notify();
+        }
+    }
+
+    fn cancel_edit_y(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.region_y_edit.is_none() {
+            return;
+        }
+        self.region_y_edit = None;
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn btn(
+        &self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        active: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
+        let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
+        let hover = if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) };
+        div()
+            .id(id.into())
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(bg)
+            .border_1()
+            .border_color(rgb(0x94a3b8))
+            .text_color(fg)
+            .text_sm()
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(label.into())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+            )
+    }
+
+    fn menu_item(
+        &self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        active: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fg = if active { rgb(0x1d4ed8) } else { rgb(0x334155) };
+        div()
+            .id(id.into())
+            .px_2()
+            .py_1()
+            .text_sm()
+            .text_color(fg)
+            .cursor_pointer()
+            .rounded_sm()
+            .hover(|s| s.bg(rgb(0xe2e8f0)))
+            .when(active, |d| d.bg(rgb(0xdbeafe)))
+            .child(label.into())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+            )
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 顶部菜单栏: 文字项横排, 非独立按钮块
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_x_1()
+            .w_full()
+            .child(self.menu_item("open", "打开 (Ctrl+O)", false, Self::open_file, cx))
+            .child(self.menu_item(
+                "detect",
+                "识别本页 (D)",
+                false,
+                |this, _, cx| this.run_detect(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "detect_all",
+                "识别全部页 (A)",
+                false,
+                |this, _, cx| this.run_detect_all(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "add_block",
+                "添加新块 (N)",
+                self.canvas_tool == CanvasTool::AddBlock,
+                |this, _, cx| this.toggle_add_block(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "split_block",
+                "分割块 (S)",
+                self.canvas_tool == CanvasTool::SplitBlock,
+                |this, _, cx| this.toggle_split_block(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "merge",
+                "合并组合 (M)",
+                false,
+                |this, _, cx| this.merge_selected(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "ungroup",
+                "拆开组合 (U)",
+                false,
+                |this, _, cx| this.ungroup_active(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "share",
+                "共享脚注 (G)",
+                false,
+                |this, _, cx| this.share_into_group(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "del",
+                "删除 (Del)",
+                false,
+                |this, _, cx| this.delete_selected(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "export",
+                "导出组合 (E)",
+                false,
+                Self::export_groups_ui,
+                cx,
+            ))
+            .child(self.menu_item(
+                "reset",
+                "重置本页分组 (R)",
+                false,
+                |this, _, cx| this.reset_groups(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "fit",
+                "适应窗口 (F)",
+                false,
+                |this, _, cx| this.fit_to_view(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "help",
+                "操作说明 (H)",
+                false,
+                |this, _, cx| this.show_help(cx),
+                cx,
+            ))
+    }
+
+    fn tool_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let crop_on = self.side_tool == SideTool::Crop;
+        let mask_on = self.side_tool == SideTool::Mask;
+        let proj_on = self.side_tool == SideTool::Project;
+        div()
+            .id("tool_switcher")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .w_full()
+            .bg(rgb(0xe2e8f0))
+            .border_b_1()
+            .border_color(rgb(0xcbd5e1))
+            .child(self.tool_tab("tool_crop", "分块", crop_on, SideTool::Crop, cx))
+            .child(self.tool_tab("tool_mask", "蒙版", mask_on, SideTool::Mask, cx))
+            .child(self.tool_tab("tool_proj", "工程", proj_on, SideTool::Project, cx))
+    }
+
+    fn tool_tab(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        active: bool,
+        tool: SideTool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let bg = if active {
+            rgb(0x2563eb)
+        } else {
+            rgb(0xf8fafc)
+        };
+        let fg = if active {
+            rgb(0xffffff)
+        } else {
+            rgb(0x334155)
+        };
+        div()
+            .id(id)
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(bg)
+            .text_color(fg)
+            .text_sm()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(rgb(0xf1f5f9))
+                }
+            })
+            .child(label)
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.set_side_tool(tool, window, cx);
+                }),
+            )
+    }
+
+    fn left_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let canvas = match self.side_tool {
+            SideTool::Crop | SideTool::Project => self.image_view(cx).into_any_element(),
+            SideTool::Mask => self
+                .mask_tool
+                .update(cx, |m, cx| m.image_view(cx))
+                .into_any_element(),
+        };
+        div()
+            .id("left_workspace")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .border_b_1()
+                    .border_color(rgb(0xcbd5e1))
+                    .bg(rgb(0xf8fafc))
+                    .child(self.tab_bar(cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .min_w(px(0.))
+                    .child(canvas),
+            )
+    }
+
+    fn mask_target_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_gid = self.mask_target.clone().or_else(|| self.doc.active_group_id.clone());
+        let mut list = div()
+            .id("mask_group_list")
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .p_1()
+            .bg(rgb(0xffffff))
+            .border_1()
+            .border_color(rgb(0xcbd5e1))
+            .rounded_md();
+        for (i, g) in self.doc.groups.iter().enumerate() {
+            let gid = g.id.clone();
+            let active = active_gid.as_ref() == Some(&gid);
+            let nmask = self.doc.get_group_masks(&gid).len();
+            let mut label = g.display_name(i);
+            if nmask > 0 {
+                label = format!("{label}·{nmask}");
+            }
+            let bg = if active {
+                rgb(0x2563eb)
+            } else {
+                rgb(0xe2e8f0)
+            };
+            let fg = if active {
+                rgb(0xffffff)
+            } else {
+                rgb(0x0f172a)
+            };
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("mask-g-{gid}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(bg)
+                    .text_color(fg)
+                    .text_xs()
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .child(label)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.set_mask_target(gid.clone(), cx);
+                        }),
+                    ),
+            );
+        }
+
+        div()
+            .id("mask_target_picker")
+            .flex_shrink_0()
+            .h(px(168.))
+            .max_h(px(168.))
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .border_b_1()
+            .border_color(rgb(0xcbd5e1))
+            .bg(rgb(0xf8fafc))
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x334155))
+                    .mb_1()
+                    .flex_shrink_0()
+                    .child("编辑目标 (组合拼合图)"),
+            )
+            .child(
+                self.attach_scrollbars(
+                    "mask_group_scroll_wrap".into(),
+                    ScrollList::MaskGroup,
+                    &self.mask_group_scroll,
+                    list,
+                    cx,
+                )
+                .flex_1()
+                .min_h(px(0.)),
+            )
+    }
+
+    fn right_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = match self.side_tool {
+            SideTool::Crop => self.side_panel(cx).into_any_element(),
+            SideTool::Mask => {
+                let picker = self.mask_target_picker(cx).into_any_element();
+                let side_w = self.side_width;
+                let mask_body = self.mask_tool.update(cx, |m, cx| {
+                    m.set_embed_side_width(side_w);
+                    div()
+                        .id("mask_right_body")
+                        .w_full()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(m.side_panel(cx))
+                        .into_any_element()
+                });
+                div()
+                    .id("mask_right")
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .min_h(px(0.))
+                    .child(picker)
+                    .child(mask_body)
+                    .into_any_element()
+            }
+            SideTool::Project => self.project_panel(cx).into_any_element(),
+        };
+        div()
+            .id("right_workspace")
+            .w(px(self.side_width))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .bg(rgb(0xf1f5f9))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .child(self.tool_switcher(cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .child(body),
+            )
+    }
+
+    fn project_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let proj_name = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("(未保存)")
+            .to_string();
+        let apply_panel = self.apply_bg.update(cx, |m, cx| m.panel(cx).into_any_element());
+        div()
+            .id("project_panel")
+            .w_full()
+            .h_full()
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .bg(rgb(0xf1f5f9))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(rgb(0xcbd5e1))
+                    .bg(rgb(0xffffff))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("工程文件"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child(format!("当前: {proj_name}")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(self.btn(
+                                "proj_open",
+                                "打开工程",
+                                false,
+                                |this, window, cx| this.open_project(window, cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "proj_save",
+                                "保存 (Ctrl+S)",
+                                true,
+                                |this, window, cx| this.save_project(window, cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "proj_save_as",
+                                "另存为",
+                                false,
+                                |this, window, cx| this.save_project_as(window, cx),
+                                cx,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .id("project_apply_scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_scroll()
+                    .child(apply_panel),
+            )
+    }
+
+    fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.side_tool == SideTool::Mask {
+            self.mask_group_tab_bar(cx).into_any_element()
+        } else {
+            self.page_tab_bar(cx).into_any_element()
+        }
+    }
+
+    /// 蒙版模式标签: 各组合 (含所属页提示).
+    fn mask_group_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_gid = self
+            .mask_target
+            .clone()
+            .or_else(|| self.doc.active_group_id.clone());
+        let handle = &self.tab_scroll;
+        let max_x = f32::from(handle.max_offset().width);
+        let bounds = handle.bounds();
+        let track_w = f32::from(bounds.size.width).max(1.0);
+        let show_h = max_x > 1.0 && track_w > 1.0;
+
+        let mut row = div()
+            .id("mask_tab_bar_row")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .py_1()
+            .overflow_x_scroll()
+            .track_scroll(handle)
+            .scrollbar_width(px(0.));
+        for (i, g) in self.doc.groups.iter().enumerate() {
+            let gid = g.id.clone();
+            let active = active_gid.as_ref() == Some(&gid);
+            let nmask = self.doc.get_group_masks(&gid).len();
+            let mut label = g.display_name(i);
+            if let Some(rid) = g.region_ids.first() {
+                if let Some((pi, _)) = self.doc.find_region(rid) {
+                    label = format!("{label}·P{}", pi + 1);
+                }
+            }
+            if nmask > 0 {
+                label = format!("{label}·蒙{nmask}");
+            }
+            let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
+            let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("mask-tab-{gid}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(bg)
+                    .text_color(fg)
+                    .text_sm()
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .child(label)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.set_mask_target(gid.clone(), cx);
+                        }),
+                    ),
+            );
+        }
+
+        let mut wrap = div()
+            .id("tab_bar")
+            .flex()
+            .flex_col()
+            .w_full()
+            .border_b_1()
+            .border_color(rgb(0xcbd5e1))
+            .bg(rgb(0xf8fafc))
+            .child(row);
+        if show_h {
+            let thumb_w = ((track_w * track_w) / (track_w + max_x)).clamp(24.0, track_w);
+            let travel = (track_w - thumb_w).max(1.0);
+            let off_x = -f32::from(handle.offset().x);
+            let frac = (off_x / max_x).clamp(0.0, 1.0);
+            let thumb_left = frac * travel;
+            wrap = wrap.child(
+                div()
+                    .id("mask_tab_htrack")
+                    .h(px(8.))
+                    .w_full()
+                    .relative()
+                    .bg(rgb(0xe2e8f0))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let x = f32::from(ev.position.x);
+                            let handle = this.tab_scroll.clone();
+                            let b = handle.bounds();
+                            let tw = f32::from(b.size.width).max(1.0);
+                            let max = f32::from(handle.max_offset().width);
+                            if max <= 0.5 {
+                                return;
+                            }
+                            let thumb = ((tw * tw) / (tw + max)).clamp(24.0, tw);
+                            let travel = (tw - thumb).max(1.0);
+                            let track_left = f32::from(b.origin.x);
+                            let target = (x - track_left - thumb * 0.5).clamp(0.0, travel);
+                            handle.set_offset(point(px(-(target / travel) * max), px(0.)));
+                            this.drag = Some(DragKind::TabHScroll {
+                                grab: thumb * 0.5,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("mask_tab_hthumb")
+                            .absolute()
+                            .top_0()
+                            .left(px(thumb_left))
+                            .h_full()
+                            .w(px(thumb_w))
+                            .rounded_sm()
+                            .bg(rgb(0x94a3b8))
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    let x = f32::from(ev.position.x);
+                                    let handle = this.tab_scroll.clone();
+                                    let b = handle.bounds();
+                                    let tw = f32::from(b.size.width).max(1.0);
+                                    let max = f32::from(handle.max_offset().width);
+                                    let thumb = if max > 0.5 {
+                                        ((tw * tw) / (tw + max)).clamp(24.0, tw)
+                                    } else {
+                                        tw
+                                    };
+                                    let travel = (tw - thumb).max(1.0);
+                                    let track_left = f32::from(b.origin.x);
+                                    let off = -f32::from(handle.offset().x);
+                                    let frac = if max > 0.5 {
+                                        (off / max).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let cur_left = track_left + frac * travel;
+                                    this.drag = Some(DragKind::TabHScroll {
+                                        grab: (x - cur_left).clamp(0.0, thumb),
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            );
+        }
+        wrap
+    }
+
+    fn page_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = self.tab_infos();
+        let handle = &self.tab_scroll;
+        let max_x = f32::from(handle.max_offset().width);
+        let bounds = handle.bounds();
+        let track_w = f32::from(bounds.size.width).max(1.0);
+        let show_h = max_x > 1.0 && track_w > 1.0;
+        let drag_from = match &self.drag {
+            Some(DragKind::TabReorder {
+                from, armed: true, ..
+            }) => Some(*from),
+            _ => None,
+        };
+        let (line_at, line_after) = match &self.drag {
+            Some(DragKind::TabReorder {
+                line_at,
+                line_after,
+                armed: true,
+                ..
+            }) => (*line_at, *line_after),
+            _ => (None, false),
+        };
+
+        let mut row = div()
+            .id("tab_bar_row")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .py_1()
+            .overflow_x_scroll()
+            .track_scroll(handle)
+            .scrollbar_width(px(0.));
+        for tab in tabs {
+            let idx = tab.index;
+            let active = tab.active;
+            let dragging = drag_from == Some(idx);
+            let show_line = line_at == Some(idx);
+            let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
+            let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("tab-{idx}")))
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(bg)
+                    .text_color(fg)
+                    .text_sm()
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .when(dragging, |d| d.opacity(0.35))
+                    .when(show_line && !line_after, |d| {
+                        d.border_l_2().border_color(rgb(0xf59e0b))
+                    })
+                    .when(show_line && line_after, |d| {
+                        d.border_r_2().border_color(rgb(0xf59e0b))
+                    })
+                    .child(Self::measure_item_bounds(cx.entity(), idx, true))
+                    .child(
+                        div()
+                            .child(tab.label.clone())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    if ev.click_count >= 1 {
+                                        this.switch_page(idx, cx);
+                                    }
+                                    let mx = f32::from(ev.position.x);
+                                    let my = f32::from(ev.position.y);
+                                    let (ox, oy) = Self::item_origin(
+                                        this.tab_bounds.get(&idx),
+                                        mx,
+                                        my,
+                                    );
+                                    this.drag = Some(DragKind::TabReorder {
+                                        from: idx,
+                                        to: idx,
+                                        line_at: None,
+                                        line_after: false,
+                                        start_x: mx,
+                                        start_y: my,
+                                        origin_x: ox,
+                                        origin_y: oy,
+                                        x: mx,
+                                        y: my,
+                                        armed: false,
+                                    });
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Right,
+                                cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
+                                    this.tab_menu = Some(TabContextMenu {
+                                        page_index: idx,
+                                        x: f32::from(ev.position.x),
+                                        y: f32::from(ev.position.y),
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("tab-close-{idx}")))
+                            .px_1()
+                            .rounded_sm()
+                            .hover(|s| s.bg(rgb(0x94a3b8)))
+                            .child("×")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    // 拖拽排序松手落在叉上时不关页
+                                    if matches!(this.drag, Some(DragKind::TabReorder { .. })) {
+                                        return;
+                                    }
+                                    this.close_page(idx, cx);
+                                }),
+                            ),
+                    ),
+            );
+        }
+        row = row.child(
+            div()
+                .id("tab-add")
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(0xcbd5e1))
+                .cursor_pointer()
+                .flex_shrink_0()
+                .child("+")
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.open_file(window, cx)),
+                ),
+        );
+        row = row
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if let Some(DragKind::TabReorder {
+                    from,
+                    start_x,
+                    start_y,
+                    origin_x,
+                    origin_y,
+                    mut armed,
+                    ..
+                }) = this.drag.take()
+                {
+                    let x = f32::from(ev.position.x);
+                    let y = f32::from(ev.position.y);
+                    if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                        armed = true;
+                    }
+                    let (to, line_at, line_after) = if armed {
+                        this.resolve_tab_drop(from, x, y)
+                    } else {
+                        (from, None, false)
+                    };
+                    this.drag = Some(DragKind::TabReorder {
+                        from,
+                        to,
+                        line_at,
+                        line_after,
+                        start_x,
+                        start_y,
+                        origin_x,
+                        origin_y,
+                        x,
+                        y,
+                        armed,
+                    });
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if let Some(DragKind::TabReorder {
+                        from, to, armed, ..
+                    }) = this.drag.take()
+                    {
+                        if armed && from != to {
+                            this.doc.move_page(from, to);
+                            this.after_doc_change(cx);
+                        } else {
+                            cx.notify();
+                        }
+                    }
+                }),
+            );
+
+        let mut wrap = div()
+            .id("tab_bar")
+            .flex()
+            .flex_col()
+            .w_full()
+            .border_b_1()
+            .border_color(rgb(0xcbd5e1))
+            .bg(rgb(0xf8fafc))
+            .child(row);
+
+        if show_h {
+            let thumb_w = ((track_w * track_w) / (track_w + max_x)).clamp(24.0, track_w);
+            let travel = (track_w - thumb_w).max(1.0);
+            let off_x = -f32::from(handle.offset().x);
+            let frac = (off_x / max_x).clamp(0.0, 1.0);
+            let thumb_left = frac * travel;
+            wrap = wrap.child(
+                div()
+                    .id("tab_htrack")
+                    .h(px(8.))
+                    .w_full()
+                    .relative()
+                    .bg(rgb(0xe2e8f0))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let x = f32::from(ev.position.x);
+                            let handle = this.tab_scroll.clone();
+                            let b = handle.bounds();
+                            let tw = f32::from(b.size.width).max(1.0);
+                            let max = f32::from(handle.max_offset().width);
+                            if max <= 0.5 {
+                                return;
+                            }
+                            let thumb = ((tw * tw) / (tw + max)).clamp(24.0, tw);
+                            let travel = (tw - thumb).max(1.0);
+                            let track_left = f32::from(b.origin.x);
+                            let target = (x - track_left - thumb * 0.5).clamp(0.0, travel);
+                            handle.set_offset(point(px(-(target / travel) * max), px(0.)));
+                            this.drag = Some(DragKind::TabHScroll {
+                                grab: thumb * 0.5,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("tab_hthumb")
+                            .absolute()
+                            .top_0()
+                            .left(px(thumb_left))
+                            .h_full()
+                            .w(px(thumb_w))
+                            .rounded_sm()
+                            .bg(rgb(0x94a3b8))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    let x = f32::from(ev.position.x);
+                                    let handle = this.tab_scroll.clone();
+                                    let b = handle.bounds();
+                                    let tw = f32::from(b.size.width).max(1.0);
+                                    let max = f32::from(handle.max_offset().width);
+                                    let thumb = if max > 0.5 {
+                                        ((tw * tw) / (tw + max)).clamp(24.0, tw)
+                                    } else {
+                                        tw
+                                    };
+                                    let travel = (tw - thumb).max(1.0);
+                                    let track_left = f32::from(b.origin.x);
+                                    let off = -f32::from(handle.offset().x);
+                                    let frac = if max > 0.5 {
+                                        (off / max).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let cur_left = track_left + frac * travel;
+                                    this.drag = Some(DragKind::TabHScroll {
+                                        grab: (x - cur_left).clamp(0.0, thumb),
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            );
+        }
+        wrap
+    }
+
+    fn tab_drag_ghost(&self) -> impl IntoElement {
+        let Some(DragKind::TabReorder {
+            from,
+            start_x,
+            start_y,
+            origin_x,
+            origin_y,
+            x,
+            y,
+            armed: true,
+            ..
+        }) = &self.drag
+        else {
+            return div().into_any_element();
+        };
+        let label = self
+            .tab_infos()
+            .get(*from)
+            .map(|t| t.label.clone())
+            .unwrap_or_else(|| "...".into());
+        let gx = *origin_x + (*x - *start_x);
+        let gy = *origin_y + (*y - *start_y);
+        div()
+            .id("tab-drag-ghost")
+            .absolute()
+            .left(px(gx))
+            .top(px(gy))
+            .opacity(0.72)
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x2563eb))
+            .text_color(rgb(0xffffff))
+            .text_sm()
+            .border_1()
+            .border_color(rgb(0x1e40af))
+            .whitespace_nowrap()
+            .child(label)
+            .into_any_element()
+    }
+
+    fn member_drag_ghost(&self) -> impl IntoElement {
+        let Some(DragKind::MemberReorder {
+            from,
+            start_x,
+            start_y,
+            origin_x,
+            origin_y,
+            x,
+            y,
+            armed: true,
+            ..
+        }) = &self.drag
+        else {
+            return div().into_any_element();
+        };
+        let rows = self.member_list_rows();
+        let (label, color) = rows
+            .get(*from)
+            .map(|r| (r.label.clone(), r.color))
+            .unwrap_or_else(|| ("...".into(), 0x0f172a));
+        let gx = *origin_x + (*x - *start_x);
+        let gy = *origin_y + (*y - *start_y);
+        div()
+            .id("member-drag-ghost")
+            .absolute()
+            .left(px(gx))
+            .top(px(gy))
+            .opacity(0.72)
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0xffffff))
+            .text_color(rgb(color))
+            .text_sm()
+            .border_1()
+            .border_color(rgb(0x94a3b8))
+            .whitespace_nowrap()
+            .child(label)
+            .into_any_element()
+    }
+
+    fn image_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_image = self.render_image.clone();
+        let regions: Vec<(String, i32, i32, u32, bool)> = self
+            .doc
+            .current_page()
+            .map(|page| {
+                page.regions
+                    .values()
+                    .map(|r| {
+                        (
+                            r.id.clone(),
+                            r.y0,
+                            r.y1,
+                            parse_color_hex(&r.color),
+                            self.doc.selected_region_ids.contains(&r.id),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let img_w = self.img_w;
+        let img_h = self.img_h;
+        let zoom = self.zoom;
+        let pan = self.pan;
+        let user_zoomed = self.user_zoomed;
+        let cursor = if matches!(
+            self.canvas_tool,
+            CanvasTool::AddBlock | CanvasTool::SplitBlock
+        ) {
+            CursorStyle::Crosshair
+        } else {
+            self.hover_cursor
+        };
+        let add_preview = match &self.drag {
+            Some(DragKind::AddBlock {
+                anchor_y,
+                role,
+                cur_y,
+            }) => Some(Self::add_block_preview_ys(*anchor_y, *role, *cur_y)),
+            _ => None,
+        };
+
+        div()
+            .id("image_view")
+            .flex_1()
+            .min_w(px(200.))
+            .min_w_0()
+            .h_full()
+            .bg(rgb(0x2b2b2b))
+            .overflow_hidden()
+            .cursor(cursor)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    if ev.click_count >= 2 {
+                        this.on_view_double_click(ev, cx);
+                    } else {
+                        this.on_view_mouse_down(ev, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(Self::on_view_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_view_mouse_up))
+            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                let list: Vec<PathBuf> = paths
+                    .paths()
+                    .iter()
+                    .filter(|p| is_open_path(p) || is_project_path(p))
+                    .cloned()
+                    .collect();
+                if !list.is_empty() {
+                    this.load_paths(list, cx);
+                }
+            }))
+            .child(
+                canvas(
+                    {
+                        let entity = cx.entity().clone();
+                        move |bounds, _, cx| {
+                            entity.update(cx, |this, _| {
+                                this.view_bounds = bounds;
+                            });
+                        }
+                    },
+                    move |bounds, _, window, _cx| {
+                        let vw = f32::from(bounds.size.width);
+                        let vh = f32::from(bounds.size.height);
+                        let xform = ViewXform::compute(
+                            img_w as f32,
+                            img_h as f32,
+                            vw,
+                            vh,
+                            zoom,
+                            pan,
+                            user_zoomed,
+                        );
+
+                        if let Some(ref img) = render_image {
+                            let img_bounds = Bounds {
+                                origin: point(
+                                    bounds.origin.x + px(xform.origin_x),
+                                    bounds.origin.y + px(xform.origin_y),
+                                ),
+                                size: size(
+                                    px(img_w as f32 * xform.scale),
+                                    px(img_h as f32 * xform.scale),
+                                ),
+                            };
+                            let _ = window.paint_image(
+                                img_bounds,
+                                gpui::Corners::default(),
+                                img.clone(),
+                                0,
+                                false,
+                            );
+                        }
+
+                        let mut sorted = regions.clone();
+                        sorted.sort_by_key(|(_, _, _, _, sel)| if *sel { 1 } else { 0 });
+                        for (_id, y0, y1, color, selected) in &sorted {
+                            let mut b = xform.image_rect_to_screen(
+                                0,
+                                *y0,
+                                img_w.saturating_sub(1) as i32,
+                                *y1,
+                            );
+                            b.origin.x = bounds.origin.x + b.origin.x;
+                            b.origin.y = bounds.origin.y + b.origin.y;
+                            let mut fill = rgb(*color);
+                            fill.a = if *selected { 0.38 } else { 0.18 };
+                            // 与蒙版选中一致: 红色粗边框, 更醒目
+                            let border = if *selected {
+                                rgb(0xdc5050)
+                            } else {
+                                rgb(*color)
+                            };
+                            let bw = if *selected { px(2.) } else { px(1.) };
+                            window.paint_quad(quad(
+                                b,
+                                px(0.),
+                                fill,
+                                bw,
+                                border,
+                                Default::default(),
+                            ));
+                        }
+
+                        if let Some((py0, py1)) = add_preview {
+                            let mut b = xform.image_rect_to_screen(
+                                0,
+                                py0,
+                                img_w.saturating_sub(1) as i32,
+                                py1,
+                            );
+                            b.origin.x = bounds.origin.x + b.origin.x;
+                            b.origin.y = bounds.origin.y + b.origin.y;
+                            let mut fill = rgb(0xf59e0b);
+                            fill.a = 0.28;
+                            window.paint_quad(quad(
+                                b,
+                                px(0.),
+                                fill,
+                                px(2.),
+                                rgb(0xf59e0b),
+                                Default::default(),
+                            ));
+                            // 锚定/活动边细线
+                            for ly in [py0, py1] {
+                                let mut lb = xform.image_rect_to_screen(
+                                    0,
+                                    ly,
+                                    img_w.saturating_sub(1) as i32,
+                                    ly,
+                                );
+                                lb.origin.x = bounds.origin.x + lb.origin.x;
+                                lb.origin.y = bounds.origin.y + lb.origin.y;
+                                lb.size.height = px(2.).max(lb.size.height);
+                                window.paint_quad(quad(
+                                    lb,
+                                    px(0.),
+                                    rgb(0xea580c),
+                                    px(0.),
+                                    rgb(0xea580c),
+                                    Default::default(),
+                                ));
+                            }
+                        }
+                    },
+                )
+                .size_full(),
+            )
+    }
+
+    fn scroll_handle(&self, which: ScrollList) -> &ScrollHandle {
+        match which {
+            ScrollList::Region => &self.region_scroll,
+            ScrollList::Group => &self.group_scroll,
+            ScrollList::Member => &self.member_scroll,
+            ScrollList::MaskGroup => &self.mask_group_scroll,
+            ScrollList::Help => &self.help_scroll,
+        }
+    }
+
+    fn apply_scrollbar_drag(&mut self, mouse_x: f32, mouse_y: f32, cx: &mut Context<Self>) {
+        let Some(DragKind::Scrollbar {
+            which,
+            grab,
+            vertical,
+        }) = self.drag
+        else {
+            return;
+        };
+        let handle = self.scroll_handle(which).clone();
+        let bounds = handle.bounds();
+        if vertical {
+            let max_y = f32::from(handle.max_offset().height);
+            if max_y <= 0.5 {
+                return;
+            }
+            let track_h = f32::from(bounds.size.height).max(1.0);
+            let track_top = f32::from(bounds.origin.y);
+            let thumb_h = ((track_h * track_h) / (track_h + max_y)).clamp(24.0, track_h);
+            let travel = (track_h - thumb_h).max(1.0);
+            let thumb_top = (mouse_y - grab - track_top).clamp(0.0, travel);
+            let frac = thumb_top / travel;
+            let ox = handle.offset().x;
+            handle.set_offset(point(ox, px(-frac * max_y)));
+        } else {
+            let max_x = f32::from(handle.max_offset().width);
+            if max_x <= 0.5 {
+                return;
+            }
+            let track_w = f32::from(bounds.size.width).max(1.0);
+            let track_left = f32::from(bounds.origin.x);
+            let thumb_w = ((track_w * track_w) / (track_w + max_x)).clamp(24.0, track_w);
+            let travel = (track_w - thumb_w).max(1.0);
+            let thumb_left = (mouse_x - grab - track_left).clamp(0.0, travel);
+            let frac = thumb_left / travel;
+            let oy = handle.offset().y;
+            handle.set_offset(point(px(-frac * max_x), oy));
+        }
+        cx.notify();
+    }
+
+    fn apply_side_resize(&mut self, mouse_x: f32, cx: &mut Context<Self>) {
+        let Some(DragKind::SideResize { start_x, start_w }) = self.drag else {
+            return;
+        };
+        // 分隔条在侧栏左侧: 向左拖 → 侧栏变宽
+        let new_w = (start_w + (start_x - mouse_x)).clamp(SIDE_PANEL_MIN, SIDE_PANEL_MAX);
+        if (new_w - self.side_width).abs() > 0.5 {
+            self.side_width = new_w;
+            self.mask_tool.update(cx, |m, _| {
+                m.set_embed_side_width(new_w);
+            });
+            cx.notify();
+        }
+    }
+
+    /// 列表滚动: 仅内容溢出时显示滚动条; 支持纵向 + 横向.
+    fn attach_scrollbars(
+        &self,
+        wrap_id: SharedString,
+        which: ScrollList,
+        handle: &ScrollHandle,
+        mut list: Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui::Div> {
+        let max_y = f32::from(handle.max_offset().height);
+        let max_x = f32::from(handle.max_offset().width);
+        let bounds = handle.bounds();
+        let track_h = f32::from(bounds.size.height).max(1.0);
+        let track_w = f32::from(bounds.size.width).max(1.0);
+        let show_v = max_y > 1.0 && track_h > 1.0;
+        let show_h = max_x > 1.0 && track_w > 1.0;
+
+        list = list
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .overflow_scroll()
+            .track_scroll(handle)
+            .scrollbar_width(px(0.));
+
+        let mut row = div()
+            .id(SharedString::from(format!("{wrap_id}-row")))
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.))
+            .min_w(px(0.))
+            .child(list);
+
+        if show_v {
+            let thumb_h = ((track_h * track_h) / (track_h + max_y)).clamp(24.0, track_h);
+            let travel = (track_h - thumb_h).max(1.0);
+            let off_y = -f32::from(handle.offset().y);
+            let frac = (off_y / max_y).clamp(0.0, 1.0);
+            let thumb_top = frac * travel;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("{wrap_id}-vtrack")))
+                    .w(px(10.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .relative()
+                    .rounded_sm()
+                    .bg(rgb(0xe2e8f0))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let y = f32::from(ev.position.y);
+                            let handle = this.scroll_handle(which).clone();
+                            let b = handle.bounds();
+                            let th = f32::from(b.size.height).max(1.0);
+                            let max = f32::from(handle.max_offset().height);
+                            if max <= 0.5 {
+                                return;
+                            }
+                            let thumb = ((th * th) / (th + max)).clamp(24.0, th);
+                            let travel = (th - thumb).max(1.0);
+                            let track_top = f32::from(b.origin.y);
+                            let target = (y - track_top - thumb * 0.5).clamp(0.0, travel);
+                            let ox = handle.offset().x;
+                            handle.set_offset(point(ox, px(-(target / travel) * max)));
+                            this.drag = Some(DragKind::Scrollbar {
+                                which,
+                                grab: thumb * 0.5,
+                                vertical: true,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{wrap_id}-vthumb")))
+                            .absolute()
+                            .left_0()
+                            .top(px(thumb_top))
+                            .w_full()
+                            .h(px(thumb_h))
+                            .rounded_sm()
+                            .bg(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x64748b)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    let y = f32::from(ev.position.y);
+                                    let handle = this.scroll_handle(which).clone();
+                                    let b = handle.bounds();
+                                    let th = f32::from(b.size.height).max(1.0);
+                                    let max = f32::from(handle.max_offset().height);
+                                    let thumb = if max > 0.5 {
+                                        ((th * th) / (th + max)).clamp(24.0, th)
+                                    } else {
+                                        th
+                                    };
+                                    let travel = (th - thumb).max(1.0);
+                                    let track_top = f32::from(b.origin.y);
+                                    let off = -f32::from(handle.offset().y);
+                                    let frac = if max > 0.5 {
+                                        (off / max).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let cur_top = track_top + frac * travel;
+                                    this.drag = Some(DragKind::Scrollbar {
+                                        which,
+                                        grab: (y - cur_top).clamp(0.0, thumb),
+                                        vertical: true,
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            );
+        }
+
+        let mut wrap = div()
+            .id(wrap_id.clone())
+            .relative()
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .min_w(px(0.))
+            .child(row);
+
+        if show_h {
+            let thumb_w = ((track_w * track_w) / (track_w + max_x)).clamp(24.0, track_w);
+            let travel = (track_w - thumb_w).max(1.0);
+            let off_x = -f32::from(handle.offset().x);
+            let frac = (off_x / max_x).clamp(0.0, 1.0);
+            let thumb_left = frac * travel;
+            wrap = wrap.child(
+                div()
+                    .id(SharedString::from(format!("{wrap_id}-htrack")))
+                    .h(px(10.))
+                    .w_full()
+                    .flex_shrink_0()
+                    .relative()
+                    .rounded_sm()
+                    .bg(rgb(0xe2e8f0))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let x = f32::from(ev.position.x);
+                            let handle = this.scroll_handle(which).clone();
+                            let b = handle.bounds();
+                            let tw = f32::from(b.size.width).max(1.0);
+                            let max = f32::from(handle.max_offset().width);
+                            if max <= 0.5 {
+                                return;
+                            }
+                            let thumb = ((tw * tw) / (tw + max)).clamp(24.0, tw);
+                            let travel = (tw - thumb).max(1.0);
+                            let track_left = f32::from(b.origin.x);
+                            let target = (x - track_left - thumb * 0.5).clamp(0.0, travel);
+                            let oy = handle.offset().y;
+                            handle.set_offset(point(px(-(target / travel) * max), oy));
+                            this.drag = Some(DragKind::Scrollbar {
+                                which,
+                                grab: thumb * 0.5,
+                                vertical: false,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{wrap_id}-hthumb")))
+                            .absolute()
+                            .top_0()
+                            .left(px(thumb_left))
+                            .h_full()
+                            .w(px(thumb_w))
+                            .rounded_sm()
+                            .bg(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x64748b)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    let x = f32::from(ev.position.x);
+                                    let handle = this.scroll_handle(which).clone();
+                                    let b = handle.bounds();
+                                    let tw = f32::from(b.size.width).max(1.0);
+                                    let max = f32::from(handle.max_offset().width);
+                                    let thumb = if max > 0.5 {
+                                        ((tw * tw) / (tw + max)).clamp(24.0, tw)
+                                    } else {
+                                        tw
+                                    };
+                                    let travel = (tw - thumb).max(1.0);
+                                    let track_left = f32::from(b.origin.x);
+                                    let off = -f32::from(handle.offset().x);
+                                    let frac = if max > 0.5 {
+                                        (off / max).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let cur_left = track_left + frac * travel;
+                                    this.drag = Some(DragKind::Scrollbar {
+                                        which,
+                                        grab: (x - cur_left).clamp(0.0, thumb),
+                                        vertical: false,
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            );
+        }
+
+        wrap
+    }
+
+    fn side_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let region_rows = self.region_list_rows();
+        let group_rows = self.group_list_rows();
+        let member_rows = self.member_list_rows();
+        let region_open = self.region_panel_open;
+        let margin = self.doc.margin;
+        let thr = self.doc.ink_threshold;
+
+        let mut panel = div()
+            .id("side")
+            .w_full()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .bg(rgb(0xf1f5f9))
+            .child(
+                div()
+                    .id("region_fold")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .cursor_pointer()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(if region_open { "▼" } else { "▶" })
+                    .child(if region_open {
+                        "本页原子块 (点击 y 范围可编辑)"
+                    } else {
+                        "本页原子块 (折叠; 展开后可点 y 编辑)"
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.region_panel_open = !this.region_panel_open;
+                            cx.notify();
+                        }),
+                    ),
+            );
+
+        if region_open {
+            let edit_y_input = self.edit_y_input.clone();
+            let editing_rid = self.region_y_edit.clone();
+            let mut list = div()
+                .id("region_list")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .border_1()
+                .border_color(rgb(0xcbd5e1))
+                .rounded_md()
+                .p_1()
+                .bg(rgb(0xffffff));
+            for row in region_rows {
+                let rid = row.id.clone();
+                let rid_sel = row.id.clone();
+                let rid_edit = row.id.clone();
+                let editing = editing_rid.as_ref() == Some(&row.id);
+                let bg = if row.selected {
+                    rgb(0xdbeafe)
+                } else {
+                    rgb(0xffffff)
+                };
+                // 当前页原子块: 拆出可点编辑的 y 范围
+                let pno = self
+                    .doc
+                    .current_page()
+                    .map(|p| self.doc.page_no(&p.id))
+                    .unwrap_or(1);
+                let (y0, y1, kind) = self
+                    .doc
+                    .find_region(&row.id)
+                    .map(|(_, r)| (r.y0, r.y1, r.kind.clone()))
+                    .unwrap_or((0, 0, String::new()));
+                let h = y1 - y0 + 1;
+                let kind_pfx = format!("P{pno} {kind}  ");
+                let y_label = format!("y={y0}-{y1}");
+                let h_label = format!("  h={h}");
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("reg-{rid}")))
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(bg)
+                        .text_sm()
+                        .text_color(rgb(row.color))
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .whitespace_nowrap()
+                                .child(kind_pfx)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                        if this.region_y_edit.is_some() {
+                                            this.apply_edit_y(window, cx);
+                                        }
+                                        this.doc.click_region(&rid_sel, ev.modifiers.control);
+                                        this.after_doc_change(cx);
+                                    }),
+                                ),
+                        )
+                        .child(if editing {
+                            div()
+                                .id(SharedString::from(format!("reg-y-edit-{rid}")))
+                                .w(px(110.))
+                                .h(px(24.))
+                                .flex_shrink_0()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|_, _, _, cx| {
+                                        cx.stop_propagation();
+                                    }),
+                                )
+                                .child(edit_y_input.clone())
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id(SharedString::from(format!("reg-y-{rid}")))
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
+                                .px_1()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                                .child(y_label)
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.begin_edit_y(rid_edit.clone(), window, cx);
+                                    }),
+                                )
+                                .into_any_element()
+                        })
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .whitespace_nowrap()
+                                .child(h_label)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                        if this.region_y_edit.is_some() {
+                                            this.apply_edit_y(window, cx);
+                                        }
+                                        this.doc.click_region(&rid, ev.modifiers.control);
+                                        this.after_doc_change(cx);
+                                    }),
+                                ),
+                        ),
+                );
+            }
+            panel = panel.child(
+                self.attach_scrollbars(
+                    "region_scroll_wrap".into(),
+                    ScrollList::Region,
+                    &self.region_scroll,
+                    list,
+                    cx,
+                )
+                .flex_1()
+                .min_h(px(0.)),
+            );
+        }
+
+        panel = panel
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("输出组合 (全局; 按首块所在页+ y 排序; 可跨页)"),
+            );
+
+        let mut glist = div()
+            .id("group_list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .border_1()
+            .border_color(rgb(0xcbd5e1))
+            .rounded_md()
+            .p_1()
+            .bg(rgb(0xffffff));
+        for row in group_rows {
+            let gid = row.id.clone();
+            let bg = if row.selected {
+                rgb(0xdbeafe)
+            } else {
+                rgb(0xffffff)
+            };
+            glist = glist.child(
+                div()
+                    .id(SharedString::from(format!("grp-{gid}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(bg)
+                    .text_xs()
+                    .text_color(rgb(0x0f172a))
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .child(row.label)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.doc.select_group(&gid);
+                            this.refresh_render(cx);
+                        }),
+                    ),
+            );
+        }
+        panel = panel
+            .child(
+                self.attach_scrollbars(
+                    "group_scroll_wrap".into(),
+                    ScrollList::Group,
+                    &self.group_scroll,
+                    glist,
+                    cx,
+                )
+                .flex_1()
+                .min_h(px(0.)),
+            )
+            .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("当前组合内成员 (拖拽调序; 可含多页)"),
+        );
+
+        let mut mlist = div()
+            .id("member_list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .border_1()
+            .border_color(rgb(0xcbd5e1))
+            .rounded_md()
+            .p_1()
+            .bg(rgb(0xffffff));
+        let drag_from = match &self.drag {
+            Some(DragKind::MemberReorder {
+                from, armed: true, ..
+            }) => Some(*from),
+            _ => None,
+        };
+        let (line_at, line_after) = match &self.drag {
+            Some(DragKind::MemberReorder {
+                line_at,
+                line_after,
+                armed: true,
+                ..
+            }) => (*line_at, *line_after),
+            _ => (None, false),
+        };
+        for (i, row) in member_rows.iter().enumerate() {
+            let idx = i;
+            let rid = row.id.clone();
+            let dragging = drag_from == Some(idx);
+            let show_line = line_at == Some(idx);
+            mlist = mlist.child(
+                div()
+                    .id(SharedString::from(format!("mem-{rid}")))
+                    .relative()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0xffffff))
+                    .text_sm()
+                    .text_color(rgb(row.color))
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .when(dragging, |d| d.opacity(0.35))
+                    .when(show_line && !line_after, |d| {
+                        d.border_t_2().border_color(rgb(0xf59e0b))
+                    })
+                    .when(show_line && line_after, |d| {
+                        d.border_b_2().border_color(rgb(0xf59e0b))
+                    })
+                    .child(Self::measure_item_bounds(cx.entity(), idx, false))
+                    .child(row.label.clone())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let mx = f32::from(ev.position.x);
+                            let my = f32::from(ev.position.y);
+                            let (ox, oy) =
+                                Self::item_origin(this.member_bounds.get(&idx), mx, my);
+                            this.drag = Some(DragKind::MemberReorder {
+                                from: idx,
+                                to: idx,
+                                line_at: None,
+                                line_after: false,
+                                start_x: mx,
+                                start_y: my,
+                                origin_x: ox,
+                                origin_y: oy,
+                                x: mx,
+                                y: my,
+                                armed: false,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                        if let Some(DragKind::MemberReorder {
+                            from,
+                            start_x,
+                            start_y,
+                            origin_x,
+                            origin_y,
+                            mut armed,
+                            ..
+                        }) = this.drag.take()
+                        {
+                            let x = f32::from(ev.position.x);
+                            let y = f32::from(ev.position.y);
+                            if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                                armed = true;
+                            }
+                            let (to, line_at, line_after) = if armed {
+                                this.resolve_member_drop(from, x, y)
+                            } else {
+                                (from, None, false)
+                            };
+                            this.drag = Some(DragKind::MemberReorder {
+                                from,
+                                to,
+                                line_at,
+                                line_after,
+                                start_x,
+                                start_y,
+                                origin_x,
+                                origin_y,
+                                x,
+                                y,
+                                armed,
+                            });
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
+        panel = panel.child(
+            self.attach_scrollbars(
+                "member_scroll_wrap".into(),
+                ScrollList::Member,
+                &self.member_scroll,
+                mlist,
+                cx,
+            )
+            .flex_1()
+            .min_h(px(0.)),
+        );
+
+        // params (底部固定)
+        let param_input = self.param_input.clone();
+        let editing_margin = self.param_edit == Some(ParamEdit::Margin);
+        let editing_thr = self.param_edit == Some(ParamEdit::Threshold);
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .flex_shrink_0()
+                .text_sm()
+                .child("边距px")
+                .child(
+                    div()
+                        .id("margin_dec")
+                        .px_2()
+                        .bg(rgb(0xe2e8f0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .child("-")
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                if this.param_edit.is_some() {
+                                    this.apply_param_edit(window, cx);
+                                }
+                                this.doc.margin = (this.doc.margin - 1).max(0);
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(if editing_margin {
+                    div()
+                        .id("margin_edit")
+                        .w(px(56.))
+                        .h(px(24.))
+                        .flex_shrink_0()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(param_input.clone())
+                        .into_any_element()
+                } else {
+                    div()
+                        .id("margin_val")
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .px_1()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                        .child(format!("{margin}"))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.begin_param_edit(ParamEdit::Margin, window, cx);
+                            }),
+                        )
+                        .into_any_element()
+                })
+                .child(
+                    div()
+                        .id("margin_inc")
+                        .px_2()
+                        .bg(rgb(0xe2e8f0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .child("+")
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                if this.param_edit.is_some() {
+                                    this.apply_param_edit(window, cx);
+                                }
+                                this.doc.margin = (this.doc.margin + 1).min(80);
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child("墨迹阈值")
+                .child(
+                    div()
+                        .id("thr_dec")
+                        .px_2()
+                        .bg(rgb(0xe2e8f0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .child("-")
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                if this.param_edit.is_some() {
+                                    this.apply_param_edit(window, cx);
+                                }
+                                this.doc.ink_threshold = (this.doc.ink_threshold - 1).max(1);
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(if editing_thr {
+                    div()
+                        .id("thr_edit")
+                        .w(px(56.))
+                        .h(px(24.))
+                        .flex_shrink_0()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(param_input)
+                        .into_any_element()
+                } else {
+                    div()
+                        .id("thr_val")
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .px_1()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                        .child(format!("{thr}"))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.begin_param_edit(ParamEdit::Threshold, window, cx);
+                            }),
+                        )
+                        .into_any_element()
+                })
+                .child(
+                    div()
+                        .id("thr_inc")
+                        .px_2()
+                        .bg(rgb(0xe2e8f0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .child("+")
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                if this.param_edit.is_some() {
+                                    this.apply_param_edit(window, cx);
+                                }
+                                this.doc.ink_threshold = (this.doc.ink_threshold + 1).min(254);
+                                cx.notify();
+                            }),
+                        ),
+                ),
+        );
+        panel
+    }
+
+    fn dialog_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(ref dlg) = self.dialog else {
+            return div().into_any_element();
+        };
+        let (title, body) = match dlg {
+            DialogKind::Help => ("操作说明".to_string(), HELP_TEXT.to_string()),
+            DialogKind::Info { title, body } => (title.clone(), body.clone()),
+        };
+        let body_el = div()
+            .id("dlg_body")
+            .text_sm()
+            .text_color(rgb(0x334155))
+            .whitespace_normal()
+            .child(body);
+
+        div()
+            .id("dialog_backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000080))
+            // 阻断背后命中; move/up 留给本层处理 Help 滚动条拖动
+            .occlude()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                    this.apply_scrollbar_drag(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                }
+                cx.stop_propagation();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                        this.drag = None;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .id("dialog_card")
+                    .w(px(520.))
+                    .h(px(520.))
+                    .max_h(px(520.))
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .overflow_hidden()
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        self.attach_scrollbars(
+                            "help_scroll_wrap".into(),
+                            ScrollList::Help,
+                            &self.help_scroll,
+                            body_el,
+                            cx,
+                        )
+                        .flex_1()
+                        .min_h(px(0.)),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .child(self.btn(
+                                "dlg_ok",
+                                "确定",
+                                true,
+                                |this, _, cx| {
+                                    this.dialog = None;
+                                    cx.notify();
+                                },
+                                cx,
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn tab_context_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(ref menu) = self.tab_menu else {
+            return div().into_any_element();
+        };
+        let idx = menu.page_index;
+        let x = menu.x;
+        let y = menu.y;
+        div()
+            .id("tab-ctx-backdrop")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.tab_menu = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.tab_menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("tab-ctx-menu")
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .min_w(px(148.))
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("tab-ctx-copy")
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xdbeafe)))
+                            .child("复制本页")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.tab_menu = None;
+                                    this.copy_page(idx, cx);
+                                }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+impl Focusable for ScoreSyncApp {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for ScoreSyncApp {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let title: SharedString = if let Some(page) = self.doc.current_page() {
+            format!(
+                "曲谱同步 — [{}/{}] {}",
+                self.doc.current_page_index + 1,
+                self.doc.pages.len(),
+                page.title()
+            )
+            .into()
+        } else {
+            "曲谱同步 / Score Sync".into()
+        };
+
+        // A4-ish: side panel fixed; left takes rest (ratio used as min width hint)
+        let _ = A4_RATIO;
+        let mask_mode = self.side_tool == SideTool::Mask;
+        let focus = if mask_mode {
+            self.mask_tool.read(cx).focus_handle_ref().clone()
+        } else {
+            self.focus_handle.clone()
+        };
+        let key_ctx = if mask_mode { "MaskTool" } else { "ScoreSync" };
+
+        div()
+            .id("root")
+            .key_context(key_ctx)
+            .track_focus(&focus)
+            .relative()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    // 点输入框外自动保存边距/墨迹阈值/原子块 y
+                    if this.param_edit.is_some() {
+                        this.apply_param_edit(window, cx);
+                    }
+                    if this.region_y_edit.is_some() {
+                        this.apply_edit_y(window, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                let x = f32::from(ev.position.x);
+                let y = f32::from(ev.position.y);
+                // Help 打开时仍允许拖 Help 滚动条; 其它拖拽一律忽略
+                if this.dialog.is_some() {
+                    if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                        this.apply_scrollbar_drag(x, y, cx);
+                    }
+                    return;
+                }
+                match this.drag {
+                    Some(DragKind::Scrollbar { .. }) => {
+                        this.apply_scrollbar_drag(x, y, cx);
+                    }
+                    Some(DragKind::SideResize { .. }) => {
+                        this.apply_side_resize(x, cx);
+                    }
+                    Some(DragKind::TabHScroll { grab }) => {
+                        let handle = this.tab_scroll.clone();
+                        let b = handle.bounds();
+                        let max = f32::from(handle.max_offset().width);
+                        if max > 0.5 {
+                            let tw = f32::from(b.size.width).max(1.0);
+                            let thumb = ((tw * tw) / (tw + max)).clamp(24.0, tw);
+                            let travel = (tw - thumb).max(1.0);
+                            let track_left = f32::from(b.origin.x);
+                            let thumb_left = (x - grab - track_left).clamp(0.0, travel);
+                            handle.set_offset(point(px(-(thumb_left / travel) * max), px(0.)));
+                            cx.notify();
+                        }
+                    }
+                    Some(DragKind::TabReorder {
+                        from,
+                        start_x,
+                        start_y,
+                        origin_x,
+                        origin_y,
+                        mut armed,
+                        ..
+                    }) => {
+                        if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                            armed = true;
+                        }
+                        let (to, line_at, line_after) = if armed {
+                            this.resolve_tab_drop(from, x, y)
+                        } else {
+                            (from, None, false)
+                        };
+                        this.drag = Some(DragKind::TabReorder {
+                            from,
+                            to,
+                            line_at,
+                            line_after,
+                            start_x,
+                            start_y,
+                            origin_x,
+                            origin_y,
+                            x,
+                            y,
+                            armed,
+                        });
+                        cx.notify();
+                    }
+                    Some(DragKind::MemberReorder {
+                        from,
+                        start_x,
+                        start_y,
+                        origin_x,
+                        origin_y,
+                        mut armed,
+                        ..
+                    }) => {
+                        if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                            armed = true;
+                        }
+                        let (to, line_at, line_after) = if armed {
+                            this.resolve_member_drop(from, x, y)
+                        } else {
+                            (from, None, false)
+                        };
+                        this.drag = Some(DragKind::MemberReorder {
+                            from,
+                            to,
+                            line_at,
+                            line_after,
+                            start_x,
+                            start_y,
+                            origin_x,
+                            origin_y,
+                            x,
+                            y,
+                            armed,
+                        });
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.dialog.is_some() {
+                        if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                            this.drag = None;
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    match this.drag {
+                        Some(DragKind::TabReorder { .. })
+                        | Some(DragKind::MemberReorder { .. })
+                        | Some(DragKind::Scrollbar { .. })
+                        | Some(DragKind::SideResize { .. })
+                        | Some(DragKind::TabHScroll { .. }) => {}
+                        _ => return,
+                    }
+                    match this.drag.take() {
+                        Some(DragKind::TabReorder {
+                            from, to, armed, ..
+                        }) => {
+                            if armed && from != to {
+                                this.doc.move_page(from, to);
+                                this.after_doc_change(cx);
+                            } else {
+                                cx.notify();
+                            }
+                        }
+                        Some(DragKind::MemberReorder {
+                            from, to, armed, ..
+                        }) => {
+                            if armed && from != to {
+                                let Some(g) = this.doc.active_group() else {
+                                    cx.notify();
+                                    return;
+                                };
+                                let mut ids = g.region_ids.clone();
+                                if from < ids.len() && to < ids.len() {
+                                    let item = ids.remove(from);
+                                    ids.insert(to, item);
+                                    this.doc.reorder_active_members(ids);
+                                    this.after_doc_change(cx);
+                                } else {
+                                    cx.notify();
+                                }
+                            } else {
+                                cx.notify();
+                            }
+                        }
+                        Some(
+                            DragKind::Scrollbar { .. }
+                            | DragKind::SideResize { .. }
+                            | DragKind::TabHScroll { .. },
+                        ) => {
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }),
+            )
+            .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
+                this.open_project(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SaveProject, window, cx| {
+                this.save_project(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SaveProjectAs, window, cx| {
+                this.save_project_as(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DetectPage, _, cx| this.run_detect(cx)))
+            .on_action(cx.listener(|this, _: &DetectAll, _, cx| this.run_detect_all(cx)))
+            .on_action(cx.listener(|this, _: &ToggleAddBlock, _, cx| this.toggle_add_block(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSplitBlock, _, cx| {
+                this.toggle_split_block(cx)
+            }))
+            .on_action(cx.listener(|this, _: &MergeSelected, _, cx| this.merge_selected(cx)))
+            .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
+                this.delete_selected(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExportGroups, window, cx| {
+                this.export_groups_ui(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResetGroups, _, cx| this.reset_groups(cx)))
+            .on_action(cx.listener(|this, _: &FitView, _, cx| this.fit_to_view(cx)))
+            .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
+            .on_action(cx.listener(|this, _: &ShareIntoGroup, _, cx| {
+                this.share_into_group(cx)
+            }))
+            .on_action(cx.listener(|this, _: &UngroupActive, _, cx| {
+                this.ungroup_active(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ConfirmParamEdit, window, cx| {
+                if this.param_edit.is_some() {
+                    this.apply_param_edit(window, cx);
+                } else if this.region_y_edit.is_some() {
+                    this.apply_edit_y(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CancelParamEdit, window, cx| {
+                if this.param_edit.is_some() {
+                    this.cancel_param_edit(window, cx);
+                } else if this.region_y_edit.is_some() {
+                    this.cancel_edit_y(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::OpenFile, window, cx| {
+                this.mask_tool.update(cx, |m, cx| m.open_file(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::ExportImage, window, cx| {
+                this.mask_tool.update(cx, |m, cx| m.export_image(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::FitView, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.fit_to_view(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::DeleteSelected, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.delete_selected(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::ClearMasks, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.clear_masks(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::SelectAll, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.select_all_masks(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::ToggleDrawMode, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.toggle_draw_mode(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::TogglePanMode, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.toggle_pan_mode(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::Undo, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.undo(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::Redo, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.redo(cx));
+            }))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                let list: Vec<PathBuf> = paths
+                    .paths()
+                    .iter()
+                    .filter(|p| is_open_path(p) || is_project_path(p))
+                    .cloned()
+                    .collect();
+                if !list.is_empty() {
+                    this.load_paths(list, cx);
+                }
+            }))
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(0xf8fafc))
+            .text_color(rgb(0x0f172a))
+            .font_family("Microsoft YaHei UI")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .border_b_1()
+                    .border_color(rgb(0xcbd5e1))
+                    .bg(rgb(0xf1f5f9))
+                    .child(
+                        div()
+                            .px_3()
+                            .pt_2()
+                            .pb_1()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x0f172a))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .pb_1()
+                            .child(self.toolbar(cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(self.left_workspace(cx))
+                    .child(
+                        div()
+                            .id("side_split")
+                            .w(px(5.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .cursor(CursorStyle::ResizeColumn)
+                            .bg(rgb(0xcbd5e1))
+                            .hover(|s| s.bg(rgb(0x94a3b8)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                    this.drag = Some(DragKind::SideResize {
+                                        start_x: f32::from(ev.position.x),
+                                        start_w: this.side_width,
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(self.right_workspace(cx)),
+            )
+            .child(self.dialog_overlay(cx))
+            .child(self.tab_context_menu_overlay(cx))
+            .child(self.tab_drag_ghost())
+            .child(self.member_drag_ghost())
+    }
+}
+
+pub fn run_gui(initial: Vec<PathBuf>) {
+    Application::new().run(move |cx: &mut App| {
+        text_input::bind_keys(cx);
+        apply_bg::text_input::bind_keys(cx);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-o", OpenFile, Some("ScoreSync")),
+            KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreSync")),
+            KeyBinding::new("ctrl-s", SaveProject, Some("ScoreSync")),
+            KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("ScoreSync")),
+            KeyBinding::new("d", DetectPage, Some("ScoreSync")),
+            KeyBinding::new("a", DetectAll, Some("ScoreSync")),
+            KeyBinding::new("n", ToggleAddBlock, Some("ScoreSync")),
+            KeyBinding::new("s", ToggleSplitBlock, Some("ScoreSync")),
+            KeyBinding::new("m", MergeSelected, Some("ScoreSync")),
+            KeyBinding::new("u", UngroupActive, Some("ScoreSync")),
+            KeyBinding::new("g", ShareIntoGroup, Some("ScoreSync")),
+            KeyBinding::new("e", ExportGroups, Some("ScoreSync")),
+            KeyBinding::new("r", ResetGroups, Some("ScoreSync")),
+            KeyBinding::new("f", FitView, Some("ScoreSync")),
+            KeyBinding::new("h", ShowHelp, Some("ScoreSync")),
+            KeyBinding::new("f1", ShowHelp, Some("ScoreSync")),
+            KeyBinding::new("delete", DeleteSelected, Some("ScoreSync")),
+            KeyBinding::new("backspace", DeleteSelected, Some("ScoreSync")),
+            KeyBinding::new("enter", ConfirmParamEdit, Some("ScoreSync")),
+            KeyBinding::new("escape", CancelParamEdit, Some("ScoreSync")),
+            KeyBinding::new("enter", ConfirmParamEdit, None),
+            KeyBinding::new("escape", CancelParamEdit, None),
+            // 蒙版工具 (右侧切换到蒙版时 key_context=MaskTool)
+            KeyBinding::new("ctrl-o", mask_tool::gui::OpenFile, Some("MaskTool")),
+            KeyBinding::new("ctrl-shift-o", OpenProject, Some("MaskTool")),
+            KeyBinding::new("ctrl-s", SaveProject, Some("MaskTool")),
+            KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("MaskTool")),
+            KeyBinding::new("e", mask_tool::gui::ExportImage, Some("MaskTool")),
+            KeyBinding::new("f", mask_tool::gui::FitView, Some("MaskTool")),
+            KeyBinding::new("delete", mask_tool::gui::DeleteSelected, Some("MaskTool")),
+            KeyBinding::new("backspace", mask_tool::gui::DeleteSelected, Some("MaskTool")),
+            KeyBinding::new("b", mask_tool::gui::ToggleDrawMode, Some("MaskTool")),
+            KeyBinding::new("p", mask_tool::gui::TogglePanMode, Some("MaskTool")),
+            KeyBinding::new("ctrl-a", mask_tool::gui::SelectAll, Some("MaskTool")),
+            KeyBinding::new("ctrl-z", mask_tool::gui::Undo, Some("MaskTool")),
+            KeyBinding::new("ctrl-y", mask_tool::gui::Redo, Some("MaskTool")),
+            KeyBinding::new("ctrl-shift-z", mask_tool::gui::Redo, Some("MaskTool")),
+        ]);
+        let bounds = default_window_bounds(cx);
+        let initial = initial.clone();
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("曲谱同步 / Score Sync".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            move |window, cx| {
+                cx.new(|cx| {
+                    let app = ScoreSyncApp::new(cx, initial.clone());
+                    app.focus_handle.focus(window);
+                    app
+                })
+            },
+        )
+        .unwrap();
+        cx.activate(true);
+    });
+}
+
+/// 首选尺寸夹紧到主屏内并留边距, 保证四边都在屏幕内.
+fn default_window_bounds(cx: &App) -> Bounds<Pixels> {
+    const PREF_W: f32 = 1400.;
+    const PREF_H: f32 = 920.;
+    const MARGIN: f32 = 56.;
+    const MIN_W: f32 = 720.;
+    const MIN_H: f32 = 480.;
+
+    let (avail_w, avail_h) = cx
+        .primary_display()
+        .map(|d| {
+            let b = d.bounds();
+            (f32::from(b.size.width), f32::from(b.size.height))
+        })
+        .unwrap_or((PREF_W, PREF_H));
+
+    let max_w = (avail_w - MARGIN * 2.).max(MIN_W.min(avail_w));
+    let max_h = (avail_h - MARGIN * 2.).max(MIN_H.min(avail_h));
+    let w = PREF_W.min(max_w).clamp(1., avail_w.max(1.));
+    let h = PREF_H.min(max_h).clamp(1., avail_h.max(1.));
+    Bounds::centered(None, size(px(w), px(h)), cx)
+}
+

@@ -1,0 +1,31 @@
+[package]
+name = "score_sync"
+version = "0.1.0"
+edition = "2021"
+description = "方便曲谱同步一条龙制作的 Rust GPUI 工具"
+license = "MIT"
+
+[dependencies]
+async-channel = "2"
+clap = { version = "4", features = ["derive"] }
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
+mask_tool = { path = "crates/mask_tool" }
+apply_bg = { path = "crates/apply_bg" }
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_6406", "image", "thread_safe"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+unicode-segmentation = "1"
+uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

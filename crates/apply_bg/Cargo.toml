@@ -1,0 +1,23 @@
+[package]
+name = "apply_bg"
+version = "0.1.0"
+edition = "2021"
+description = "谱面加底色并裁成 2560:1440 (rayon + GPUI)"
+
+[dependencies]
+async-channel = "2"
+clap = { version = "4", features = ["derive"] }
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
+rayon = "1.10"
+rfd = "0.15"
+unicode-segmentation = "1"
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
