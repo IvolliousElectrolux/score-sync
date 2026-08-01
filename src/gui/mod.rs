@@ -273,6 +273,8 @@ struct ScoreSyncApp {
     member_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 当前工程文件路径 (Ctrl+S 覆盖保存)
     project_path: Option<PathBuf>,
+    /// 后台保存进行中, 避免重复触发
+    saving: bool,
 }
 
 impl ScoreSyncApp {
@@ -320,6 +322,7 @@ impl ScoreSyncApp {
             tab_bounds: HashMap::new(),
             member_bounds: HashMap::new(),
             project_path: None,
+            saving: false,
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -938,22 +941,61 @@ impl ScoreSyncApp {
     }
 
     fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.flush_mask_to_doc(cx);
-        match project::save_project(&self.doc, &path) {
-            Ok(saved) => {
-                self.project_path = Some(saved.clone());
-                self.status = format!("工程已保存: {}", saved.display()).into();
-                self.hint = self.status.clone();
-                cx.notify();
-            }
-            Err(e) => {
-                self.dialog = Some(DialogKind::Info {
-                    title: "保存工程失败".into(),
-                    body: e,
-                });
-                cx.notify();
-            }
+        if self.saving {
+            self.status = "正在保存工程, 请稍候…".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
         }
+        if self.doc.pages.is_empty() {
+            self.dialog = Some(DialogKind::Info {
+                title: "提示".into(),
+                body: "当前没有可保存的页面.".into(),
+            });
+            cx.notify();
+            return;
+        }
+        self.flush_mask_to_doc(cx);
+        self.saving = true;
+        self.status = "正在保存工程…".into();
+        self.hint = self.status.clone();
+        cx.notify();
+
+        // 快照后放到后台做 PNG/zip, 避免卡住 UI
+        let doc = self.doc.clone();
+        let (tx, rx) = async_channel::bounded::<Result<PathBuf, String>>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(project::save_project(&doc, &path));
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = rx.recv().await;
+            this.update(cx, |view, cx| {
+                view.saving = false;
+                match result {
+                    Ok(Ok(saved)) => {
+                        view.project_path = Some(saved.clone());
+                        view.status = format!("工程已保存: {}", saved.display()).into();
+                        view.hint = view.status.clone();
+                    }
+                    Ok(Err(e)) => {
+                        view.dialog = Some(DialogKind::Info {
+                            title: "保存工程失败".into(),
+                            body: e,
+                        });
+                    }
+                    Err(_) => {
+                        view.dialog = Some(DialogKind::Info {
+                            title: "保存工程失败".into(),
+                            body: "后台保存通道已关闭.".into(),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn fit_to_view(&mut self, cx: &mut Context<Self>) {

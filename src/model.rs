@@ -114,7 +114,7 @@ pub fn parse_color_hex(s: &str) -> u32 {
 }
 
 /// 应用级文档状态 (页 / 组 / 选中).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DocState {
     pub pages: Vec<Page>,
     pub groups: Vec<Group>,
