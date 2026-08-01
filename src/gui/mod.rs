@@ -275,6 +275,8 @@ struct ScoreSyncApp {
     project_path: Option<PathBuf>,
     /// 后台保存进行中, 避免重复触发
     saving: bool,
+    /// 后台打开工程进行中
+    opening: bool,
 }
 
 impl ScoreSyncApp {
@@ -323,6 +325,7 @@ impl ScoreSyncApp {
             member_bounds: HashMap::new(),
             project_path: None,
             saving: false,
+            opening: false,
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -862,44 +865,79 @@ impl ScoreSyncApp {
     }
 
     fn open_project_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.flush_mask_to_doc(cx);
-        match project::load_project(&path) {
-            Ok(doc) => {
-                self.doc = doc;
-                self.project_path = Some(path.clone());
-                self.drag = None;
-                self.dialog = None;
-                self.tab_menu = None;
-                self.param_edit = None;
-                self.region_y_edit = None;
-                self.side_tool = SideTool::Crop;
-                self.canvas_tool = CanvasTool::Normal;
-                self.mask_target = None;
-                self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
-                self.user_zoomed = false;
-                self.zoom = 1.0;
-                self.pan = point(0.0, 0.0);
-                self.refresh_render(cx);
-                self.status = format!(
-                    "已打开工程: {} ({} 页, {} 组)",
-                    path.file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("project"),
-                    self.doc.pages.len(),
-                    self.doc.groups.len()
-                )
-                .into();
-                self.hint = self.status.clone();
-                cx.notify();
-            }
-            Err(e) => {
-                self.dialog = Some(DialogKind::Info {
-                    title: "打开工程失败".into(),
-                    body: e,
-                });
-                cx.notify();
-            }
+        if self.opening || self.saving {
+            self.status = "工程读写进行中, 请稍候…".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
         }
+        self.flush_mask_to_doc(cx);
+        self.opening = true;
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+        self.status = format!("正在打开工程: {name}…").into();
+        self.hint = self.status.clone();
+        cx.notify();
+
+        let path_bg = path.clone();
+        let (tx, rx) = async_channel::bounded::<Result<DocState, String>>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(project::load_project(&path_bg));
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = rx.recv().await;
+            this.update(cx, |view, cx| {
+                view.opening = false;
+                match result {
+                    Ok(Ok(doc)) => {
+                        view.doc = doc;
+                        view.project_path = Some(path.clone());
+                        view.drag = None;
+                        view.dialog = None;
+                        view.tab_menu = None;
+                        view.param_edit = None;
+                        view.region_y_edit = None;
+                        view.side_tool = SideTool::Crop;
+                        view.canvas_tool = CanvasTool::Normal;
+                        view.mask_target = None;
+                        view.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+                        view.user_zoomed = false;
+                        view.zoom = 1.0;
+                        view.pan = point(0.0, 0.0);
+                        view.refresh_render(cx);
+                        view.status = format!(
+                            "已打开工程: {} ({} 页, {} 组)",
+                            path.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("project"),
+                            view.doc.pages.len(),
+                            view.doc.groups.len()
+                        )
+                        .into();
+                        view.hint = view.status.clone();
+                    }
+                    Ok(Err(e)) => {
+                        view.dialog = Some(DialogKind::Info {
+                            title: "打开工程失败".into(),
+                            body: e,
+                        });
+                    }
+                    Err(_) => {
+                        view.dialog = Some(DialogKind::Info {
+                            title: "打开工程失败".into(),
+                            body: "后台打开通道已关闭.".into(),
+                        });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn save_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -941,8 +979,8 @@ impl ScoreSyncApp {
     }
 
     fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.saving {
-            self.status = "正在保存工程, 请稍候…".into();
+        if self.saving || self.opening {
+            self.status = "工程读写进行中, 请稍候…".into();
             self.hint = self.status.clone();
             cx.notify();
             return;
