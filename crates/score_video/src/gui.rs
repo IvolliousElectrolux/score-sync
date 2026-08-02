@@ -2025,6 +2025,38 @@ impl ScoreVideoApp {
             .items_center()
             .justify_center()
             .bg(rgba(0x00000099))
+            // 与宿主 Help 弹窗一致: 挡住背后命中, 背景静态不接收事件.
+            .occlude()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .w(px(440.))
