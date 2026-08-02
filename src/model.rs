@@ -7,6 +7,7 @@ use image::RgbImage;
 
 use crate::staff_detect::{detect_bands, Band};
 use mask_tool::mask::MaskRect;
+use score_video::model::TimelineSnapshot;
 
 pub const COLORS: &[&str] = &[
     "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22",
@@ -127,6 +128,18 @@ pub struct DocState {
     pub group_masks: HashMap<String, Vec<MaskRect>>,
     /// 蒙版白色不透明度
     pub mask_opacity: f32,
+    /// 用户已手动拖拽调序「输出组合」; 为 true 时不再自动按页/y 排序
+    pub groups_manual_order: bool,
+    /// 工程级底色层 (底层); 不改写页图, 导出/终稿合成时才叠上
+    pub bg_enabled: bool,
+    pub bg_image: Option<RgbImage>,
+    /// 仅用于 UI 显示来源路径
+    pub bg_source_path: Option<PathBuf>,
+    pub bg_aspect_w: u32,
+    pub bg_aspect_h: u32,
+    /// 视频面板时间轴的纯数据快照 (实际编辑态在 `score_video::ScoreVideoApp`
+    /// 里, 这里只是保存/载入工程时的中转载体).
+    pub video_state: TimelineSnapshot,
 }
 
 impl DocState {
@@ -135,6 +148,8 @@ impl DocState {
             margin: 20,
             ink_threshold: 200,
             mask_opacity: 0.72,
+            bg_aspect_w: 2560,
+            bg_aspect_h: 1440,
             ..Default::default()
         }
     }
@@ -202,6 +217,73 @@ impl DocState {
         Some(combined)
     }
 
+    /// 启用工程底色层 (底层). 不修改页图 / 蒙版.
+    pub fn set_project_bg(
+        &mut self,
+        image: RgbImage,
+        source: Option<PathBuf>,
+        aspect_w: u32,
+        aspect_h: u32,
+    ) -> Result<(), String> {
+        if aspect_w == 0 || aspect_h == 0 {
+            return Err("比例宽高必须为正整数".into());
+        }
+        self.bg_image = Some(image);
+        self.bg_source_path = source;
+        self.bg_aspect_w = aspect_w;
+        self.bg_aspect_h = aspect_h;
+        self.bg_enabled = true;
+        Ok(())
+    }
+
+    /// 取消工程底色层.
+    pub fn clear_project_bg(&mut self) {
+        self.bg_enabled = false;
+        self.bg_image = None;
+        self.bg_source_path = None;
+    }
+
+    /// 拼合图预览 (供蒙版/视频面板显示): 若已启用工程底色, 叠加底色预览
+    /// (仅在需要补边时改变画布高度, 不烧入蒙版). 返回 (预览图, 谱面在预览图
+    /// 中的纵向偏移量, 供调用方换算蒙版坐标).
+    pub fn compose_group_preview(&self, group_id: &str) -> Option<(RgbImage, i64)> {
+        let sheet = self.compose_group(group_id)?;
+        if !self.bg_enabled {
+            return Some((sheet, 0));
+        }
+        let Some(bg) = self.bg_image.as_ref() else {
+            return Some((sheet, 0));
+        };
+        match apply_bg::process::composite_preview(&sheet, bg, self.bg_aspect_w, self.bg_aspect_h)
+        {
+            Ok((canvas, voff)) => Some((canvas, voff)),
+            Err(_) => Some((sheet, 0)),
+        }
+    }
+
+    /// 终稿合成: 拼合 → 蒙版 → (可选) 底色底层裁切.
+    pub fn render_group_final(&self, group_id: &str) -> Result<Option<RgbImage>, String> {
+        let Some(mut combined) = self.compose_group(group_id) else {
+            return Ok(None);
+        };
+        let masks = self.get_group_masks(group_id);
+        if !masks.is_empty() {
+            mask_tool::mask::apply_masks_rgb(&mut combined, masks, self.mask_opacity);
+        }
+        if self.bg_enabled {
+            let Some(bg) = self.bg_image.as_ref() else {
+                return Err("已启用底色但缺少底色图".into());
+            };
+            combined = apply_bg::process::composite_and_crop(
+                &combined,
+                bg,
+                self.bg_aspect_w,
+                self.bg_aspect_h,
+            )?;
+        }
+        Ok(Some(combined))
+    }
+
     pub fn current_page(&self) -> Option<&Page> {
         self.pages.get(self.current_page_index)
     }
@@ -261,6 +343,9 @@ impl DocState {
     }
 
     pub fn sort_groups(&mut self) {
+        if self.groups_manual_order {
+            return;
+        }
         // Need keys first to avoid borrow issues
         let mut keyed: Vec<(usize, (usize, i32, i32))> = self
             .groups
@@ -282,6 +367,16 @@ impl DocState {
             ));
         }
         self.groups = new_groups;
+    }
+
+    /// 拖拽调序输出组合; 之后保留用户顺序直到重新识别重建分组.
+    pub fn reorder_groups(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.groups.len() || to >= self.groups.len() {
+            return;
+        }
+        let g = self.groups.remove(from);
+        self.groups.insert(to, g);
+        self.groups_manual_order = true;
     }
 
     pub fn sync_group_colors(&mut self) {
@@ -413,6 +508,7 @@ impl DocState {
                 .difference(&old_ids)
                 .cloned()
                 .collect();
+            self.groups_manual_order = false;
             self.sort_groups();
             self.ensure_active_group();
         }
@@ -459,6 +555,7 @@ impl DocState {
             });
         }
         self.groups = new_groups;
+        self.groups_manual_order = false;
         self.sort_groups();
         self.ensure_active_group();
     }

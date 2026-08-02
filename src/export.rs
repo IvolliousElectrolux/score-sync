@@ -1,8 +1,6 @@
-//! 按组合裁切并竖向拼接导出 (含组合拼合图上的蒙版).
+//! 按组合裁切并竖向拼接导出 (含蒙版 + 可选工程底色层).
 
 use std::path::{Path, PathBuf};
-
-use mask_tool::mask::apply_masks_rgb;
 
 use crate::model::DocState;
 
@@ -29,14 +27,9 @@ pub fn export_groups(doc: &DocState, out_dir: &Path) -> Result<(usize, PathBuf),
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
     let mut saved = 0usize;
     for (i, g) in doc.groups.iter().enumerate() {
-        let Some(mut combined) = doc.compose_group(&g.id) else {
+        let Some(combined) = doc.render_group_final(&g.id)? else {
             continue;
         };
-        // 蒙版坐标相对本组拼合图; 各组合独立 (共享脚注可在不同组画不同蒙版)
-        let masks = doc.get_group_masks(&g.id);
-        if !masks.is_empty() {
-            apply_masks_rgb(&mut combined, masks, doc.mask_opacity);
-        }
         let name = format!("{stem}_g{:02}.png", i + 1);
         let path = out_dir.join(&name);
         combined

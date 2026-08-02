@@ -158,6 +158,49 @@ pub fn composite_and_crop(
     Ok(canvas)
 }
 
+/// 谱面居中叠底色的"预览"版本 (蒙版/视频面板用): 不做最终裁切, 只在目标比例
+/// 需要比谱面更高的画布时, 于上下补出底色, 让预览与最终导出的底色效果趋近一致;
+/// 若目标比例会裁边 (裁切高度 <= 谱面高度) 则直接返回原图, 不改变画布尺寸,
+/// 从而保证蒙版坐标系与 `compose_group` 输出保持一致 (宽度始终等于谱面宽度).
+/// 返回 (预览图, 谱面在预览图中的纵向偏移量).
+pub fn composite_preview(
+    sheet: &RgbImage,
+    bg: &RgbImage,
+    aspect_w: u32,
+    aspect_h: u32,
+) -> Result<(RgbImage, i64), String> {
+    if aspect_w == 0 || aspect_h == 0 {
+        return Err("比例宽高必须为正整数".into());
+    }
+    let (sw, sh) = sheet.dimensions();
+    let (bw, bh) = bg.dimensions();
+    if bw < sw || bh < sh {
+        return Err(format!("底色 ({bw}x{bh}) 无法完全盖住谱面 ({sw}x{sh})"));
+    }
+
+    let crop_h = ((sw as f64) * (aspect_h as f64) / (aspect_w as f64)).round() as u32;
+    if crop_h <= sh || crop_h > bh {
+        // 会裁边 (或底色不够高无法补边预览): 预览不改变画布, 与拼合图一致.
+        return Ok((sheet.clone(), 0));
+    }
+
+    let ox = ((bw - sw) / 2) as i64;
+    let oy = ((bh - sh) / 2) as i64;
+    let cy = (bh / 2) as i64;
+    let mut top = cy - (crop_h / 2) as i64;
+    if top < 0 {
+        top = 0;
+    }
+    if top + crop_h as i64 > bh as i64 {
+        top = bh as i64 - crop_h as i64;
+    }
+    let voff = oy - top;
+
+    let mut canvas = imageops::crop_imm(bg, ox as u32, top as u32, sw, crop_h).to_image();
+    imageops::overlay(&mut canvas, sheet, 0, voff);
+    Ok((canvas, voff))
+}
+
 fn process_one(
     path: &Path,
     bg: &RgbImage,

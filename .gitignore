@@ -6,3 +6,13 @@ Thumbs.db
 *.staffcrop.files/
 
 **/.tmp*
+
+# ffmpeg / pdfium 不随源码提交 (太大/有各自的版权分发限制): 打包发行版时
+# 把 vendor/ 下这两份手动拷到 exe 同目录即可, 程序会优先找同目录的那份,
+# 找不到再退回系统 PATH.
+/vendor/
+ffmpeg.exe
+pdfium.dll
+
+**/target/
+

@@ -1,20 +1,20 @@
 [package]
-name = "apply_bg"
+name = "score_video"
 version = "1.0.0"
 edition = "2021"
-description = "谱面加底色并裁成 2560:1440 (rayon + GPUI)"
+description = "谱面同步视频轨道编辑与 ffmpeg 导出 (GPUI)"
 
 [dependencies]
+apply_bg = { path = "../apply_bg" }
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
 gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+hound = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
-rayon = "1.10"
 rfd = "0.15"
-unicode-segmentation = "1"
-
-[build-dependencies]
-embed-resource = "3"
+rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
+smallvec = "1"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 lto = true

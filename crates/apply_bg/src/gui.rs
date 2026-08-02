@@ -108,6 +108,26 @@ impl ApplyBgApp {
         config::save(&self.current_config(cx));
     }
 
+    /// 供宿主读取当前表单: (底色路径, 比例宽, 比例高).
+    pub fn snapshot_params(&self, cx: &App) -> Result<(PathBuf, u32, u32), String> {
+        let bg = self.bg_input.read(cx).text().trim().to_string();
+        if bg.is_empty() {
+            return Err("请先选择底色图片.".into());
+        }
+        let path = PathBuf::from(&bg);
+        if !path.is_file() {
+            return Err(format!("底色不存在: {}", path.display()));
+        }
+        let (w, h) = parse_aspect(&self.aspect_text_from_app(cx))?;
+        Ok((path, w, h))
+    }
+
+    fn aspect_text_from_app(&self, cx: &App) -> String {
+        let w = self.aspect_w_input.read(cx).text().trim().to_string();
+        let h = self.aspect_h_input.read(cx).text().trim().to_string();
+        format!("{w}:{h}")
+    }
+
     fn path_row(
         &self,
         label: &'static str,

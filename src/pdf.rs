@@ -1,7 +1,9 @@
 //! PDF 渲染为临时 PNG (pdfium), 对齐 app.py 的 pdf_pages_to_tmp_images.
 //!
-//! Windows: `pdfium.dll` 已通过 `include_bytes!` 打进可执行文件,
-//! 首次使用时解到本地缓存目录再动态加载. 仍可用环境变量覆盖.
+//! `pdfium` 动态库 (以及 `ffmpeg`) 都不再打进可执行文件, 而是当作外部依赖:
+//! 优先找程序自身同目录下的那份, 找不到再去系统 PATH 里找, 都找不到就报错
+//! 提示用户放一份到 exe 旁边. 也可用环境变量 `PDFIUM_DYNAMIC_LIB_PATH` 强制
+//! 指定路径.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -9,9 +11,6 @@ use std::sync::Mutex;
 use pdfium_render::prelude::*;
 
 const PDF_RENDER_SCALE: f32 = 3.0;
-
-#[cfg(windows)]
-const EMBEDDED_PDFIUM: &[u8] = include_bytes!("../assets/pdfium.dll");
 
 static PDF_TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
@@ -38,47 +37,23 @@ fn lib_name() -> &'static str {
     }
 }
 
-/// 把内嵌的 pdfium 解到可写缓存 (大小或版本戳不一致才重写).
-#[cfg(windows)]
-fn ensure_embedded_pdfium() -> Result<PathBuf, String> {
-    // 与 assets/pdfium.dll 同源: pypdfium2_raw / pdfium-binaries build 6462
-    const STAMP: &str = "6462";
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TEMP").map(PathBuf::from))
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("score_sync").join("pdfium");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 pdfium 缓存目录失败: {e}"))?;
-    let path = dir.join(lib_name());
-    let stamp_path = dir.join(".stamp");
-    let stamp_ok = std::fs::read_to_string(&stamp_path)
-        .map(|s| s.trim() == STAMP)
-        .unwrap_or(false);
-    let size_ok = std::fs::metadata(&path)
-        .map(|meta| meta.len() as usize == EMBEDDED_PDFIUM.len())
-        .unwrap_or(false);
-    if !(stamp_ok && size_ok) {
-        let tmp = dir.join(format!("{}.tmp", lib_name()));
-        std::fs::write(&tmp, EMBEDDED_PDFIUM)
-            .map_err(|e| format!("写出内嵌 pdfium 失败: {e}"))?;
-        std::fs::rename(&tmp, &path)
-            .or_else(|_| {
-                std::fs::copy(&tmp, &path)?;
-                std::fs::remove_file(&tmp)
-            })
-            .map_err(|e| format!("安装内嵌 pdfium 失败: {e}"))?;
-        let _ = std::fs::write(&stamp_path, STAMP);
+/// 在 PATH 环境变量列出的各目录里找 `lib_name()`, 找到就返回完整路径
+/// (和 ffmpeg 那边 `ffmpeg_path()` 的 PATH 兜底是同一个思路, 只是 DLL 不能
+/// 靠 `Command` 让系统自己解析, 得手动扫一遍 PATH).
+fn find_in_path_env() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let name = lib_name();
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
-    Ok(path)
-}
-
-#[cfg(not(windows))]
-fn ensure_embedded_pdfium() -> Result<PathBuf, String> {
-    Err("当前平台未内嵌 pdfium, 请自行安装动态库.".into())
+    None
 }
 
 fn find_pdfium_path() -> Option<PathBuf> {
-    // 1) 环境变量可覆盖
+    // 1) 环境变量可强制指定 (文件或目录都行)
     if let Ok(p) = std::env::var("PDFIUM_DYNAMIC_LIB_PATH") {
         let pb = PathBuf::from(&p);
         if pb.is_file() {
@@ -89,30 +64,25 @@ fn find_pdfium_path() -> Option<PathBuf> {
             return Some(dll);
         }
     }
-    // 2) 优先内嵌 (避免 target/release 旁旧 dll 版本不匹配)
-    if let Ok(p) = ensure_embedded_pdfium() {
-        return Some(p);
-    }
-    // 3) 可执行文件旁兜底
+    // 2) 程序自身同目录下 (发行包自带, 不用另外装)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for candidate in [
-                dir.join(lib_name()),
-                dir.join("pdfium").join(lib_name()),
-            ] {
+            for candidate in [dir.join(lib_name()), dir.join("pdfium").join(lib_name())] {
                 if candidate.is_file() {
                     return Some(candidate);
                 }
             }
         }
     }
-    None
+    // 3) 系统 PATH 里兜底 (兼容已经单独装了 pdfium 的开发环境)
+    find_in_path_env()
 }
 
 fn bind_pdfium() -> Result<Pdfium, String> {
     let path = find_pdfium_path().ok_or_else(|| {
         format!(
-            "无法准备 pdfium 动态库 ({}). 可设置 PDFIUM_DYNAMIC_LIB_PATH 覆盖.",
+            "找不到 {} — 请把它放在程序同目录下, 或安装后加入系统 PATH, \
+             也可设置环境变量 PDFIUM_DYNAMIC_LIB_PATH 指定路径.",
             lib_name()
         )
     })?;
@@ -193,8 +163,20 @@ pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, String> 
 mod tests {
     use super::*;
 
+    /// pdfium 不再内嵌, 测试环境里不一定能找到; 本地在 `vendor/pdfium.dll`
+    /// 放一份就能跑真实校验, 没放就跳过 (CI/新 clone 下这是预期情况, 不算
+    /// 失败).
     #[test]
-    fn bind_embedded_pdfium_ok() {
-        bind_pdfium().expect("应能加载内嵌 pdfium (build 6462 + pdfium_6406 bindings)");
+    fn bind_via_env_override_ok() {
+        let dll = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/pdfium.dll");
+        if !std::path::Path::new(dll).is_file() {
+            eprintln!("跳过: 未找到 {dll} (本地没放 pdfium.dll, 属预期情况)");
+            return;
+        }
+        // SAFETY: 测试单线程内设置一次性环境变量, 供后续 find_pdfium_path 读取.
+        unsafe {
+            std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", dll);
+        }
+        bind_pdfium().expect("应能通过 PDFIUM_DYNAMIC_LIB_PATH 加载 pdfium");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "score_sync"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "方便曲谱同步一条龙制作的 Rust GPUI 工具"
 license = "MIT"
@@ -14,6 +14,7 @@ mask_tool = { path = "crates/mask_tool" }
 apply_bg = { path = "crates/apply_bg" }
 pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_6406", "image", "thread_safe"] }
 rfd = "0.15"
+score_video = { path = "crates/score_video" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"

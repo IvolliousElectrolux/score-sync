@@ -7,6 +7,7 @@ mod tabs;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     actions, canvas, div, point, prelude::*, px, quad, rgb, size, App, Application, Bounds,
@@ -18,6 +19,7 @@ use gpui::{
 use image::{Frame, ImageBuffer, RgbaImage};
 use smallvec::smallvec;
 
+use crate::config;
 use crate::export::export_groups;
 use crate::model::{is_image_path, is_open_path, is_pdf_path, parse_color_hex, DocState};
 use crate::pdf;
@@ -27,7 +29,10 @@ use crate::text_input::{self, TextInput};
 use canvas::{hit_edge, region_at, ViewXform};
 use lists::{ListRow, TabInfo};
 use mask_tool::gui::MaskToolApp;
+use mask_tool::mask::MaskRect;
 use apply_bg::gui::ApplyBgApp;
+use score_video::gui::ScoreVideoApp;
+use score_video::model::MaterialItem;
 
 actions!(
     score_sync,
@@ -70,6 +75,14 @@ const HELP_TEXT: &str = "\
   B 框选 | P 平移 | E 导出本页图片 | F 适应 | Delete 删除选中\n\
   Ctrl+A 全选蒙版 | Ctrl+Z/Y 撤重 | Ctrl+滚轮缩放\n\
 \n\
+【视频】快捷键 (右侧切到视频后, 先在轨道/预览区点一下获得焦点):\n\
+  空格 播放/暂停 | ← / → 快退/快进 1 秒 | Shift+← / Shift+→ 快退/快进 5 秒\n\
+  N 在播放头插入下一张组合 (按素材池顺序自动顺延) | I 标记淡入 | O 标记淡出\n\
+  Delete / Backspace 删除当前选中的视频片段/淡入淡出/音频片段\n\
+  鼠标: 拖动片段两端裁剪, 拖动片段整体移动; 淡入淡出轨道可直接拖选一段生成区间,\n\
+  相邻区间自动吸附; 音频片段可左右拖动重新排序; 轨道区 Ctrl+滚轮缩放、普通滚轮左右平移,\n\
+  底部横条可整体拖动平移, 拖两端圆点改变缩放.\n\
+\n\
 操作步骤:\n\
 1. 打开/拖入图片或 PDF → 多标签页; PDF 会先转到临时 PNG 再按页加载.\n\
 2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续.\n\
@@ -78,14 +91,24 @@ const HELP_TEXT: &str = "\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
 6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
 7. Ctrl 多选可跨页, 「合并组合」; 脚注可用「共享脚注」让同一块出现在多组导出中.\n\
-8. 组顺序按组内第一块的 (页序, y) 自动排序; 组内可拖拽调序.\n\
+8. 「输出组合」可拖拽调序 (导出按此顺序); 未手动调序时按组内首块 (页序, y) 自动排.\n\
 9. 「蒙版」编辑当前组合的竖向拼合图; 蒙版坐标相对拼合图, 各组合独立\n\
    (共享脚注可在不同组画不同遮盖). 标签栏切换组合; 切回分块会定位到对应页并选中该组.\n\
-10. 「导出组合」按分块排序拼接并套用各组蒙版; 蒙版侧「导出本页图片」只导出当前组合.\n\
+10. 「导出组合」按「输出组合」列表顺序拼接并套用各组蒙版; 蒙版侧「导出本页图片」只导出当前组合.\n\
+11. 「工程」页「应用到工程组合」把工程底色作为可撤销的底层异步叠加到各输出组合 (不卡界面),\n\
+    「取消工程底色」还原为两层状态; 蒙版/视频里的预览也会实时带上这层底色.\n\
+12. 「视频」页: 上方预览窗 (悬浮显示可拖动的进度条), 下方视频/淡入淡出/音频三条轨道;\n\
+    右侧素材池按「输出组合」顺序显示, 点击展开该组合的预览, 拖到视频轨道指定位置即可插入;\n\
+    「导入音频」可一次导入多段按顺序播放的音频 (如各乐章分轨); 「分割音频」按下后,\n\
+    在音频轨道上点一下鼠标即可把该处的音频从此切开成两段.\n\
+13. 「导出视频」弹窗: 容器选 MP4 (音频有损 AAC, 兼容性好) 或 MKV (音频无损 FLAC);\n\
+    帧率可直接点击数字修改; 画质 CRF 数值越小越清晰、文件越大; 分辨率固定跟随素材图片\n\
+    (加底色后统一尺寸), 无需选择. 导出进度/日志直接显示在弹窗内, 不会另外弹出终端窗口.\n\
 \n\
 其他:\n\
   空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
-  右侧顶栏可切换「分块 / 蒙版 / 工程」; 工程页可保存打开 .staffcrop 并调用加底色.";
+  右侧顶栏可切换「分块 / 蒙版 / 工程 / 视频」四个面板.\n\
+  PDF 导入依赖 pdfium、视频导出依赖 ffmpeg, 需把对应文件放在程序所在目录 (或系统 PATH) 下.";
 
 /// 画布编辑工具 (互斥)
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -116,6 +139,8 @@ enum SideTool {
     Mask,
     /// 工程保存 / 加底色 (apply_bg)
     Project,
+    /// 视频轨道编辑与导出 (score_video)
+    Video,
 }
 
 enum DragKind {
@@ -137,6 +162,20 @@ enum DragKind {
         /// 提示线画在哪一项; None = 原位无反应
         line_at: Option<usize>,
         /// true = 右边/下边, false = 左边/上边
+        line_after: bool,
+        start_x: f32,
+        start_y: f32,
+        origin_x: f32,
+        origin_y: f32,
+        x: f32,
+        y: f32,
+        armed: bool,
+    },
+    /// 输出组合列表竖直拖拽调序 (逻辑同 MemberReorder)
+    GroupReorder {
+        from: usize,
+        to: usize,
+        line_at: Option<usize>,
         line_after: bool,
         start_x: f32,
         start_y: f32,
@@ -247,8 +286,11 @@ struct ScoreSyncApp {
     canvas_tool: CanvasTool,
     mask_tool: Entity<MaskToolApp>,
     apply_bg: Entity<ApplyBgApp>,
+    score_video: Entity<ScoreVideoApp>,
     /// 当前蒙版编辑目标: group_id (拼合图)
     mask_target: Option<String>,
+    /// 当前蒙版预览图相对拼合图的纵向偏移 (叠加工程底色补边时非零)
+    mask_preview_voff: i64,
     dialog: Option<DialogKind>,
     /// 标签右键菜单
     tab_menu: Option<TabContextMenu>,
@@ -271,12 +313,18 @@ struct ScoreSyncApp {
     tab_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 组合内成员条目屏幕 bounds
     member_bounds: HashMap<usize, Bounds<Pixels>>,
+    /// 输出组合条目屏幕 bounds
+    group_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 当前工程文件路径 (Ctrl+S 覆盖保存)
     project_path: Option<PathBuf>,
     /// 后台保存进行中, 避免重复触发
     saving: bool,
     /// 后台打开工程进行中
     opening: bool,
+    /// 视频素材池后台重算代次: 每次触发 `sync_video_pool` 自增, 供异步回调
+    /// 判断自己是否已被更晚的一轮请求取代 (取代则丢弃结果, 避免旧结果
+    /// 覆盖新状态; 例如快速连续应用/取消底色时).
+    video_sync_gen: u64,
 }
 
 impl ScoreSyncApp {
@@ -287,6 +335,8 @@ impl ScoreSyncApp {
         cx.observe(&mask_tool, |_, _, cx| cx.notify()).detach();
         let apply_bg = cx.new(ApplyBgApp::new);
         cx.observe(&apply_bg, |_, _, cx| cx.notify()).detach();
+        let score_video = cx.new(ScoreVideoApp::new);
+        cx.observe(&score_video, |_, _, cx| cx.notify()).detach();
         let mut app = Self {
             focus_handle: cx.focus_handle(),
             doc: DocState::new(),
@@ -307,7 +357,9 @@ impl ScoreSyncApp {
             canvas_tool: CanvasTool::Normal,
             mask_tool,
             apply_bg,
+            score_video,
             mask_target: None,
+            mask_preview_voff: 0,
             dialog: None,
             tab_menu: None,
             edit_y_input,
@@ -323,9 +375,11 @@ impl ScoreSyncApp {
             tab_scroll: ScrollHandle::new(),
             tab_bounds: HashMap::new(),
             member_bounds: HashMap::new(),
+            group_bounds: HashMap::new(),
             project_path: None,
             saving: false,
             opening: false,
+            video_sync_gen: 0,
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -342,6 +396,16 @@ impl ScoreSyncApp {
             }
             if !others.is_empty() {
                 app.load_paths(others, cx);
+            }
+        } else {
+            // 命令行没带任何文件时, 尝试自动恢复上次打开的工程 (与 apply_bg
+            // 记忆底色路径同一套逻辑, 存于 %APPDATA%\score_sync).
+            let last = config::load().last_project;
+            if !last.is_empty() {
+                let path = PathBuf::from(last);
+                if is_project_path(&path) && path.is_file() {
+                    app.open_project_path(path, cx);
+                }
             }
         }
         app
@@ -368,15 +432,21 @@ impl ScoreSyncApp {
     fn measure_item_bounds(
         entity: Entity<Self>,
         key: usize,
-        is_tab: bool,
+        kind: &'static str,
     ) -> impl IntoElement {
         canvas(
             move |bounds, _, cx| {
                 entity.update(cx, |this, _| {
-                    if is_tab {
-                        this.tab_bounds.insert(key, bounds);
-                    } else {
-                        this.member_bounds.insert(key, bounds);
+                    match kind {
+                        "tab" => {
+                            this.tab_bounds.insert(key, bounds);
+                        }
+                        "group" => {
+                            this.group_bounds.insert(key, bounds);
+                        }
+                        _ => {
+                            this.member_bounds.insert(key, bounds);
+                        }
                     }
                 });
             },
@@ -471,6 +541,37 @@ impl ScoreSyncApp {
         (from, None, false)
     }
 
+    /// 竖直列表 (输出组合): 同成员.
+    fn resolve_group_drop(
+        &self,
+        from: usize,
+        _x: f32,
+        y: f32,
+    ) -> (usize, Option<usize>, bool) {
+        let n = self.doc.groups.len();
+        if n == 0 {
+            return (from, None, false);
+        }
+        for i in 0..n {
+            let Some(b) = self.group_bounds.get(&i) else {
+                continue;
+            };
+            let top = f32::from(b.origin.y);
+            let bottom = top + f32::from(b.size.height);
+            if y < top || y > bottom {
+                continue;
+            }
+            if i == from {
+                return (from, None, false);
+            }
+            let mid = (top + bottom) * 0.5;
+            let after = y >= mid;
+            let to = Self::reorder_to_index(from, i, after);
+            return (to, Some(i), after);
+        }
+        (from, None, false)
+    }
+
     fn screen_in_view(&self, pos: Point<Pixels>) -> (f32, f32) {
         (
             f32::from(pos.x) - f32::from(self.view_bounds.origin.x),
@@ -523,14 +624,25 @@ impl ScoreSyncApp {
             });
             return;
         };
-        let Some(rgb) = self.doc.compose_group(&gid) else {
+        let Some((rgb, voff)) = self.doc.compose_group_preview(&gid) else {
             self.mask_tool.update(cx, |m, cx| {
                 m.set_embed_side_width(side_w);
                 m.clear_view("无法拼合该组合", cx);
             });
             return;
         };
-        let masks = self.doc.get_group_masks(&gid).to_vec();
+        self.mask_preview_voff = voff;
+        let masks: Vec<MaskRect> = self
+            .doc
+            .get_group_masks(&gid)
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                m.y0 += voff as i32;
+                m.y1 += voff as i32;
+                m
+            })
+            .collect();
         let gname = self
             .doc
             .groups
@@ -575,6 +687,15 @@ impl ScoreSyncApp {
         let (masks, opacity) = self
             .mask_tool
             .update(cx, |m, _| (m.masks_clone(), m.opacity()));
+        let voff = self.mask_preview_voff;
+        let masks: Vec<MaskRect> = masks
+            .into_iter()
+            .map(|mut m| {
+                m.y0 -= voff as i32;
+                m.y1 -= voff as i32;
+                m
+            })
+            .collect();
         self.doc.set_group_masks(&gid, masks);
         self.doc.mask_opacity = opacity;
     }
@@ -621,10 +742,92 @@ impl ScoreSyncApp {
                 self.focus_handle.focus(window);
                 self.status = "工程工具".into();
                 self.hint =
-                    "打开/保存 .staffcrop 工程; 下方可对导出目录做加底色批处理.".into();
+                    "打开/保存工程; 下方加底色可「应用到工程组合」(双层, 可取消) 或批量导出目录."
+                        .into();
+            }
+            SideTool::Video => {
+                self.sync_video_pool(cx);
+                self.score_video
+                    .read(cx)
+                    .focus_handle_ref()
+                    .clone()
+                    .focus(window);
+                self.status = "视频工具".into();
+                self.hint =
+                    "N 插入下一张组合 | 空格播放/暂停 | ←→ 快退快进 | I/O 标记淡入淡出."
+                        .into();
             }
         }
         cx.notify();
+    }
+
+    /// 把「输出组合」(已排序) 渲染为最终合成图, 同步给视频素材池.
+    ///
+    /// 对每个组合都要重新拼合+ (可能) 叠加工程底色裁切, 组合一多或底色一大
+    /// 就很容易卡住 UI (尤其应用/取消工程底色时一次性影响全部组合). 这里
+    /// 不整体克隆一份 `DocState` 扔给后台线程 (页图本就可能很大, 克隆一份
+    /// 等于内存翻倍, 在页面文件/内存本就紧张时容易引发底层崩溃), 而是分批
+    /// 在主线程上直接对 `self.doc` 分块合成, 每批之间让出一次事件循环, 让
+    /// UI 能插入重绘/输入, 不会被整段合成一次性卡死; `video_sync_gen` 防止
+    /// 旧的一轮在完成前被新一轮取代后, 结果反而覆盖了新状态.
+    fn sync_video_pool(&mut self, cx: &mut Context<Self>) {
+        self.video_sync_gen = self.video_sync_gen.wrapping_add(1);
+        let gen = self.video_sync_gen;
+        let group_ids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
+        let (aw, ah) = (self.doc.bg_aspect_w, self.doc.bg_aspect_h);
+        self.score_video.update(cx, |v, _| v.set_aspect(aw, ah));
+        if group_ids.is_empty() {
+            self.score_video.update(cx, |v, cx| v.set_pool(Vec::new(), cx));
+            return;
+        }
+        const CHUNK: usize = 4;
+        cx.spawn(async move |this, cx| {
+            let mut items: Vec<MaterialItem> = Vec::with_capacity(group_ids.len());
+            for (chunk_i, chunk) in group_ids.chunks(CHUNK).enumerate() {
+                if chunk_i > 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                }
+                let cancelled = this
+                    .update(cx, |view, _| {
+                        // 已被更晚的一轮请求取代 (比如快速连续应用/取消底色), 放弃.
+                        if view.video_sync_gen != gen {
+                            return true;
+                        }
+                        for gid in chunk {
+                            let Some(idx) =
+                                view.doc.groups.iter().position(|g| &g.id == gid)
+                            else {
+                                continue;
+                            };
+                            let label = view.doc.groups[idx].display_name(idx);
+                            if let Ok(Some(rgb)) = view.doc.render_group_final(gid) {
+                                items.push(MaterialItem {
+                                    group_id: gid.clone(),
+                                    label: label.into(),
+                                    image: Arc::new(
+                                        image::DynamicImage::ImageRgb8(rgb).to_rgba8(),
+                                    ),
+                                });
+                            }
+                        }
+                        false
+                    })
+                    .unwrap_or(true);
+                if cancelled {
+                    return;
+                }
+            }
+            this.update(cx, |view, cx| {
+                if view.video_sync_gen == gen {
+                    view.score_video.update(cx, |v, cx| v.set_pool(items, cx));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 从蒙版目标恢复分块页签与选中组合.
@@ -894,8 +1097,10 @@ impl ScoreSyncApp {
                 view.opening = false;
                 match result {
                     Ok(Ok(doc)) => {
+                        let video_snap = doc.video_state.clone();
                         view.doc = doc;
                         view.project_path = Some(path.clone());
+                        config::remember_last_project(&path);
                         view.drag = None;
                         view.dialog = None;
                         view.tab_menu = None;
@@ -905,6 +1110,8 @@ impl ScoreSyncApp {
                         view.canvas_tool = CanvasTool::Normal;
                         view.mask_target = None;
                         view.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+                        view.score_video
+                            .update(cx, |v, cx| v.load_timeline_snapshot(video_snap, cx));
                         view.user_zoomed = false;
                         view.zoom = 1.0;
                         view.pan = point(0.0, 0.0);
@@ -994,6 +1201,7 @@ impl ScoreSyncApp {
             return;
         }
         self.flush_mask_to_doc(cx);
+        self.doc.video_state = self.score_video.read(cx).timeline_snapshot();
         self.saving = true;
         self.status = "正在保存工程…".into();
         self.hint = self.status.clone();
@@ -1013,6 +1221,7 @@ impl ScoreSyncApp {
                 match result {
                     Ok(Ok(saved)) => {
                         view.project_path = Some(saved.clone());
+                        config::remember_last_project(&saved);
                         view.status = format!("工程已保存: {}", saved.display()).into();
                         view.hint = view.status.clone();
                     }
@@ -1226,7 +1435,7 @@ impl ScoreSyncApp {
                 self.dialog = Some(DialogKind::Info {
                     title: "完成".into(),
                     body: format!(
-                        "已导出 {saved} 个组合到:\n{}\n(已按分块排序拼接并套用各组蒙版)",
+                        "已导出 {saved} 个组合到:\n{}\n(已按输出组合列表顺序拼接并套用各组蒙版)",
                         path.display()
                     ),
                 });
@@ -1926,6 +2135,7 @@ impl ScoreSyncApp {
         let crop_on = self.side_tool == SideTool::Crop;
         let mask_on = self.side_tool == SideTool::Mask;
         let proj_on = self.side_tool == SideTool::Project;
+        let video_on = self.side_tool == SideTool::Video;
         div()
             .id("tool_switcher")
             .flex()
@@ -1941,6 +2151,7 @@ impl ScoreSyncApp {
             .child(self.tool_tab("tool_crop", "分块", crop_on, SideTool::Crop, cx))
             .child(self.tool_tab("tool_mask", "蒙版", mask_on, SideTool::Mask, cx))
             .child(self.tool_tab("tool_proj", "工程", proj_on, SideTool::Project, cx))
+            .child(self.tool_tab("tool_video", "视频", video_on, SideTool::Video, cx))
     }
 
     fn tool_tab(
@@ -1988,12 +2199,29 @@ impl ScoreSyncApp {
     }
 
     fn left_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.side_tool == SideTool::Video {
+            // 视频栏不用页签, 而是预览窗 + 轨道, 占满整个左侧工作区.
+            let canvas = self
+                .score_video
+                .update(cx, |v, cx| v.left_panel(cx))
+                .into_any_element();
+            return div()
+                .id("left_workspace")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .child(canvas)
+                .into_any_element();
+        }
         let canvas = match self.side_tool {
             SideTool::Crop | SideTool::Project => self.image_view(cx).into_any_element(),
             SideTool::Mask => self
                 .mask_tool
                 .update(cx, |m, cx| m.image_view(cx))
                 .into_any_element(),
+            SideTool::Video => unreachable!(),
         };
         div()
             .id("left_workspace")
@@ -2018,6 +2246,7 @@ impl ScoreSyncApp {
                     .min_w(px(0.))
                     .child(canvas),
             )
+            .into_any_element()
     }
 
     fn mask_target_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2139,6 +2368,10 @@ impl ScoreSyncApp {
                     .into_any_element()
             }
             SideTool::Project => self.project_panel(cx).into_any_element(),
+            SideTool::Video => self
+                .score_video
+                .update(cx, |v, cx| v.right_panel(cx))
+                .into_any_element(),
         };
         div()
             .id("right_workspace")
@@ -2171,6 +2404,22 @@ impl ScoreSyncApp {
             .and_then(|s| s.to_str())
             .unwrap_or("(未保存)")
             .to_string();
+        let bg_status: SharedString = if self.doc.bg_enabled {
+            let src = self
+                .doc
+                .bg_source_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("bg");
+            format!(
+                "底色层: 已启用 {} ({}:{}) — 导出时底层合成, 未改写页图",
+                src, self.doc.bg_aspect_w, self.doc.bg_aspect_h
+            )
+            .into()
+        } else {
+            "底色层: 未启用".into()
+        };
         let apply_panel = self.apply_bg.update(cx, |m, cx| m.panel(cx).into_any_element());
         div()
             .id("project_panel")
@@ -2229,6 +2478,40 @@ impl ScoreSyncApp {
                                 |this, window, cx| this.save_project_as(window, cx),
                                 cx,
                             )),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .mt_2()
+                            .child("工程底色层"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child(bg_status),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(self.btn(
+                                "proj_bg_apply",
+                                "应用到工程组合",
+                                true,
+                                |this, _, cx| this.apply_project_bg(cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "proj_bg_clear",
+                                "取消工程底色",
+                                false,
+                                |this, _, cx| this.clear_project_bg(cx),
+                                cx,
+                            )),
                     ),
             )
             .child(
@@ -2239,6 +2522,108 @@ impl ScoreSyncApp {
                     .overflow_scroll()
                     .child(apply_panel),
             )
+    }
+
+    fn apply_project_bg(&mut self, cx: &mut Context<Self>) {
+        if self.doc.groups.is_empty() {
+            self.dialog = Some(DialogKind::Info {
+                title: "提示".into(),
+                body: "当前没有输出组合. 请先分块/合并后再应用底色层.".into(),
+            });
+            cx.notify();
+            return;
+        }
+        let params = self.apply_bg.read(cx).snapshot_params(cx);
+        let (path, aw, ah) = match params {
+            Ok(v) => v,
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "无法应用底色".into(),
+                    body: e,
+                });
+                cx.notify();
+                return;
+            }
+        };
+        match image::open(&path) {
+            Ok(im) => {
+                let rgb = im.to_rgb8();
+                match self
+                    .doc
+                    .set_project_bg(rgb, Some(path.clone()), aw, ah)
+                {
+                    Ok(()) => {
+                        // 试合成第一组, 尽早发现底色太小等问题
+                        if let Some(g) = self.doc.groups.first() {
+                            if let Err(e) = self.doc.render_group_final(&g.id) {
+                                self.doc.clear_project_bg();
+                                self.dialog = Some(DialogKind::Info {
+                                    title: "底色不适用".into(),
+                                    body: format!(
+                                        "{e}\n已取消启用. 请换更大底色或检查谱面尺寸."
+                                    ),
+                                });
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        self.status = format!(
+                            "已为 {} 个组合启用底色层 {} ({}:{})",
+                            self.doc.groups.len(),
+                            path.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("bg"),
+                            aw,
+                            ah
+                        )
+                        .into();
+                        self.hint = self.status.clone();
+                        self.force_refresh_mask_preview(cx);
+                        self.sync_video_pool(cx);
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        self.dialog = Some(DialogKind::Info {
+                            title: "无法应用底色".into(),
+                            body: e,
+                        });
+                        cx.notify();
+                    }
+                }
+            }
+            Err(e) => {
+                self.dialog = Some(DialogKind::Info {
+                    title: "无法打开底色".into(),
+                    body: e.to_string(),
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn clear_project_bg(&mut self, cx: &mut Context<Self>) {
+        if !self.doc.bg_enabled && self.doc.bg_image.is_none() {
+            self.status = "当前未启用工程底色层.".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        self.doc.clear_project_bg();
+        self.status = "已取消工程底色层.".into();
+        self.hint = self.status.clone();
+        self.force_refresh_mask_preview(cx);
+        self.sync_video_pool(cx);
+        cx.notify();
+    }
+
+    /// 强制重新拼合并加载蒙版预览图 (绕过 `load_rgb` 的 session_key 缓存),
+    /// 用于底色启用/取消后需要刷新预览的场景. 会先落盘当前蒙版编辑, 再清空
+    /// 内嵌工具视图, 避免清空动作把待落盘的蒙版一并清没.
+    fn force_refresh_mask_preview(&mut self, cx: &mut Context<Self>) {
+        self.flush_mask_to_doc(cx);
+        self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+        self.mask_target = None;
+        self.sync_mask_image(cx);
     }
 
     fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2464,7 +2849,7 @@ impl ScoreSyncApp {
                     .when(show_line && line_after, |d| {
                         d.border_r_2().border_color(rgb(0xf59e0b))
                     })
-                    .child(Self::measure_item_bounds(cx.entity(), idx, true))
+                    .child(Self::measure_item_bounds(cx.entity(), idx, "tab"))
                     .child(
                         div()
                             .child(tab.label.clone())
@@ -2764,6 +3149,47 @@ impl ScoreSyncApp {
             .bg(rgb(0xffffff))
             .text_color(rgb(color))
             .text_sm()
+            .border_1()
+            .border_color(rgb(0x94a3b8))
+            .whitespace_nowrap()
+            .child(label)
+            .into_any_element()
+    }
+
+    fn group_drag_ghost(&self) -> impl IntoElement {
+        let Some(DragKind::GroupReorder {
+            from,
+            start_x,
+            start_y,
+            origin_x,
+            origin_y,
+            x,
+            y,
+            armed: true,
+            ..
+        }) = &self.drag
+        else {
+            return div().into_any_element();
+        };
+        let rows = self.group_list_rows();
+        let label = rows
+            .get(*from)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| "...".into());
+        let gx = *origin_x + (*x - *start_x);
+        let gy = *origin_y + (*y - *start_y);
+        div()
+            .id("group-drag-ghost")
+            .absolute()
+            .left(px(gx))
+            .top(px(gy))
+            .opacity(0.72)
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0xffffff))
+            .text_color(rgb(0x0f172a))
+            .text_xs()
             .border_1()
             .border_color(rgb(0x94a3b8))
             .whitespace_nowrap()
@@ -3428,7 +3854,7 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("输出组合 (全局; 按首块所在页+ y 排序; 可跨页)"),
+                    .child("输出组合 (拖拽调序; 可跨页; 导出按此顺序)"),
             );
 
         let mut glist = div()
@@ -3441,8 +3867,26 @@ impl ScoreSyncApp {
             .rounded_md()
             .p_1()
             .bg(rgb(0xffffff));
-        for row in group_rows {
+        let group_drag_from = match &self.drag {
+            Some(DragKind::GroupReorder {
+                from, armed: true, ..
+            }) => Some(*from),
+            _ => None,
+        };
+        let (group_line_at, group_line_after) = match &self.drag {
+            Some(DragKind::GroupReorder {
+                line_at,
+                line_after,
+                armed: true,
+                ..
+            }) => (*line_at, *line_after),
+            _ => (None, false),
+        };
+        for (i, row) in group_rows.iter().enumerate() {
+            let idx = i;
             let gid = row.id.clone();
+            let dragging = group_drag_from == Some(idx);
+            let show_line = group_line_at == Some(idx);
             let bg = if row.selected {
                 rgb(0xdbeafe)
             } else {
@@ -3451,6 +3895,7 @@ impl ScoreSyncApp {
             glist = glist.child(
                 div()
                     .id(SharedString::from(format!("grp-{gid}")))
+                    .relative()
                     .px_2()
                     .py_1()
                     .rounded_sm()
@@ -3460,14 +3905,75 @@ impl ScoreSyncApp {
                     .cursor_pointer()
                     .flex_shrink_0()
                     .whitespace_nowrap()
-                    .child(row.label)
-                    .on_mouse_up(
+                    .when(dragging, |d| d.opacity(0.35))
+                    .when(show_line && !group_line_after, |d| {
+                        d.border_t_2().border_color(rgb(0xf59e0b))
+                    })
+                    .when(show_line && group_line_after, |d| {
+                        d.border_b_2().border_color(rgb(0xf59e0b))
+                    })
+                    .child(Self::measure_item_bounds(cx.entity(), idx, "group"))
+                    .child(row.label.clone())
+                    .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.doc.select_group(&gid);
-                            this.refresh_render(cx);
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let mx = f32::from(ev.position.x);
+                            let my = f32::from(ev.position.y);
+                            let (ox, oy) =
+                                Self::item_origin(this.group_bounds.get(&idx), mx, my);
+                            this.drag = Some(DragKind::GroupReorder {
+                                from: idx,
+                                to: idx,
+                                line_at: None,
+                                line_after: false,
+                                start_x: mx,
+                                start_y: my,
+                                origin_x: ox,
+                                origin_y: oy,
+                                x: mx,
+                                y: my,
+                                armed: false,
+                            });
+                            cx.notify();
                         }),
-                    ),
+                    )
+                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                        if let Some(DragKind::GroupReorder {
+                            from,
+                            start_x,
+                            start_y,
+                            origin_x,
+                            origin_y,
+                            mut armed,
+                            ..
+                        }) = this.drag.take()
+                        {
+                            let x = f32::from(ev.position.x);
+                            let y = f32::from(ev.position.y);
+                            if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                                armed = true;
+                            }
+                            let (to, line_at, line_after) = if armed {
+                                this.resolve_group_drop(from, x, y)
+                            } else {
+                                (from, None, false)
+                            };
+                            this.drag = Some(DragKind::GroupReorder {
+                                from,
+                                to,
+                                line_at,
+                                line_after,
+                                start_x,
+                                start_y,
+                                origin_x,
+                                origin_y,
+                                x,
+                                y,
+                                armed,
+                            });
+                            cx.notify();
+                        }
+                    })),
             );
         }
         panel = panel
@@ -3540,7 +4046,7 @@ impl ScoreSyncApp {
                     .when(show_line && line_after, |d| {
                         d.border_b_2().border_color(rgb(0xf59e0b))
                     })
-                    .child(Self::measure_item_bounds(cx.entity(), idx, false))
+                    .child(Self::measure_item_bounds(cx.entity(), idx, "member"))
                     .child(row.label.clone())
                     .on_mouse_down(
                         MouseButton::Left,
@@ -3773,6 +4279,11 @@ impl ScoreSyncApp {
     }
 
     fn dialog_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.score_video.read(cx).is_export_open() {
+            return self
+                .score_video
+                .update(cx, |v, cx| v.export_dialog(cx).into_any_element());
+        }
         let Some(ref dlg) = self.dialog else {
             return div().into_any_element();
         };
@@ -3976,12 +4487,21 @@ impl Render for ScoreSyncApp {
         // A4-ish: side panel fixed; left takes rest (ratio used as min width hint)
         let _ = A4_RATIO;
         let mask_mode = self.side_tool == SideTool::Mask;
+        let video_mode = self.side_tool == SideTool::Video;
         let focus = if mask_mode {
             self.mask_tool.read(cx).focus_handle_ref().clone()
+        } else if video_mode {
+            self.score_video.read(cx).focus_handle_ref().clone()
         } else {
             self.focus_handle.clone()
         };
-        let key_ctx = if mask_mode { "MaskTool" } else { "ScoreSync" };
+        let key_ctx = if mask_mode {
+            "MaskTool"
+        } else if video_mode {
+            "ScoreVideo"
+        } else {
+            "ScoreSync"
+        };
 
         div()
             .id("root")
@@ -4009,6 +4529,12 @@ impl Render for ScoreSyncApp {
                         this.apply_scrollbar_drag(x, y, cx);
                     }
                     return;
+                }
+                // 视频栏: 素材池 → 轨道跨面板拖放, 由宿主根节点转发鼠标坐标
+                // (轨道内部的裁剪/拖选等交互已在 score_video 自身处理).
+                if this.drag.is_none() && this.side_tool == SideTool::Video {
+                    this.score_video
+                        .update(cx, |v, cx| v.root_mouse_move(x, y, cx));
                 }
                 match this.drag {
                     Some(DragKind::Scrollbar { .. }) => {
@@ -4095,12 +4621,44 @@ impl Render for ScoreSyncApp {
                         });
                         cx.notify();
                     }
+                    Some(DragKind::GroupReorder {
+                        from,
+                        start_x,
+                        start_y,
+                        origin_x,
+                        origin_y,
+                        mut armed,
+                        ..
+                    }) => {
+                        if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                            armed = true;
+                        }
+                        let (to, line_at, line_after) = if armed {
+                            this.resolve_group_drop(from, x, y)
+                        } else {
+                            (from, None, false)
+                        };
+                        this.drag = Some(DragKind::GroupReorder {
+                            from,
+                            to,
+                            line_at,
+                            line_after,
+                            start_x,
+                            start_y,
+                            origin_x,
+                            origin_y,
+                            x,
+                            y,
+                            armed,
+                        });
+                        cx.notify();
+                    }
                     _ => {}
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
+                cx.listener(|this, ev: &MouseUpEvent, _, cx| {
                     if this.dialog.is_some() {
                         if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
                             this.drag = None;
@@ -4108,9 +4666,16 @@ impl Render for ScoreSyncApp {
                         }
                         return;
                     }
+                    if this.side_tool == SideTool::Video {
+                        let x = f32::from(ev.position.x);
+                        let y = f32::from(ev.position.y);
+                        this.score_video
+                            .update(cx, |v, cx| v.root_mouse_up(x, y, cx));
+                    }
                     match this.drag {
                         Some(DragKind::TabReorder { .. })
                         | Some(DragKind::MemberReorder { .. })
+                        | Some(DragKind::GroupReorder { .. })
                         | Some(DragKind::Scrollbar { .. })
                         | Some(DragKind::SideResize { .. })
                         | Some(DragKind::TabHScroll { .. }) => {}
@@ -4141,6 +4706,25 @@ impl Render for ScoreSyncApp {
                                     ids.insert(to, item);
                                     this.doc.reorder_active_members(ids);
                                     this.after_doc_change(cx);
+                                } else {
+                                    cx.notify();
+                                }
+                            } else {
+                                cx.notify();
+                            }
+                        }
+                        Some(DragKind::GroupReorder {
+                            from, to, armed, ..
+                        }) => {
+                            if armed && from != to {
+                                this.doc.reorder_groups(from, to);
+                                this.after_doc_change(cx);
+                            } else if !armed {
+                                if let Some(gid) =
+                                    this.doc.groups.get(from).map(|g| g.id.clone())
+                                {
+                                    this.doc.select_group(&gid);
+                                    this.refresh_render(cx);
                                 } else {
                                     cx.notify();
                                 }
@@ -4235,6 +4819,33 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &mask_tool::gui::Redo, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.redo(cx));
             }))
+            .on_action(cx.listener(|this, _: &score_video::gui::PlayPause, _, cx| {
+                this.score_video.update(cx, |v, cx| v.play_pause(cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::SeekBack, _, cx| {
+                this.score_video.update(cx, |v, cx| v.seek_by(-1.0, cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::SeekForward, _, cx| {
+                this.score_video.update(cx, |v, cx| v.seek_by(1.0, cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::SeekBackBig, _, cx| {
+                this.score_video.update(cx, |v, cx| v.seek_by(-5.0, cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::SeekForwardBig, _, cx| {
+                this.score_video.update(cx, |v, cx| v.seek_by(5.0, cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::InsertNext, _, cx| {
+                this.score_video.update(cx, |v, cx| v.insert_next(cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::MarkFadeIn, _, cx| {
+                this.score_video.update(cx, |v, cx| v.mark_fade_in(cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::MarkFadeOut, _, cx| {
+                this.score_video.update(cx, |v, cx| v.mark_fade_out(cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::DeleteSelected, _, cx| {
+                this.score_video.update(cx, |v, cx| v.delete_selected(cx));
+            }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 let list: Vec<PathBuf> = paths
                     .paths()
@@ -4309,6 +4920,7 @@ impl Render for ScoreSyncApp {
             .child(self.tab_context_menu_overlay(cx))
             .child(self.tab_drag_ghost())
             .child(self.member_drag_ghost())
+            .child(self.group_drag_ghost())
     }
 }
 
@@ -4316,6 +4928,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         text_input::bind_keys(cx);
         apply_bg::text_input::bind_keys(cx);
+        score_video::gui::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-o", OpenFile, Some("ScoreSync")),
             KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreSync")),

@@ -31,6 +31,66 @@ struct ProjectFile {
     groups: Vec<ProjectGroup>,
     /// group_id -> masks
     group_masks: HashMap<String, Vec<MaskRect>>,
+    /// 用户手动调过输出组合顺序
+    #[serde(default)]
+    groups_manual_order: bool,
+    /// 工程底色层 (可选)
+    #[serde(default)]
+    bg: Option<ProjectBg>,
+    /// 视频面板时间轴 (可选, 旧工程文件没有这个字段)
+    #[serde(default)]
+    video: ProjectVideo,
+}
+
+/// 视频面板时间轴的纯数据快照.
+#[derive(Serialize, Deserialize, Default)]
+struct ProjectVideo {
+    #[serde(default)]
+    video_clips: Vec<ProjectVideoClip>,
+    #[serde(default)]
+    fades: Vec<ProjectFadeSpan>,
+    #[serde(default)]
+    audio_clips: Vec<ProjectAudioClip>,
+    #[serde(default)]
+    playhead: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProjectVideoClip {
+    group_id: String,
+    start: f64,
+    end: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProjectFadeSpan {
+    start: f64,
+    end: f64,
+    /// true = 淡入, false = 淡出
+    fade_in: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProjectAudioClip {
+    /// 原始音频文件路径 (工程内不重新打包音频, 需与该路径保持有效才能回放/导出)
+    path: String,
+    label: String,
+    duration: f64,
+    /// 该段在源文件里的起始偏移秒 (「分割音频」产生的后半段 > 0); 旧工程
+    /// 文件没有这个字段, 按 0 处理 (整段从头播放, 和旧行为一致).
+    #[serde(default)]
+    offset: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProjectBg {
+    enabled: bool,
+    aspect_w: u32,
+    aspect_h: u32,
+    /// zip 内相对路径, 如 `bg.png`
+    image: String,
+    #[serde(default)]
+    source_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -132,6 +192,63 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     let mut selected: Vec<String> = doc.selected_region_ids.iter().cloned().collect();
     selected.sort();
 
+    let mut bg_png: Option<Vec<u8>> = None;
+    let bg_meta = if doc.bg_enabled {
+        if let Some(img) = doc.bg_image.as_ref() {
+            let png = encode_png(img).map_err(|e| format!("编码底色失败: {e}"))?;
+            bg_png = Some(png);
+            Some(ProjectBg {
+                enabled: true,
+                aspect_w: doc.bg_aspect_w,
+                aspect_h: doc.bg_aspect_h,
+                image: "bg.png".into(),
+                source_path: doc
+                    .bg_source_path
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let video = ProjectVideo {
+        video_clips: doc
+            .video_state
+            .video_clips
+            .iter()
+            .map(|(group_id, start, end)| ProjectVideoClip {
+                group_id: group_id.clone(),
+                start: *start,
+                end: *end,
+            })
+            .collect(),
+        fades: doc
+            .video_state
+            .fades
+            .iter()
+            .map(|(start, end, fade_in)| ProjectFadeSpan {
+                start: *start,
+                end: *end,
+                fade_in: *fade_in,
+            })
+            .collect(),
+        audio_clips: doc
+            .video_state
+            .audio_clips
+            .iter()
+            .map(|(path, label, duration, offset)| ProjectAudioClip {
+                path: path.display().to_string(),
+                label: label.clone(),
+                duration: *duration,
+                offset: *offset,
+            })
+            .collect(),
+        playhead: doc.video_state.playhead,
+    };
+
     let meta = ProjectFile {
         version: PROJECT_VERSION,
         margin: doc.margin,
@@ -143,6 +260,9 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         pages,
         groups,
         group_masks: doc.group_masks.clone(),
+        groups_manual_order: doc.groups_manual_order,
+        bg: bg_meta,
+        video,
     };
     let json = serde_json::to_vec_pretty(&meta).map_err(|e| format!("序列化工程失败: {e}"))?;
 
@@ -161,6 +281,13 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
                 .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
             zip.write_all(png)
                 .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
+        }
+
+        if let Some(png) = bg_png {
+            zip.start_file("bg.png", opts)
+                .map_err(|e| format!("写入 bg.png 失败: {e}"))?;
+            zip.write_all(&png)
+                .map_err(|e| format!("写入 bg.png 失败: {e}"))?;
         }
 
         zip.finish()
@@ -262,7 +389,48 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         ink_threshold: meta.ink_threshold,
         group_masks: meta.group_masks,
         mask_opacity: meta.mask_opacity,
+        // 工程文件内的 groups 顺序即导出顺序
+        groups_manual_order: true,
+        bg_enabled: false,
+        bg_image: None,
+        bg_source_path: None,
+        bg_aspect_w: 2560,
+        bg_aspect_h: 1440,
+        video_state: score_video::model::TimelineSnapshot {
+            video_clips: meta
+                .video
+                .video_clips
+                .into_iter()
+                .map(|c| (c.group_id, c.start, c.end))
+                .collect(),
+            fades: meta
+                .video
+                .fades
+                .into_iter()
+                .map(|f| (f.start, f.end, f.fade_in))
+                .collect(),
+            audio_clips: meta
+                .video
+                .audio_clips
+                .into_iter()
+                .map(|c| (PathBuf::from(c.path), c.label, c.duration, c.offset))
+                .collect(),
+            playhead: meta.video.playhead,
+        },
     };
+    if let Some(bg) = meta.bg {
+        if bg.enabled {
+            let png = read_zip_entry(&mut zip, &bg.image)?;
+            let image = image::load_from_memory(&png)
+                .map_err(|e| format!("解码底色失败: {e}"))?
+                .to_rgb8();
+            doc.bg_image = Some(image);
+            doc.bg_enabled = true;
+            doc.bg_aspect_w = bg.aspect_w.max(1);
+            doc.bg_aspect_h = bg.aspect_h.max(1);
+            doc.bg_source_path = bg.source_path.map(PathBuf::from);
+        }
+    }
     if doc.current_page_index >= doc.pages.len() {
         doc.current_page_index = 0;
     }
