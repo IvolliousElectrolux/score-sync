@@ -4,6 +4,8 @@
 //! - `video_clips`: 彼此首尾相接、按时间升序, 覆盖 `[0, video_end())`.
 //! - `fades`: 互不重叠的黑场淡入/淡出区间, 可落在任意时刻.
 //! - `audio_clips`: 顺序播放, 不单独存起点, 由前面片段时长累加得出.
+//!
+//! 时间轴总长取当前非空音/视频轨的较短末端; 删短一轨时会把较长轨裁齐.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,12 +101,110 @@ impl Timeline {
         self.fades.iter().map(|f| f.end).fold(0.0, f64::max)
     }
 
-    /// 时间轴总长: 各轨最长者, 空时给一个默认下限方便刚开始编辑.
+    /// 非空音/视频轨的末端时刻; 两轨都有内容时取较短者 (时间轴边界对齐最短轨).
+    pub fn shortest_av_end(&self) -> Option<f64> {
+        let v = (!self.video_clips.is_empty()).then(|| self.video_end());
+        let a = (!self.audio_clips.is_empty()).then(|| self.audio_total());
+        match (v, a) {
+            (None, None) => None,
+            (Some(x), None) | (None, Some(x)) => Some(x.max(0.0)),
+            (Some(v), Some(a)) => Some(v.min(a).max(0.0)),
+        }
+    }
+
+    /// 时间轴总长: 以当前最短的非空音/视频轨末端为准; 都空时用淡入淡出末端或默认下限.
     pub fn timeline_end(&self) -> f64 {
-        self.audio_total()
-            .max(self.video_end())
-            .max(self.fades_end())
-            .max(DEFAULT_TIMELINE_MIN)
+        self.shortest_av_end()
+            .unwrap_or_else(|| self.fades_end().max(DEFAULT_TIMELINE_MIN))
+    }
+
+    /// 把视频轨裁到 `end` (删掉完全落在之后的片段, 缩短末段).
+    pub fn trim_video_to(&mut self, end: f64) {
+        let end = end.max(0.0);
+        while let Some(last) = self.video_clips.last() {
+            if last.start >= end - 1e-9 {
+                self.video_clips.pop();
+                continue;
+            }
+            if last.end > end {
+                let idx = self.video_clips.len() - 1;
+                if end - self.video_clips[idx].start < MIN_CLIP_DUR {
+                    self.video_clips.pop();
+                } else {
+                    self.video_clips[idx].end = end;
+                }
+            }
+            break;
+        }
+    }
+
+    /// 把末段视频延伸到 `end` (仅当已有视频且末段终点偏短时).
+    pub fn extend_video_to(&mut self, end: f64) {
+        let end = end.max(0.0);
+        if let Some(last) = self.video_clips.last_mut() {
+            if last.end < end {
+                last.end = end;
+            }
+        }
+    }
+
+    /// 把音频轨总长裁到 `end` (从末段减时长 / 丢掉超出的片段).
+    pub fn trim_audio_to(&mut self, end: f64) {
+        let end = end.max(0.0);
+        let mut total = self.audio_total();
+        while total > end + 1e-9 && !self.audio_clips.is_empty() {
+            let excess = total - end;
+            let last = self.audio_clips.last_mut().unwrap();
+            if last.duration <= excess + MIN_CLIP_DUR {
+                total -= last.duration;
+                self.audio_clips.pop();
+            } else {
+                last.duration -= excess;
+                break;
+            }
+        }
+    }
+
+    fn trim_fades_to(&mut self, end: f64) {
+        let end = end.max(0.0);
+        self.fades.retain(|f| f.start < end - 1e-9);
+        for f in &mut self.fades {
+            if f.end > end {
+                f.end = end.max(f.start + MIN_CLIP_DUR);
+            }
+        }
+        self.fades.retain(|f| f.end - f.start >= MIN_CLIP_DUR - 1e-9);
+    }
+
+    /// 两轨都有内容时, 把较长轨裁到较短轨末端, 淡入淡出与播放头一并钳制.
+    pub fn sync_tracks_to_shortest(&mut self) {
+        let Some(target) = self.shortest_av_end() else {
+            let end = self.timeline_end();
+            self.trim_fades_to(end);
+            self.playhead = self.playhead.clamp(0.0, end);
+            return;
+        };
+        self.trim_video_to(target);
+        self.trim_audio_to(target);
+        self.trim_fades_to(target);
+        self.playhead = self.playhead.clamp(0.0, target);
+    }
+
+    /// 导入/追加音频后: 音频更长则延伸视频对齐; 音频更短则裁视频对齐.
+    pub fn fit_after_audio_change(&mut self) {
+        if self.audio_clips.is_empty() || self.video_clips.is_empty() {
+            self.sync_tracks_to_shortest();
+            return;
+        }
+        let a = self.audio_total();
+        let v = self.video_end();
+        if a > v + 1e-9 {
+            self.extend_video_to(a);
+            self.trim_fades_to(a);
+            self.playhead = self.playhead.clamp(0.0, a);
+        } else {
+            self.sync_tracks_to_shortest();
+        }
     }
 
     pub fn covering_clip(&self, t: f64) -> Option<&VideoClip> {
@@ -244,14 +344,18 @@ impl Timeline {
         if idx > 0 {
             self.video_clips[idx - 1].end = ns;
         }
+        self.sync_tracks_to_shortest();
     }
 
     /// 拖动片段右边界 (同步下一片段的左边界).
+    /// 末段不得超出音频轨末端 (有音频时), 以保证边界对齐最短轨.
     pub fn trim_right(&mut self, id: Uuid, new_end: f64) {
         let Some(idx) = self.clip_idx(id) else { return };
         let min = self.video_clips[idx].start + MIN_CLIP_DUR;
         let max = if idx + 1 < self.video_clips.len() {
             self.video_clips[idx + 1].end - MIN_CLIP_DUR
+        } else if !self.audio_clips.is_empty() {
+            self.audio_total()
         } else {
             f64::MAX
         };
@@ -260,6 +364,7 @@ impl Timeline {
         if idx + 1 < self.video_clips.len() {
             self.video_clips[idx + 1].start = ne;
         }
+        self.sync_tracks_to_shortest();
     }
 
     /// 整体拖动片段 (两侧边界同步偏移相同的量, 不产生缝隙/重叠).
@@ -272,6 +377,8 @@ impl Timeline {
         };
         let max_end = if idx + 1 < self.video_clips.len() {
             self.video_clips[idx + 1].end - MIN_CLIP_DUR
+        } else if !self.audio_clips.is_empty() {
+            self.audio_total()
         } else {
             f64::MAX
         };
@@ -287,6 +394,7 @@ impl Timeline {
         if idx + 1 < self.video_clips.len() {
             self.video_clips[idx + 1].start = new_end;
         }
+        self.sync_tracks_to_shortest();
     }
 
     /// 标记淡入/淡出: 若已有鼠标拖选区间, 直接生成; 否则两次按键各标一端.
@@ -340,6 +448,8 @@ impl Timeline {
         if let Some(id) = self.selected_audio.take() {
             self.audio_clips.retain(|c| c.id != id);
         }
+        // 删短任一轨后, 边界与较长轨一起对齐到最短轨末端.
+        self.sync_tracks_to_shortest();
     }
 
     pub fn select_clip_at(&mut self, t: f64) {
@@ -356,6 +466,7 @@ impl Timeline {
 
     pub fn remove_audio(&mut self, id: Uuid) {
         self.audio_clips.retain(|c| c.id != id);
+        self.sync_tracks_to_shortest();
     }
 
     pub fn move_audio(&mut self, from: usize, to: usize) {
@@ -765,5 +876,42 @@ mod tests {
         assert_eq!(tl.video_clips.len(), 2);
         assert_eq!(tl.video_clips[0].end, 20.0);
         assert_eq!(tl.video_clips[1].start, 20.0);
+    }
+
+    #[test]
+    fn timeline_end_follows_shortest_track_and_sync_trims() {
+        let mut tl = Timeline::new();
+        let pool = vec![item("a")];
+        tl.insert_next(&pool).unwrap();
+        assert!((tl.timeline_end() - DEFAULT_TIMELINE_MIN).abs() < 1e-9);
+
+        tl.audio_clips.push(AudioClip {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("a.wav"),
+            label: "a".into(),
+            duration: 30.0,
+            offset: 0.0,
+        });
+        tl.fit_after_audio_change();
+        assert!((tl.video_end() - 30.0).abs() < 1e-9);
+        assert!((tl.timeline_end() - 30.0).abs() < 1e-9);
+
+        tl.audio_clips.push(AudioClip {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("b.wav"),
+            label: "b".into(),
+            duration: 10.0,
+            offset: 0.0,
+        });
+        // 总音频 40 > 视频 30: 导入侧会 extend; 这里模拟追加后 fit
+        tl.fit_after_audio_change();
+        assert!((tl.video_end() - 40.0).abs() < 1e-9);
+
+        let drop_id = tl.audio_clips[1].id;
+        tl.selected_audio = Some(drop_id);
+        tl.delete_selected();
+        assert!((tl.audio_total() - 30.0).abs() < 1e-9);
+        assert!((tl.video_end() - 30.0).abs() < 1e-9);
+        assert!((tl.timeline_end() - 30.0).abs() < 1e-9);
     }
 }

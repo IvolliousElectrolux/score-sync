@@ -189,8 +189,16 @@ fn compute_waveform_peaks(path: &std::path::Path) -> Option<Vec<f32>> {
     Some(peaks)
 }
 
-/// 淡入淡出拖拽吸附阈值 (像素).
+/// 时间轴边界吸附阈值 (像素): 视频/淡入淡出/音频边界彼此靠近时对齐.
 const SNAP_PX: f32 = 8.0;
+
+/// 吸附时排除自身边界, 避免拖拽边缘粘在自己身上.
+#[derive(Clone, Copy)]
+enum SnapExclude {
+    None,
+    Fade(Uuid),
+    Video(Uuid),
+}
 
 pub struct ScoreVideoApp {
     focus_handle: FocusHandle,
@@ -453,9 +461,9 @@ impl ScoreVideoApp {
         (rel.max(0.0) / self.px_per_sec.max(0.01)) as f64 + self.track_scroll
     }
 
-    /// 淡入淡出拖拽吸附: 就近吸附到其它淡入淡出边界/视频片段边界/播放头/0/
-    /// 时间轴末尾, `exclude` 为当前正在拖拽的淡入淡出自身 (不吸附到自己).
-    fn snap_time(&self, t: f64, exclude: Option<Uuid>) -> f64 {
+    /// 时间点吸附: 就近对齐到视频/淡入淡出/音频边界、播放头、0 与时间轴末尾.
+    /// `exclude` 排除当前正在拖拽的片段自身, 避免粘在自己的边上.
+    fn snap_time(&self, t: f64, exclude: SnapExclude) -> f64 {
         let threshold = (SNAP_PX / self.px_per_sec.max(0.01)) as f64;
         let mut best = t;
         let mut best_d = threshold;
@@ -470,17 +478,46 @@ impl ScoreVideoApp {
         consider(self.timeline.timeline_end());
         consider(self.timeline.playhead);
         for c in &self.timeline.video_clips {
+            if matches!(exclude, SnapExclude::Video(id) if id == c.id) {
+                continue;
+            }
             consider(c.start);
             consider(c.end);
         }
         for f in &self.timeline.fades {
-            if Some(f.id) == exclude {
+            if matches!(exclude, SnapExclude::Fade(id) if id == f.id) {
                 continue;
             }
             consider(f.start);
             consider(f.end);
         }
+        let mut audio_t = 0.0;
+        consider(audio_t);
+        for a in &self.timeline.audio_clips {
+            audio_t += a.duration;
+            consider(audio_t);
+        }
         best
+    }
+
+    /// 整体拖动时按左右边界就近吸附, 返回修正后的时间增量.
+    fn snap_body_delta(
+        &self,
+        start: f64,
+        end: f64,
+        delta: f64,
+        exclude: SnapExclude,
+    ) -> (f64, f64) {
+        let new_start = start + delta;
+        let new_end = end + delta;
+        let ss = self.snap_time(new_start, exclude);
+        let se = self.snap_time(new_end, exclude);
+        let adj = if (ss - new_start).abs() <= (se - new_end).abs() {
+            ss - new_start
+        } else {
+            se - new_end
+        };
+        (delta + adj, adj)
     }
 
     pub fn play_pause(&mut self, cx: &mut Context<Self>) {
@@ -592,6 +629,7 @@ impl ScoreVideoApp {
             added += 1;
         }
         if added > 0 {
+            self.timeline.fit_after_audio_change();
             self.audio.set_clips(self.timeline.audio_clips.clone());
         }
         cx.notify();
@@ -881,48 +919,71 @@ impl ScoreVideoApp {
             Some(VideoDrag::Seek) => self.seek_from_preview_x(x, cx),
             Some(VideoDrag::TrimLeft { id }) => {
                 self.ensure_drag_undo();
-                let t = self.x_to_time(x);
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, SnapExclude::Video(id));
                 self.timeline.trim_left(id, t);
                 cx.notify();
             }
             Some(VideoDrag::TrimRight { id }) => {
                 self.ensure_drag_undo();
-                let t = self.x_to_time(x);
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, SnapExclude::Video(id));
                 self.timeline.trim_right(id, t);
                 cx.notify();
             }
             Some(VideoDrag::Body { id, last_t }) => {
                 self.ensure_drag_undo();
                 let t = self.x_to_time(x);
-                self.timeline.drag_body(id, t - last_t);
-                self.drag = Some(VideoDrag::Body { id, last_t: t });
+                let delta = t - last_t;
+                let (final_delta, adj) = if let Some(c) =
+                    self.timeline.video_clips.iter().find(|c| c.id == id)
+                {
+                    self.snap_body_delta(c.start, c.end, delta, SnapExclude::Video(id))
+                } else {
+                    (delta, 0.0)
+                };
+                self.timeline.drag_body(id, final_delta);
+                self.drag = Some(VideoDrag::Body {
+                    id,
+                    last_t: t + adj,
+                });
                 cx.notify();
             }
             Some(VideoDrag::FadeSelect { anchor }) => {
-                let t = self.x_to_time(x);
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, SnapExclude::None);
                 self.timeline.fade_selection = Some((anchor, t));
                 cx.notify();
             }
             Some(VideoDrag::FadeTrimLeft { id }) => {
                 self.ensure_drag_undo();
                 let raw = self.x_to_time(x);
-                let t = self.snap_time(raw, Some(id));
+                let t = self.snap_time(raw, SnapExclude::Fade(id));
                 self.timeline.trim_fade_left(id, t);
                 cx.notify();
             }
             Some(VideoDrag::FadeTrimRight { id }) => {
                 self.ensure_drag_undo();
                 let raw = self.x_to_time(x);
-                let t = self.snap_time(raw, Some(id));
+                let t = self.snap_time(raw, SnapExclude::Fade(id));
                 self.timeline.trim_fade_right(id, t);
                 cx.notify();
             }
             Some(VideoDrag::FadeBody { id, last_t }) => {
                 self.ensure_drag_undo();
-                let raw = self.x_to_time(x);
-                let t = self.snap_time(raw, Some(id));
-                self.timeline.drag_fade_body(id, t - last_t);
-                self.drag = Some(VideoDrag::FadeBody { id, last_t: t });
+                let t = self.x_to_time(x);
+                let delta = t - last_t;
+                let (final_delta, adj) =
+                    if let Some(f) = self.timeline.fades.iter().find(|f| f.id == id) {
+                        self.snap_body_delta(f.start, f.end, delta, SnapExclude::Fade(id))
+                    } else {
+                        (delta, 0.0)
+                    };
+                self.timeline.drag_fade_body(id, final_delta);
+                self.drag = Some(VideoDrag::FadeBody {
+                    id,
+                    last_t: t + adj,
+                });
                 cx.notify();
             }
             Some(VideoDrag::AudioBody {
@@ -971,14 +1032,16 @@ impl ScoreVideoApp {
                 self.apply_track_bar_zoom_right(x, anchor_start_t, cx);
             }
             Some(VideoDrag::FadeSelectTrimLeft) => {
-                let t = self.x_to_time(x);
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, SnapExclude::None);
                 if let Some((_, b)) = self.timeline.fade_selection {
                     self.timeline.fade_selection = Some((t, b));
                 }
                 cx.notify();
             }
             Some(VideoDrag::FadeSelectTrimRight) => {
-                let t = self.x_to_time(x);
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, SnapExclude::None);
                 if let Some((a, _)) = self.timeline.fade_selection {
                     self.timeline.fade_selection = Some((a, t));
                 }
@@ -1455,7 +1518,7 @@ impl ScoreVideoApp {
                     // 命中已有淡入淡出条目的处理在条目自身的 on_mouse_down 里
                     // 通过 `stop_propagation` 拦截, 这里只处理空白区域拖选新建.
                     let x = f32::from(ev.position.x);
-                    let t = this.x_to_time(x);
+                    let t = this.snap_time(this.x_to_time(x), SnapExclude::None);
                     this.timeline.selected_fade = None;
                     this.timeline.fade_selection = Some((t, t));
                     this.drag = Some(VideoDrag::FadeSelect { anchor: t });
@@ -1539,7 +1602,7 @@ impl ScoreVideoApp {
                             } else if (mx - end_x).abs() <= EDGE_ZONE {
                                 this.drag = Some(VideoDrag::FadeSelectTrimRight);
                             } else {
-                                let t = this.x_to_time(mx);
+                                let t = this.snap_time(this.x_to_time(mx), SnapExclude::None);
                                 this.timeline.selected_fade = None;
                                 this.timeline.fade_selection = Some((t, t));
                                 this.drag = Some(VideoDrag::FadeSelect { anchor: t });
@@ -2743,6 +2806,7 @@ pub fn run_gui(images: Vec<PathBuf>, audio: Option<PathBuf>) {
                                 duration: dur,
                                 offset: 0.0,
                             });
+                            app.timeline.fit_after_audio_change();
                         }
                     }
                     app.focus_handle.focus(window);
