@@ -16,3 +16,6 @@ pdfium.dll
 
 **/target/
 
+# 工作区 crate 若单独 cargo 过会产生 lock; 主工程只用根 Cargo.lock
+crates/**/Cargo.lock
+

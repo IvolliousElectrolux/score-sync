@@ -24,6 +24,8 @@ struct ProjectFile {
     margin: i32,
     ink_threshold: i32,
     mask_opacity: f32,
+    #[serde(default)]
+    mask_prefs: Option<mask_tool::color_prefs::MaskColorPrefs>,
     current_page_index: usize,
     active_group_id: Option<String>,
     selected_region_ids: Vec<String>,
@@ -253,7 +255,8 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         version: PROJECT_VERSION,
         margin: doc.margin,
         ink_threshold: doc.ink_threshold,
-        mask_opacity: doc.mask_opacity,
+        mask_opacity: doc.mask_prefs.mask_opacity,
+        mask_prefs: Some(doc.mask_prefs.clone()),
         current_page_index: doc.current_page_index.min(doc.pages.len().saturating_sub(1)),
         active_group_id: doc.active_group_id.clone(),
         selected_region_ids: selected,
@@ -388,7 +391,13 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         margin: meta.margin,
         ink_threshold: meta.ink_threshold,
         group_masks: meta.group_masks,
-        mask_opacity: meta.mask_opacity,
+        mask_prefs: meta
+            .mask_prefs
+            .unwrap_or_else(|| mask_tool::color_prefs::MaskColorPrefs {
+                mask_opacity: meta.mask_opacity,
+                ..Default::default()
+            })
+            .clamp(),
         // 工程文件内的 groups 顺序即导出顺序
         groups_manual_order: true,
         bg_enabled: false,

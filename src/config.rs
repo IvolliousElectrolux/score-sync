@@ -1,13 +1,30 @@
-//! 上次打开工程路径记忆: 存于 %APPDATA%/score_sync (否则临时目录), 与
-//! `apply_bg` 记忆底色/输入输出路径是同一套逻辑, 方便下次启动时自动恢复.
+//! 上次打开工程路径 + 蒙版选色偏好: 存于 %APPDATA%/score_sync.
+//!
+//! `config.json` 为新格式; 若仅有旧版 `config.txt` 则读取 `last_project=` 并迁移.
 
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+use mask_tool::color_prefs::MaskColorPrefs;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// 最近一次成功打开/保存的工程文件路径 (`.staffcrop`).
+    #[serde(default)]
     pub last_project: String,
+    /// 蒙版/画笔颜色与透明度偏好 (新工程默认从此读取).
+    #[serde(default)]
+    pub mask_prefs: MaskColorPrefs,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            last_project: String::new(),
+            mask_prefs: MaskColorPrefs::default(),
+        }
+    }
 }
 
 pub fn config_dir() -> PathBuf {
@@ -19,15 +36,16 @@ pub fn config_dir() -> PathBuf {
     std::env::temp_dir().join("score_sync")
 }
 
-fn config_path() -> PathBuf {
+fn config_json_path() -> PathBuf {
+    config_dir().join("config.json")
+}
+
+fn config_txt_path() -> PathBuf {
     config_dir().join("config.txt")
 }
 
-pub fn load() -> Config {
-    let path = config_path();
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Config::default();
-    };
+fn load_legacy_txt() -> Option<Config> {
+    let text = fs::read_to_string(config_txt_path()).ok()?;
     let mut cfg = Config::default();
     for line in text.lines() {
         let line = line.trim();
@@ -38,7 +56,17 @@ pub fn load() -> Config {
             cfg.last_project = v.to_string();
         }
     }
-    cfg
+    Some(cfg)
+}
+
+pub fn load() -> Config {
+    if let Ok(text) = fs::read_to_string(config_json_path()) {
+        if let Ok(mut cfg) = serde_json::from_str::<Config>(&text) {
+            cfg.mask_prefs = cfg.mask_prefs.clamp();
+            return cfg;
+        }
+    }
+    load_legacy_txt().unwrap_or_default()
 }
 
 pub fn save(cfg: &Config) {
@@ -46,13 +74,23 @@ pub fn save(cfg: &Config) {
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let body = format!("last_project={}\n", cfg.last_project);
-    let _ = fs::write(config_path(), body);
+    let mut cfg = cfg.clone();
+    cfg.mask_prefs = cfg.mask_prefs.clamp();
+    if let Ok(body) = serde_json::to_string_pretty(&cfg) {
+        let _ = fs::write(config_json_path(), body);
+    }
 }
 
-/// 打开/保存工程成功后调用: 把这次的路径记为"上次打开的工程".
+/// 打开/保存工程成功后调用: 把这次的路径记为"上次打开的工程" (保留选色偏好).
 pub fn remember_last_project(path: &std::path::Path) {
-    save(&Config {
-        last_project: path.display().to_string(),
-    });
+    let mut cfg = load();
+    cfg.last_project = path.display().to_string();
+    save(&cfg);
+}
+
+/// 把当前蒙版选色偏好写入 appdata (新工程默认用).
+pub fn remember_mask_prefs(prefs: &MaskColorPrefs) {
+    let mut cfg = load();
+    cfg.mask_prefs = prefs.clone().clamp();
+    save(&cfg);
 }

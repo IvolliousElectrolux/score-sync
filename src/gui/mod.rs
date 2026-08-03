@@ -11,17 +11,17 @@ use std::time::Duration;
 
 use gpui::{
     actions, canvas, div, point, prelude::*, px, quad, rgb, size, App, Application, Bounds,
-    Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
+    Context, CursorStyle, DispatchPhase, Entity, ExternalPaths, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 use image::{Frame, ImageBuffer, RgbaImage};
 use smallvec::smallvec;
 
 use crate::config;
 use crate::export::export_groups;
-use crate::model::{is_image_path, is_open_path, is_pdf_path, parse_color_hex, DocState};
+use crate::model::{is_image_path, is_open_path, is_pdf_path, parse_color_hex, DocState, Group, Region};
 use crate::pdf;
 use crate::project::{self, is_project_path};
 use crate::text_input::{self, TextInput};
@@ -55,8 +55,13 @@ actions!(
         UngroupActive,
         ConfirmParamEdit,
         CancelParamEdit,
+        Undo,
+        Redo,
+        SelectAllPageRegions,
     ]
 );
+
+const CROP_HISTORY_LIMIT: usize = 64;
 
 const A4_RATIO: f32 = 210.0 / 297.0;
 const SIDE_PANEL_W: f32 = 340.0;
@@ -70,15 +75,20 @@ const HELP_TEXT: &str = "\
   D 识别本页 | A 识别全部页\n\
   N 添加新块 | S 分割块 | M 合并组合 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
   E 导出组合 | R 重置本页分组 | F 适应窗口 | H / F1 操作说明\n\
+  Ctrl+A 全选本页原子块 | 输出组合 Ctrl+点击多选 (拖拽时整块一起调序)\n\
+  Ctrl+Z/Y 撤重 (按当前标签页独立记忆)\n\
 \n\
 【蒙版】快捷键 (右侧切到蒙版后):\n\
-  B 框选 | P 平移 | E 导出本页图片 | F 适应 | Delete 删除选中\n\
-  Ctrl+A 全选蒙版 | Ctrl+Z/Y 撤重 | Ctrl+滚轮缩放\n\
+  B 框选 | L 折线 (逐点连线, 吸附首点闭环) | P 平移 | 画笔/橡皮 (侧栏, 可调色/粗细)\n\
+  E 导出本页图片 | F 适应 | Delete 删除选中\n\
+  Ctrl+A 全选蒙版 | Ctrl+Z/Y 撤重 (按组合独立记忆, 切走再回来仍可撤)\n\
+  有选中时透明度滑条改选中项; 无选中时改后续新建默认透明度\n\
 \n\
 【视频】快捷键 (右侧切到视频后, 先在轨道/预览区点一下获得焦点):\n\
   空格 播放/暂停 | ← / → 快退/快进 1 秒 | Shift+← / Shift+→ 快退/快进 5 秒\n\
   N 在播放头插入下一张组合 (按素材池顺序自动顺延) | I 标记淡入 | O 标记淡出\n\
   Delete / Backspace 删除当前选中的视频片段/淡入淡出/音频片段\n\
+  Ctrl+Z/Y 撤重 (时间轴操作)\n\
   鼠标: 拖动片段两端裁剪, 拖动片段整体移动; 淡入淡出轨道可直接拖选一段生成区间,\n\
   相邻区间自动吸附; 音频片段可左右拖动重新排序; 轨道区 Ctrl+滚轮缩放、普通滚轮左右平移,\n\
   底部横条可整体拖动平移, 拖两端圆点改变缩放.\n\
@@ -86,21 +96,22 @@ const HELP_TEXT: &str = "\
 操作步骤:\n\
 1. 打开/拖入图片或 PDF → 多标签页; PDF 会先转到临时 PNG 再按页加载.\n\
 2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续.\n\
-3. 标签右键菜单「复制本页」可再放一页副本 (反复前/后各编一组).\n\
+3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
 4. 每页独立识别分块; 「识别全部页」一次处理所有标签.\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
 6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
 7. Ctrl 多选可跨页, 「合并组合」; 脚注可用「共享脚注」让同一块出现在多组导出中.\n\
-8. 「输出组合」可拖拽调序 (导出按此顺序); 未手动调序时按组内首块 (页序, y) 自动排.\n\
+8. 「输出组合」可 Ctrl 多选并以整块拖拽调序 (导出按此顺序); 未手动调序时按组内首块 (页序, y) 自动排.\n\
+   左侧点选块或切回分块时, 列表会滚到对应组合.\n\
 9. 「蒙版」编辑当前组合的竖向拼合图; 蒙版坐标相对拼合图, 各组合独立\n\
-   (共享脚注可在不同组画不同遮盖). 标签栏切换组合; 切回分块会定位到对应页并选中该组.\n\
+   (共享脚注可在不同组画不同遮盖). 标签栏/侧栏切换组合; 与分块互相切换时会定位并滚动到对应组合.\n\
 10. 「导出组合」按「输出组合」列表顺序拼接并套用各组蒙版; 蒙版侧「导出本页图片」只导出当前组合.\n\
 11. 「工程」页「应用到工程组合」把工程底色作为可撤销的底层异步叠加到各输出组合 (不卡界面),\n\
     「取消工程底色」还原为两层状态; 蒙版/视频里的预览也会实时带上这层底色.\n\
 12. 「视频」页: 上方预览窗 (悬浮显示可拖动的进度条), 下方视频/淡入淡出/音频三条轨道;\n\
     右侧素材池按「输出组合」顺序显示, 点击展开该组合的预览, 拖到视频轨道指定位置即可插入;\n\
     「导入音频」可一次导入多段按顺序播放的音频 (如各乐章分轨); 「分割音频」按下后,\n\
-    在音频轨道上点一下鼠标即可把该处的音频从此切开成两段.\n\
+    在音频轨道上点一下鼠标即可把该处的音频从此切开成两段 (命名为 原名-1 / 原名-2).\n\
 13. 「导出视频」弹窗: 容器选 MP4 (音频有损 AAC, 兼容性好) 或 MKV (音频无损 FLAC);\n\
     帧率可直接点击数字修改; 画质 CRF 数值越小越清晰、文件越大; 分辨率固定跟随素材图片\n\
     (加底色后统一尺寸), 无需选择. 导出进度/日志直接显示在弹窗内, 不会另外弹出终端窗口.\n\
@@ -143,11 +154,29 @@ enum SideTool {
     Video,
 }
 
+/// 分块面板一次可撤操作的快照 (按「触发时所在页」入栈; 可含多页 regions).
+#[derive(Clone)]
+struct CropSnap {
+    page_regions: HashMap<String, HashMap<String, Region>>,
+    groups: Vec<Group>,
+    selected_region_ids: HashSet<String>,
+    active_group_id: Option<String>,
+    groups_manual_order: bool,
+}
+
+#[derive(Clone, Default)]
+struct CropHistory {
+    undo: Vec<CropSnap>,
+    redo: Vec<CropSnap>,
+}
+
 enum DragKind {
     PagePan { last: Point<Pixels> },
     Edge {
         region_id: String,
         edge: &'static str,
+        /// 本轮拖边是否已压入撤销栈
+        undid: bool,
     },
     /// 添加新块拖拽: 锚定边 + 活动边
     AddBlock {
@@ -174,7 +203,6 @@ enum DragKind {
     /// 输出组合列表竖直拖拽调序 (逻辑同 MemberReorder)
     GroupReorder {
         from: usize,
-        to: usize,
         line_at: Option<usize>,
         line_after: bool,
         start_x: f32,
@@ -184,6 +212,8 @@ enum DragKind {
         x: f32,
         y: f32,
         armed: bool,
+        /// 按下时是否按住 Ctrl (松开时用于多选, 不依赖 mouse_up 修饰键)
+        ctrl: bool,
     },
     TabReorder {
         from: usize,
@@ -325,13 +355,21 @@ struct ScoreSyncApp {
     /// 判断自己是否已被更晚的一轮请求取代 (取代则丢弃结果, 避免旧结果
     /// 覆盖新状态; 例如快速连续应用/取消底色时).
     video_sync_gen: u64,
+    /// 分块撤重: key = page_id, 各标签页互不影响.
+    crop_histories: HashMap<String, CropHistory>,
 }
 
 impl ScoreSyncApp {
     fn new(cx: &mut Context<Self>, initial: Vec<PathBuf>) -> Self {
+        let cfg = config::load();
+        let mask_prefs = cfg.mask_prefs.clone();
         let edit_y_input = cx.new(|cx| TextInput::new(cx, "", "例如 94-371"));
         let param_input = cx.new(|cx| TextInput::new(cx, "", "数字"));
-        let mask_tool = cx.new(|cx| MaskToolApp::new(cx, None));
+        let mask_tool = cx.new(|cx| {
+            let mut m = MaskToolApp::new(cx, None);
+            m.apply_color_prefs(mask_prefs.clone());
+            m
+        });
         cx.observe(&mask_tool, |_, _, cx| cx.notify()).detach();
         let apply_bg = cx.new(ApplyBgApp::new);
         cx.observe(&apply_bg, |_, _, cx| cx.notify()).detach();
@@ -339,7 +377,11 @@ impl ScoreSyncApp {
         cx.observe(&score_video, |_, _, cx| cx.notify()).detach();
         let mut app = Self {
             focus_handle: cx.focus_handle(),
-            doc: DocState::new(),
+            doc: {
+                let mut d = DocState::new();
+                d.mask_prefs = mask_prefs;
+                d
+            },
             render_image: None,
             img_w: 0,
             img_h: 0,
@@ -380,6 +422,7 @@ impl ScoreSyncApp {
             saving: false,
             opening: false,
             video_sync_gen: 0,
+            crop_histories: HashMap::new(),
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -541,7 +584,7 @@ impl ScoreSyncApp {
         (from, None, false)
     }
 
-    /// 竖直列表 (输出组合): 同成员.
+    /// 竖直列表 (输出组合): 同成员; 多选时落点忽略移动块内其它项.
     fn resolve_group_drop(
         &self,
         from: usize,
@@ -552,6 +595,7 @@ impl ScoreSyncApp {
         if n == 0 {
             return (from, None, false);
         }
+        let moving: HashSet<usize> = self.doc.group_move_indices(from).into_iter().collect();
         for i in 0..n {
             let Some(b) = self.group_bounds.get(&i) else {
                 continue;
@@ -561,7 +605,7 @@ impl ScoreSyncApp {
             if y < top || y > bottom {
                 continue;
             }
-            if i == from {
+            if moving.contains(&i) {
                 return (from, None, false);
             }
             let mid = (top + bottom) * 0.5;
@@ -638,8 +682,7 @@ impl ScoreSyncApp {
             .iter()
             .map(|m| {
                 let mut m = m.clone();
-                m.y0 += voff as i32;
-                m.y1 += voff as i32;
+                m.offset_y(voff as i32);
                 m
             })
             .collect();
@@ -658,11 +701,11 @@ impl ScoreSyncApp {
             .map(|g| g.region_ids.len())
             .unwrap_or(0);
         let label = format!("{gname} (拼合 {n} 块)");
-        let opacity = self.doc.mask_opacity;
+        let mask_prefs = self.doc.mask_prefs.clone();
         self.mask_tool.update(cx, |m, cx| {
             m.set_embed_side_width(side_w);
             m.load_rgb(rgb, gid, masks, &label, cx);
-            m.set_opacity(opacity);
+            m.apply_color_prefs(mask_prefs);
         });
     }
 
@@ -684,20 +727,20 @@ impl ScoreSyncApp {
         let Some(gid) = self.mask_target.clone() else {
             return;
         };
-        let (masks, opacity) = self
+        let (masks, prefs) = self
             .mask_tool
-            .update(cx, |m, _| (m.masks_clone(), m.opacity()));
+            .update(cx, |m, _| (m.masks_clone(), m.color_prefs()));
         let voff = self.mask_preview_voff;
         let masks: Vec<MaskRect> = masks
             .into_iter()
             .map(|mut m| {
-                m.y0 -= voff as i32;
-                m.y1 -= voff as i32;
+                m.offset_y(-(voff as i32));
                 m
             })
             .collect();
         self.doc.set_group_masks(&gid, masks);
-        self.doc.mask_opacity = opacity;
+        self.doc.mask_prefs = prefs.clone();
+        config::remember_mask_prefs(&prefs);
     }
 
     fn set_mask_target(&mut self, group_id: String, cx: &mut Context<Self>) {
@@ -709,6 +752,7 @@ impl ScoreSyncApp {
         self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
         self.mask_target = None;
         self.sync_mask_image(cx);
+        self.scroll_mask_lists_to_active();
         cx.notify();
     }
 
@@ -732,6 +776,7 @@ impl ScoreSyncApp {
                 self.mask_target = None;
                 self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
                 self.sync_mask_image(cx);
+                self.scroll_mask_lists_to_active();
                 self.mask_tool.read(cx).focus_handle_ref().focus(window);
                 self.status = "蒙版工具".into();
                 self.hint =
@@ -848,11 +893,13 @@ impl ScoreSyncApp {
             if let Some((pi, _)) = self.doc.find_region(rid) {
                 if pi != self.doc.current_page_index {
                     self.doc.current_page_index = pi;
+                    self.scroll_group_list_to_active();
                     self.refresh_render(cx);
                     return;
                 }
             }
         }
+        self.scroll_group_list_to_active();
         cx.notify();
     }
 
@@ -876,6 +923,183 @@ impl ScoreSyncApp {
             self.sync_mask_image(cx);
         }
         cx.notify();
+    }
+
+    /// 将「输出组合」列表滚到能显示 active_group 的位置.
+    fn scroll_group_list_to_active(&self) {
+        let Some(gid) = self.doc.active_group_id.as_ref() else {
+            return;
+        };
+        let Some(ix) = self.doc.groups.iter().position(|g| &g.id == gid) else {
+            return;
+        };
+        self.group_scroll.scroll_to_item(ix);
+    }
+
+    /// 将蒙版侧「编辑目标」列表与顶部组合标签滚到 active_group.
+    fn scroll_mask_lists_to_active(&self) {
+        let Some(gid) = self
+            .mask_target
+            .as_ref()
+            .or(self.doc.active_group_id.as_ref())
+        else {
+            return;
+        };
+        let Some(ix) = self.doc.groups.iter().position(|g| &g.id == gid) else {
+            return;
+        };
+        self.mask_group_scroll.scroll_to_item(ix);
+        self.tab_scroll.scroll_to_item(ix);
+    }
+
+    fn capture_crop_snap(&self, page_ids: &[String]) -> CropSnap {
+        let mut page_regions = HashMap::new();
+        for pid in page_ids {
+            if let Some(p) = self.doc.pages.iter().find(|p| p.id == *pid) {
+                page_regions.insert(pid.clone(), p.regions.clone());
+            }
+        }
+        CropSnap {
+            page_regions,
+            groups: self.doc.groups.clone(),
+            selected_region_ids: self.doc.selected_region_ids.clone(),
+            active_group_id: self.doc.active_group_id.clone(),
+            groups_manual_order: self.doc.groups_manual_order,
+        }
+    }
+
+    fn push_crop_undo_for(&mut self, page_ids: &[String]) {
+        let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) else {
+            return;
+        };
+        if page_ids.is_empty() {
+            return;
+        }
+        let snap = self.capture_crop_snap(page_ids);
+        let h = self.crop_histories.entry(cur).or_default();
+        h.undo.push(snap);
+        if h.undo.len() > CROP_HISTORY_LIMIT {
+            h.undo.remove(0);
+        }
+        h.redo.clear();
+    }
+
+    fn push_crop_undo_current(&mut self) {
+        let Some(id) = self.doc.current_page().map(|p| p.id.clone()) else {
+            return;
+        };
+        self.push_crop_undo_for(&[id]);
+    }
+
+    fn push_crop_undo_all_pages(&mut self) {
+        let ids: Vec<String> = self.doc.pages.iter().map(|p| p.id.clone()).collect();
+        self.push_crop_undo_for(&ids);
+    }
+
+    fn apply_crop_snap(&mut self, snap: CropSnap) {
+        for (pid, regions) in snap.page_regions {
+            if let Some(p) = self.doc.pages.iter_mut().find(|p| p.id == pid) {
+                p.regions = regions;
+            }
+        }
+        self.doc.groups = snap.groups;
+        self.doc.selected_region_ids = snap.selected_region_ids;
+        self.doc.active_group_id = snap.active_group_id;
+        self.doc.groups_manual_order = snap.groups_manual_order;
+        self.doc.ensure_active_group();
+    }
+
+    fn undo_crop(&mut self, cx: &mut Context<Self>) {
+        let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) else {
+            self.status = "没有可撤回的操作.".into();
+            cx.notify();
+            return;
+        };
+        let prev = {
+            let Some(h) = self.crop_histories.get_mut(&cur) else {
+                self.status = "没有可撤回的操作.".into();
+                cx.notify();
+                return;
+            };
+            match h.undo.pop() {
+                Some(p) => p,
+                None => {
+                    self.status = "没有可撤回的操作.".into();
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        let ids: Vec<String> = prev.page_regions.keys().cloned().collect();
+        let now = self.capture_crop_snap(&ids);
+        if let Some(h) = self.crop_histories.get_mut(&cur) {
+            h.redo.push(now);
+        }
+        self.apply_crop_snap(prev);
+        self.status = "已撤回.".into();
+        self.hint = self.status.clone();
+        self.after_doc_change(cx);
+    }
+
+    fn redo_crop(&mut self, cx: &mut Context<Self>) {
+        let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) else {
+            self.status = "没有可重做的操作.".into();
+            cx.notify();
+            return;
+        };
+        let next = {
+            let Some(h) = self.crop_histories.get_mut(&cur) else {
+                self.status = "没有可重做的操作.".into();
+                cx.notify();
+                return;
+            };
+            match h.redo.pop() {
+                Some(n) => n,
+                None => {
+                    self.status = "没有可重做的操作.".into();
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        let ids: Vec<String> = next.page_regions.keys().cloned().collect();
+        let now = self.capture_crop_snap(&ids);
+        if let Some(h) = self.crop_histories.get_mut(&cur) {
+            h.undo.push(now);
+            if h.undo.len() > CROP_HISTORY_LIMIT {
+                h.undo.remove(0);
+            }
+        }
+        self.apply_crop_snap(next);
+        self.status = "已重做.".into();
+        self.hint = self.status.clone();
+        self.after_doc_change(cx);
+    }
+
+    fn undo_action(&mut self, cx: &mut Context<Self>) {
+        match self.side_tool {
+            SideTool::Crop => self.undo_crop(cx),
+            SideTool::Mask => {
+                self.mask_tool.update(cx, |m, cx| m.undo(cx));
+            }
+            SideTool::Video => {
+                self.score_video.update(cx, |v, cx| v.undo(cx));
+            }
+            SideTool::Project => {}
+        }
+    }
+
+    fn redo_action(&mut self, cx: &mut Context<Self>) {
+        match self.side_tool {
+            SideTool::Crop => self.redo_crop(cx),
+            SideTool::Mask => {
+                self.mask_tool.update(cx, |m, cx| m.redo(cx));
+            }
+            SideTool::Video => {
+                self.score_video.update(cx, |v, cx| v.redo(cx));
+            }
+            SideTool::Project => {}
+        }
     }
 
     fn load_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -1106,6 +1330,7 @@ impl ScoreSyncApp {
                         view.tab_menu = None;
                         view.param_edit = None;
                         view.region_y_edit = None;
+                        view.crop_histories.clear();
                         view.side_tool = SideTool::Crop;
                         view.canvas_tool = CanvasTool::Normal;
                         view.mask_target = None;
@@ -1115,6 +1340,10 @@ impl ScoreSyncApp {
                         view.user_zoomed = false;
                         view.zoom = 1.0;
                         view.pan = point(0.0, 0.0);
+                        let mask_prefs = view.doc.mask_prefs.clone();
+                        view.mask_tool.update(cx, |m, _| {
+                            m.apply_color_prefs(mask_prefs);
+                        });
                         view.refresh_render(cx);
                         view.status = format!(
                             "已打开工程: {} ({} 页, {} 组)",
@@ -1265,6 +1494,7 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        self.push_crop_undo_current();
         let idx = self.doc.current_page_index;
         self.doc.detect_page(idx, true);
         let n = self.doc.pages[idx].regions.len();
@@ -1287,6 +1517,7 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        self.push_crop_undo_all_pages();
         self.doc.detect_all();
         self.status = format!("已识别全部 {} 页.", self.doc.pages.len()).into();
         self.hint = self.status.clone();
@@ -1334,6 +1565,7 @@ impl ScoreSyncApp {
     }
 
     fn merge_selected(&mut self, cx: &mut Context<Self>) {
+        self.push_crop_undo_all_pages();
         match self.doc.merge_selected() {
             Ok(n) => {
                 self.status = format!("已合并 {n} 块为组合.").into();
@@ -1341,6 +1573,11 @@ impl ScoreSyncApp {
                 self.after_doc_change(cx);
             }
             Err(e) => {
+                if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+                    if let Some(h) = self.crop_histories.get_mut(&cur) {
+                        h.undo.pop();
+                    }
+                }
                 self.dialog = Some(DialogKind::Info {
                     title: "提示".into(),
                     body: e.into(),
@@ -1351,8 +1588,14 @@ impl ScoreSyncApp {
     }
 
     fn share_into_group(&mut self, cx: &mut Context<Self>) {
+        self.push_crop_undo_all_pages();
         match self.doc.share_selected_into_active() {
             Ok(0) => {
+                if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+                    if let Some(h) = self.crop_histories.get_mut(&cur) {
+                        h.undo.pop();
+                    }
+                }
                 self.status = "选中块已在当前组中.".into();
                 cx.notify();
             }
@@ -1363,6 +1606,11 @@ impl ScoreSyncApp {
                 self.after_doc_change(cx);
             }
             Err(e) => {
+                if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+                    if let Some(h) = self.crop_histories.get_mut(&cur) {
+                        h.undo.pop();
+                    }
+                }
                 self.dialog = Some(DialogKind::Info {
                     title: "提示".into(),
                     body: e.into(),
@@ -1373,12 +1621,18 @@ impl ScoreSyncApp {
     }
 
     fn ungroup_active(&mut self, cx: &mut Context<Self>) {
+        self.push_crop_undo_all_pages();
         match self.doc.ungroup_active() {
             Ok(()) => {
                 self.status = "已拆开组合.".into();
                 self.after_doc_change(cx);
             }
             Err(e) => {
+                if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+                    if let Some(h) = self.crop_histories.get_mut(&cur) {
+                        h.undo.pop();
+                    }
+                }
                 self.dialog = Some(DialogKind::Info {
                     title: "提示".into(),
                     body: e.into(),
@@ -1395,10 +1649,15 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        self.push_crop_undo_all_pages();
         let n = self.doc.delete_selected();
         if n > 0 {
             self.status = format!("已删除 {n} 块.").into();
             self.after_doc_change(cx);
+        } else if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+            if let Some(h) = self.crop_histories.get_mut(&cur) {
+                h.undo.pop();
+            }
         }
     }
 
@@ -1406,6 +1665,7 @@ impl ScoreSyncApp {
         if self.doc.current_page().is_none() {
             return;
         }
+        self.push_crop_undo_all_pages();
         self.doc.reset_current_page_groups();
         self.status = "已重置本页分组.".into();
         self.hint = self.status.clone();
@@ -1466,7 +1726,11 @@ impl ScoreSyncApp {
     }
 
     fn close_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        let pid = self.doc.pages.get(index).map(|p| p.id.clone());
         if self.doc.close_page_at(index) {
+            if let Some(id) = pid {
+                self.crop_histories.remove(&id);
+            }
             self.refresh_render(cx);
         }
     }
@@ -1539,7 +1803,7 @@ impl ScoreSyncApp {
                     id: g.id.clone(),
                     label: text.into(),
                     color: 0x0f172a,
-                    selected: self.doc.active_group_id.as_deref() == Some(g.id.as_str()),
+                    selected: self.doc.group_has_selected_region(g),
                 }
             })
             .collect()
@@ -1614,6 +1878,7 @@ impl ScoreSyncApp {
         let ctrl = event.modifiers.control;
 
         if self.canvas_tool == CanvasTool::SplitBlock {
+            self.push_crop_undo_current();
             let msg = self.doc.split_block_at(iy);
             self.status = msg.clone().into();
             self.hint = self.status.clone();
@@ -1640,15 +1905,18 @@ impl ScoreSyncApp {
         let tol = xform.edge_tol();
         if let Some((rid, edge)) = hit_edge(&regions, &self.doc.selected_region_ids, iy, tol) {
             self.doc.click_region(&rid, ctrl);
+            self.scroll_group_list_to_active();
             self.drag = Some(DragKind::Edge {
                 region_id: rid,
                 edge,
+                undid: false,
             });
             self.after_doc_change(cx);
             return;
         }
         if let Some(rid) = region_at(&regions, &self.doc.selected_region_ids, iy) {
             self.doc.click_region(&rid, ctrl);
+            self.scroll_group_list_to_active();
             self.after_doc_change(cx);
             // 仍可开始平移
             self.drag = Some(DragKind::PagePan {
@@ -1678,9 +1946,22 @@ impl ScoreSyncApp {
 
         let drag = self.drag.take();
         match drag {
-            Some(DragKind::Edge { region_id, edge }) => {
+            Some(DragKind::Edge {
+                region_id,
+                edge,
+                undid,
+            }) => {
+                let mut undid = undid;
+                if !undid {
+                    self.push_crop_undo_current();
+                    undid = true;
+                }
                 self.doc.apply_edge_drag(&region_id, edge, iy.round() as i32);
-                self.drag = Some(DragKind::Edge { region_id, edge });
+                self.drag = Some(DragKind::Edge {
+                    region_id,
+                    edge,
+                    undid,
+                });
                 self.hover_cursor = CursorStyle::ResizeUpDown;
                 self.after_doc_change(cx);
                 return;
@@ -1782,6 +2063,7 @@ impl ScoreSyncApp {
                     if y1 < y0 {
                         self.status = "块高度无效, 已取消.".into();
                     } else {
+                        self.push_crop_undo_current();
                         let msg = self.doc.add_manual_block(y0, y1);
                         self.status = msg.into();
                         self.hint = self.status.clone();
@@ -1961,10 +2243,21 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         };
+        if self.doc.find_region(&region_id).is_none() {
+            self.status = "未能修改该块 y 范围".into();
+            cx.notify();
+            return;
+        }
+        self.push_crop_undo_current();
         if self.doc.set_region_y(&region_id, y0, y1) {
             self.status = format!("已改 → y={}-{}", y0.min(y1), y0.max(y1)).into();
             self.after_doc_change(cx);
         } else {
+            if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+                if let Some(h) = self.crop_histories.get_mut(&cur) {
+                    h.undo.pop();
+                }
+            }
             self.status = "未能修改该块 y 范围".into();
             cx.notify();
         }
@@ -2975,6 +3268,7 @@ impl ScoreSyncApp {
                     }) = this.drag.take()
                     {
                         if armed && from != to {
+                            this.push_crop_undo_all_pages();
                             this.doc.move_page(from, to);
                             this.after_doc_change(cx);
                         } else {
@@ -3709,9 +4003,13 @@ impl ScoreSyncApp {
                     } else {
                         "本页原子块 (折叠; 展开后可点 y 编辑)"
                     })
-                    .on_mouse_up(
+                    .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
+                            // 用 mouse_down: 别处拖拽后在标题上松开不应误触发展开/折叠
+                            if this.drag.is_some() {
+                                return;
+                            }
                             this.region_panel_open = !this.region_panel_open;
                             cx.notify();
                         }),
@@ -3782,6 +4080,7 @@ impl ScoreSyncApp {
                                             this.apply_edit_y(window, cx);
                                         }
                                         this.doc.click_region(&rid_sel, ev.modifiers.control);
+                                        this.scroll_group_list_to_active();
                                         this.after_doc_change(cx);
                                     }),
                                 ),
@@ -3829,6 +4128,7 @@ impl ScoreSyncApp {
                                             this.apply_edit_y(window, cx);
                                         }
                                         this.doc.click_region(&rid, ev.modifiers.control);
+                                        this.scroll_group_list_to_active();
                                         this.after_doc_change(cx);
                                     }),
                                 ),
@@ -3867,11 +4167,11 @@ impl ScoreSyncApp {
             .rounded_md()
             .p_1()
             .bg(rgb(0xffffff));
-        let group_drag_from = match &self.drag {
+        let group_moving: HashSet<usize> = match &self.drag {
             Some(DragKind::GroupReorder {
                 from, armed: true, ..
-            }) => Some(*from),
-            _ => None,
+            }) => self.doc.group_move_indices(*from).into_iter().collect(),
+            _ => HashSet::new(),
         };
         let (group_line_at, group_line_after) = match &self.drag {
             Some(DragKind::GroupReorder {
@@ -3885,7 +4185,7 @@ impl ScoreSyncApp {
         for (i, row) in group_rows.iter().enumerate() {
             let idx = i;
             let gid = row.id.clone();
-            let dragging = group_drag_from == Some(idx);
+            let dragging = group_moving.contains(&idx);
             let show_line = group_line_at == Some(idx);
             let bg = if row.selected {
                 rgb(0xdbeafe)
@@ -3923,7 +4223,6 @@ impl ScoreSyncApp {
                                 Self::item_origin(this.group_bounds.get(&idx), mx, my);
                             this.drag = Some(DragKind::GroupReorder {
                                 from: idx,
-                                to: idx,
                                 line_at: None,
                                 line_after: false,
                                 start_x: mx,
@@ -3933,6 +4232,7 @@ impl ScoreSyncApp {
                                 x: mx,
                                 y: my,
                                 armed: false,
+                                ctrl: ev.modifiers.control,
                             });
                             cx.notify();
                         }),
@@ -3945,6 +4245,7 @@ impl ScoreSyncApp {
                             origin_x,
                             origin_y,
                             mut armed,
+                            ctrl,
                             ..
                         }) = this.drag.take()
                         {
@@ -3953,14 +4254,13 @@ impl ScoreSyncApp {
                             if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
                                 armed = true;
                             }
-                            let (to, line_at, line_after) = if armed {
+                            let (_to, line_at, line_after) = if armed {
                                 this.resolve_group_drop(from, x, y)
                             } else {
                                 (from, None, false)
                             };
                             this.drag = Some(DragKind::GroupReorder {
                                 from,
-                                to,
                                 line_at,
                                 line_after,
                                 start_x,
@@ -3970,6 +4270,7 @@ impl ScoreSyncApp {
                                 x,
                                 y,
                                 armed,
+                                ctrl,
                             });
                             cx.notify();
                         }
@@ -4470,6 +4771,290 @@ impl Focusable for ScoreSyncApp {
     }
 }
 
+impl ScoreSyncApp {
+    /// 窗口外仍继续的拖拽: GPUI 的元素 on_mouse_move/up 要求 hovered,
+    /// 鼠标离开窗口后需由 window.on_mouse_event 转发到此.
+    fn handle_outside_window_mouse_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            if matches!(self.drag, Some(DragKind::Scrollbar { .. })) {
+                self.apply_scrollbar_drag(x, y, cx);
+            }
+            return;
+        }
+        match self.side_tool {
+            SideTool::Mask => {
+                self.mask_tool
+                    .update(cx, |m, cx| m.root_mouse_move(x, y, cx));
+            }
+            SideTool::Video => {
+                self.score_video
+                    .update(cx, |v, cx| v.root_mouse_move(x, y, cx));
+            }
+            _ => {}
+        }
+        self.apply_host_drag_at(x, y, cx);
+    }
+
+    fn handle_outside_window_mouse_up(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            if matches!(self.drag, Some(DragKind::Scrollbar { .. })) {
+                self.drag = None;
+                cx.notify();
+            }
+            return;
+        }
+        match self.side_tool {
+            SideTool::Mask => {
+                self.mask_tool.update(cx, |m, cx| m.root_mouse_up(x, y, cx));
+            }
+            SideTool::Video => {
+                self.score_video
+                    .update(cx, |v, cx| v.root_mouse_up(x, y, cx));
+            }
+            _ => {}
+        }
+        self.finish_host_drag_at(x, y, cx);
+    }
+
+    fn apply_host_drag_at(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        match self.drag {
+            Some(DragKind::Scrollbar { .. }) => {
+                self.apply_scrollbar_drag(x, y, cx);
+            }
+            Some(DragKind::SideResize { .. }) => {
+                self.apply_side_resize(x, cx);
+            }
+            Some(DragKind::TabHScroll { grab }) => {
+                let handle = self.tab_scroll.clone();
+                let b = handle.bounds();
+                let max = f32::from(handle.max_offset().width);
+                if max > 0.5 {
+                    let tw = f32::from(b.size.width).max(1.0);
+                    let thumb = ((tw * tw) / (tw + max)).clamp(24.0, tw);
+                    let travel = (tw - thumb).max(1.0);
+                    let track_left = f32::from(b.origin.x);
+                    let thumb_left = (x - grab - track_left).clamp(0.0, travel);
+                    handle.set_offset(point(px(-(thumb_left / travel) * max), px(0.)));
+                    cx.notify();
+                }
+            }
+            Some(DragKind::TabReorder {
+                from,
+                start_x,
+                start_y,
+                origin_x,
+                origin_y,
+                mut armed,
+                ..
+            }) => {
+                if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                    armed = true;
+                }
+                let (to, line_at, line_after) = if armed {
+                    self.resolve_tab_drop(from, x, y)
+                } else {
+                    (from, None, false)
+                };
+                self.drag = Some(DragKind::TabReorder {
+                    from,
+                    to,
+                    line_at,
+                    line_after,
+                    start_x,
+                    start_y,
+                    origin_x,
+                    origin_y,
+                    x,
+                    y,
+                    armed,
+                });
+                cx.notify();
+            }
+            Some(DragKind::MemberReorder {
+                from,
+                start_x,
+                start_y,
+                origin_x,
+                origin_y,
+                mut armed,
+                ..
+            }) => {
+                if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                    armed = true;
+                }
+                let (to, line_at, line_after) = if armed {
+                    self.resolve_member_drop(from, x, y)
+                } else {
+                    (from, None, false)
+                };
+                self.drag = Some(DragKind::MemberReorder {
+                    from,
+                    to,
+                    line_at,
+                    line_after,
+                    start_x,
+                    start_y,
+                    origin_x,
+                    origin_y,
+                    x,
+                    y,
+                    armed,
+                });
+                cx.notify();
+            }
+            Some(DragKind::GroupReorder {
+                from,
+                start_x,
+                start_y,
+                origin_x,
+                origin_y,
+                mut armed,
+                ctrl,
+                ..
+            }) => {
+                if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+                    armed = true;
+                }
+                let (_to, line_at, line_after) = if armed {
+                    self.resolve_group_drop(from, x, y)
+                } else {
+                    (from, None, false)
+                };
+                self.drag = Some(DragKind::GroupReorder {
+                    from,
+                    line_at,
+                    line_after,
+                    start_x,
+                    start_y,
+                    origin_x,
+                    origin_y,
+                    x,
+                    y,
+                    armed,
+                    ctrl,
+                });
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_host_drag_at(&mut self, _x: f32, _y: f32, cx: &mut Context<Self>) {
+        match self.drag {
+            Some(DragKind::TabReorder { .. })
+            | Some(DragKind::MemberReorder { .. })
+            | Some(DragKind::GroupReorder { .. })
+            | Some(DragKind::Scrollbar { .. })
+            | Some(DragKind::SideResize { .. })
+            | Some(DragKind::TabHScroll { .. }) => {}
+            _ => return,
+        }
+        match self.drag.take() {
+            Some(DragKind::TabReorder {
+                from, to, armed, ..
+            }) => {
+                if armed && from != to {
+                    self.push_crop_undo_all_pages();
+                    self.doc.move_page(from, to);
+                    self.after_doc_change(cx);
+                } else {
+                    cx.notify();
+                }
+            }
+            Some(DragKind::MemberReorder {
+                from, to, armed, ..
+            }) => {
+                if armed && from != to {
+                    let Some(g) = self.doc.active_group() else {
+                        cx.notify();
+                        return;
+                    };
+                    let mut ids = g.region_ids.clone();
+                    if from < ids.len() && to < ids.len() {
+                        self.push_crop_undo_all_pages();
+                        let item = ids.remove(from);
+                        ids.insert(to, item);
+                        self.doc.reorder_active_members(ids);
+                        self.after_doc_change(cx);
+                    } else {
+                        cx.notify();
+                    }
+                } else {
+                    cx.notify();
+                }
+            }
+            Some(DragKind::GroupReorder {
+                from,
+                armed,
+                ctrl,
+                line_at,
+                line_after,
+                ..
+            }) => {
+                if armed {
+                    if let Some(anchor) = line_at {
+                        self.push_crop_undo_all_pages();
+                        self.doc.reorder_groups_block(from, anchor, line_after);
+                        self.after_doc_change(cx);
+                    } else {
+                        cx.notify();
+                    }
+                } else if let Some(gid) = self.doc.groups.get(from).map(|g| g.id.clone()) {
+                    self.doc.click_group(&gid, ctrl);
+                    self.scroll_group_list_to_active();
+                    self.refresh_render(cx);
+                } else {
+                    cx.notify();
+                }
+            }
+            Some(
+                DragKind::Scrollbar { .. }
+                | DragKind::SideResize { .. }
+                | DragKind::TabHScroll { .. },
+            ) => {
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn outside_window_drag_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().clone();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _cx| {
+                let entity_m = entity.clone();
+                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || window.is_window_hovered() {
+                        return;
+                    }
+                    let x = f32::from(ev.position.x);
+                    let y = f32::from(ev.position.y);
+                    entity_m.update(cx, |this, cx| {
+                        this.handle_outside_window_mouse_move(x, y, cx);
+                    });
+                });
+                let entity_u = entity.clone();
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || window.is_window_hovered() {
+                        return;
+                    }
+                    if ev.button != MouseButton::Left {
+                        return;
+                    }
+                    let x = f32::from(ev.position.x);
+                    let y = f32::from(ev.position.y);
+                    entity_u.update(cx, |this, cx| {
+                        this.handle_outside_window_mouse_up(x, y, cx);
+                    });
+                });
+            },
+        )
+        .absolute()
+        .size(px(0.))
+    }
+}
+
 impl Render for ScoreSyncApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title: SharedString = if let Some(page) = self.doc.current_page() {
@@ -4536,125 +5121,14 @@ impl Render for ScoreSyncApp {
                     this.score_video
                         .update(cx, |v, cx| v.root_mouse_move(x, y, cx));
                 }
-                match this.drag {
-                    Some(DragKind::Scrollbar { .. }) => {
-                        this.apply_scrollbar_drag(x, y, cx);
-                    }
-                    Some(DragKind::SideResize { .. }) => {
-                        this.apply_side_resize(x, cx);
-                    }
-                    Some(DragKind::TabHScroll { grab }) => {
-                        let handle = this.tab_scroll.clone();
-                        let b = handle.bounds();
-                        let max = f32::from(handle.max_offset().width);
-                        if max > 0.5 {
-                            let tw = f32::from(b.size.width).max(1.0);
-                            let thumb = ((tw * tw) / (tw + max)).clamp(24.0, tw);
-                            let travel = (tw - thumb).max(1.0);
-                            let track_left = f32::from(b.origin.x);
-                            let thumb_left = (x - grab - track_left).clamp(0.0, travel);
-                            handle.set_offset(point(px(-(thumb_left / travel) * max), px(0.)));
-                            cx.notify();
+                if this.drag.is_none() && this.side_tool == SideTool::Mask {
+                    this.mask_tool.update(cx, |m, cx| {
+                        if m.needs_root_move_forward() {
+                            m.root_mouse_move(x, y, cx);
                         }
-                    }
-                    Some(DragKind::TabReorder {
-                        from,
-                        start_x,
-                        start_y,
-                        origin_x,
-                        origin_y,
-                        mut armed,
-                        ..
-                    }) => {
-                        if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
-                            armed = true;
-                        }
-                        let (to, line_at, line_after) = if armed {
-                            this.resolve_tab_drop(from, x, y)
-                        } else {
-                            (from, None, false)
-                        };
-                        this.drag = Some(DragKind::TabReorder {
-                            from,
-                            to,
-                            line_at,
-                            line_after,
-                            start_x,
-                            start_y,
-                            origin_x,
-                            origin_y,
-                            x,
-                            y,
-                            armed,
-                        });
-                        cx.notify();
-                    }
-                    Some(DragKind::MemberReorder {
-                        from,
-                        start_x,
-                        start_y,
-                        origin_x,
-                        origin_y,
-                        mut armed,
-                        ..
-                    }) => {
-                        if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
-                            armed = true;
-                        }
-                        let (to, line_at, line_after) = if armed {
-                            this.resolve_member_drop(from, x, y)
-                        } else {
-                            (from, None, false)
-                        };
-                        this.drag = Some(DragKind::MemberReorder {
-                            from,
-                            to,
-                            line_at,
-                            line_after,
-                            start_x,
-                            start_y,
-                            origin_x,
-                            origin_y,
-                            x,
-                            y,
-                            armed,
-                        });
-                        cx.notify();
-                    }
-                    Some(DragKind::GroupReorder {
-                        from,
-                        start_x,
-                        start_y,
-                        origin_x,
-                        origin_y,
-                        mut armed,
-                        ..
-                    }) => {
-                        if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
-                            armed = true;
-                        }
-                        let (to, line_at, line_after) = if armed {
-                            this.resolve_group_drop(from, x, y)
-                        } else {
-                            (from, None, false)
-                        };
-                        this.drag = Some(DragKind::GroupReorder {
-                            from,
-                            to,
-                            line_at,
-                            line_after,
-                            start_x,
-                            start_y,
-                            origin_x,
-                            origin_y,
-                            x,
-                            y,
-                            armed,
-                        });
-                        cx.notify();
-                    }
-                    _ => {}
+                    });
                 }
+                this.apply_host_drag_at(x, y, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -4672,75 +5146,23 @@ impl Render for ScoreSyncApp {
                         this.score_video
                             .update(cx, |v, cx| v.root_mouse_up(x, y, cx));
                     }
-                    match this.drag {
-                        Some(DragKind::TabReorder { .. })
-                        | Some(DragKind::MemberReorder { .. })
-                        | Some(DragKind::GroupReorder { .. })
-                        | Some(DragKind::Scrollbar { .. })
-                        | Some(DragKind::SideResize { .. })
-                        | Some(DragKind::TabHScroll { .. }) => {}
-                        _ => return,
+                    if this.side_tool == SideTool::Mask {
+                        let x = f32::from(ev.position.x);
+                        let y = f32::from(ev.position.y);
+                        this.mask_tool
+                            .update(cx, |m, cx| m.root_mouse_up(x, y, cx));
                     }
-                    match this.drag.take() {
-                        Some(DragKind::TabReorder {
-                            from, to, armed, ..
-                        }) => {
-                            if armed && from != to {
-                                this.doc.move_page(from, to);
-                                this.after_doc_change(cx);
-                            } else {
-                                cx.notify();
-                            }
-                        }
-                        Some(DragKind::MemberReorder {
-                            from, to, armed, ..
-                        }) => {
-                            if armed && from != to {
-                                let Some(g) = this.doc.active_group() else {
-                                    cx.notify();
-                                    return;
-                                };
-                                let mut ids = g.region_ids.clone();
-                                if from < ids.len() && to < ids.len() {
-                                    let item = ids.remove(from);
-                                    ids.insert(to, item);
-                                    this.doc.reorder_active_members(ids);
-                                    this.after_doc_change(cx);
-                                } else {
-                                    cx.notify();
-                                }
-                            } else {
-                                cx.notify();
-                            }
-                        }
-                        Some(DragKind::GroupReorder {
-                            from, to, armed, ..
-                        }) => {
-                            if armed && from != to {
-                                this.doc.reorder_groups(from, to);
-                                this.after_doc_change(cx);
-                            } else if !armed {
-                                if let Some(gid) =
-                                    this.doc.groups.get(from).map(|g| g.id.clone())
-                                {
-                                    this.doc.select_group(&gid);
-                                    this.refresh_render(cx);
-                                } else {
-                                    cx.notify();
-                                }
-                            } else {
-                                cx.notify();
-                            }
-                        }
-                        Some(
-                            DragKind::Scrollbar { .. }
-                            | DragKind::SideResize { .. }
-                            | DragKind::TabHScroll { .. },
-                        ) => {
-                            cx.notify();
-                        }
-                        _ => {}
-                    }
+                    this.finish_host_drag_at(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+                    this.handle_outside_window_mouse_up(
+                        f32::from(ev.position.x),
+                        f32::from(ev.position.y),
+                        cx,
+                    );
                 }),
             )
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
@@ -4813,11 +5235,40 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &mask_tool::gui::TogglePanMode, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.toggle_pan_mode(cx));
             }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::ToggleBrushMode, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.toggle_brush_mode(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::TogglePolyMode, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.toggle_poly_mode(cx));
+            }))
+            .on_action(cx.listener(|this, _: &mask_tool::gui::CancelPolyDraft, _, cx| {
+                this.mask_tool.update(cx, |m, cx| m.cancel_poly_draft(cx));
+            }))
+            .on_action(cx.listener(|this, _: &Undo, _, cx| {
+                this.undo_action(cx);
+            }))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| {
+                this.redo_action(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllPageRegions, _, cx| {
+                if this.side_tool != SideTool::Crop {
+                    return;
+                }
+                this.doc.select_all_current_page_regions();
+                this.scroll_group_list_to_active();
+                this.after_doc_change(cx);
+            }))
             .on_action(cx.listener(|this, _: &mask_tool::gui::Undo, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.undo(cx));
             }))
             .on_action(cx.listener(|this, _: &mask_tool::gui::Redo, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.redo(cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::Undo, _, cx| {
+                this.score_video.update(cx, |v, cx| v.undo(cx));
+            }))
+            .on_action(cx.listener(|this, _: &score_video::gui::Redo, _, cx| {
+                this.score_video.update(cx, |v, cx| v.redo(cx));
             }))
             .on_action(cx.listener(|this, _: &score_video::gui::PlayPause, _, cx| {
                 this.score_video.update(cx, |v, cx| v.play_pause(cx));
@@ -4921,6 +5372,13 @@ impl Render for ScoreSyncApp {
             .child(self.tab_drag_ghost())
             .child(self.member_drag_ghost())
             .child(self.group_drag_ghost())
+            .child(
+                self.score_video
+                    .read(cx)
+                    .audio_drag_ghost()
+                    .into_any_element(),
+            )
+            .child(self.outside_window_drag_capture(cx))
     }
 }
 
@@ -4952,6 +5410,10 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("escape", CancelParamEdit, Some("ScoreSync")),
             KeyBinding::new("enter", ConfirmParamEdit, None),
             KeyBinding::new("escape", CancelParamEdit, None),
+            KeyBinding::new("ctrl-z", Undo, Some("ScoreSync")),
+            KeyBinding::new("ctrl-y", Redo, Some("ScoreSync")),
+            KeyBinding::new("ctrl-shift-z", Redo, Some("ScoreSync")),
+            KeyBinding::new("ctrl-a", SelectAllPageRegions, Some("ScoreSync")),
             // 蒙版工具 (右侧切换到蒙版时 key_context=MaskTool)
             KeyBinding::new("ctrl-o", mask_tool::gui::OpenFile, Some("MaskTool")),
             KeyBinding::new("ctrl-shift-o", OpenProject, Some("MaskTool")),
@@ -4962,7 +5424,9 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("delete", mask_tool::gui::DeleteSelected, Some("MaskTool")),
             KeyBinding::new("backspace", mask_tool::gui::DeleteSelected, Some("MaskTool")),
             KeyBinding::new("b", mask_tool::gui::ToggleDrawMode, Some("MaskTool")),
+            KeyBinding::new("l", mask_tool::gui::TogglePolyMode, Some("MaskTool")),
             KeyBinding::new("p", mask_tool::gui::TogglePanMode, Some("MaskTool")),
+            KeyBinding::new("escape", mask_tool::gui::CancelPolyDraft, Some("MaskTool")),
             KeyBinding::new("ctrl-a", mask_tool::gui::SelectAll, Some("MaskTool")),
             KeyBinding::new("ctrl-z", mask_tool::gui::Undo, Some("MaskTool")),
             KeyBinding::new("ctrl-y", mask_tool::gui::Redo, Some("MaskTool")),

@@ -359,11 +359,10 @@ impl Timeline {
     }
 
     pub fn move_audio(&mut self, from: usize, to: usize) {
-        if from >= self.audio_clips.len() || to > self.audio_clips.len() || from == to {
+        if from >= self.audio_clips.len() || to >= self.audio_clips.len() || from == to {
             return;
         }
         let item = self.audio_clips.remove(from);
-        let to = if to > from { to - 1 } else { to };
         self.audio_clips.insert(to.min(self.audio_clips.len()), item);
     }
 
@@ -390,6 +389,7 @@ impl Timeline {
     /// 「分割音频」: 在时间轴时刻 `t` 处把覆盖该时刻的音频片段切成两段
     /// (同一源文件, 后段 `offset` 顺延), 离两端太近 (< `MIN_CLIP_DUR`) 时
     /// 视为无效分割点, 不做任何改动. 返回是否真的切开了.
+    /// 切开后两段标签自动改为 `{原名}-1` / `{原名}-2` 以便区分.
     pub fn split_audio_at(&mut self, t: f64) -> bool {
         let mut cum = 0.0f64;
         for i in 0..self.audio_clips.len() {
@@ -397,11 +397,13 @@ impl Timeline {
             let local = t - cum;
             if local > MIN_CLIP_DUR && local < dur - MIN_CLIP_DUR {
                 let orig = self.audio_clips[i].clone();
+                let base = orig.label.to_string();
                 self.audio_clips[i].duration = local;
+                self.audio_clips[i].label = format!("{base}-1").into();
                 let second = AudioClip {
                     id: Uuid::new_v4(),
                     path: orig.path,
-                    label: orig.label,
+                    label: format!("{base}-2").into(),
                     duration: dur - local,
                     offset: orig.offset + local,
                 };
@@ -700,10 +702,13 @@ mod tests {
         assert_eq!(tl.audio_clips[0].path, PathBuf::from("a.wav"));
         assert_eq!(tl.audio_clips[0].duration, 4.0);
         assert_eq!(tl.audio_clips[0].offset, 0.0);
+        assert_eq!(tl.audio_clips[0].label.to_string(), "a-1");
         assert_eq!(tl.audio_clips[1].path, PathBuf::from("a.wav"));
         assert_eq!(tl.audio_clips[1].duration, 6.0);
         assert_eq!(tl.audio_clips[1].offset, 4.0);
+        assert_eq!(tl.audio_clips[1].label.to_string(), "a-2");
         assert_eq!(tl.audio_clips[2].path, PathBuf::from("b.wav"));
+        assert_eq!(tl.audio_clips[2].label.to_string(), "b");
         // 落点太靠近某段边界时不应该分割.
         assert!(!tl.split_audio_at(0.01));
         assert!(!tl.split_audio_at(1000.0));

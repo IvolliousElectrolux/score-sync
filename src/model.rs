@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use image::RgbImage;
 
 use crate::staff_detect::{detect_bands, Band};
+use mask_tool::color_prefs::MaskColorPrefs;
 use mask_tool::mask::MaskRect;
 use score_video::model::TimelineSnapshot;
 
@@ -126,8 +127,8 @@ pub struct DocState {
     pub ink_threshold: i32,
     /// 组合蒙版: key = group_id, 坐标相对该组竖向拼合图
     pub group_masks: HashMap<String, Vec<MaskRect>>,
-    /// 蒙版白色不透明度
-    pub mask_opacity: f32,
+    /// 蒙版/画笔默认色、透明度与最近使用色
+    pub mask_prefs: MaskColorPrefs,
     /// 用户已手动拖拽调序「输出组合」; 为 true 时不再自动按页/y 排序
     pub groups_manual_order: bool,
     /// 工程级底色层 (底层); 不改写页图, 导出/终稿合成时才叠上
@@ -147,7 +148,7 @@ impl DocState {
         Self {
             margin: 20,
             ink_threshold: 200,
-            mask_opacity: 0.72,
+            mask_prefs: MaskColorPrefs::default(),
             bg_aspect_w: 2560,
             bg_aspect_h: 1440,
             ..Default::default()
@@ -268,7 +269,7 @@ impl DocState {
         };
         let masks = self.get_group_masks(group_id);
         if !masks.is_empty() {
-            mask_tool::mask::apply_masks_rgb(&mut combined, masks, self.mask_opacity);
+            mask_tool::mask::apply_masks_rgb(&mut combined, masks, self.mask_prefs.mask_opacity);
         }
         if self.bg_enabled {
             let Some(bg) = self.bg_image.as_ref() else {
@@ -370,12 +371,58 @@ impl DocState {
     }
 
     /// 拖拽调序输出组合; 之后保留用户顺序直到重新识别重建分组.
-    pub fn reorder_groups(&mut self, from: usize, to: usize) {
-        if from == to || from >= self.groups.len() || to >= self.groups.len() {
+    /// 若拖拽起点本身已在多选内, 则整块选中组合一起移动; 否则只动这一项.
+    pub fn group_move_indices(&self, from: usize) -> Vec<usize> {
+        if from >= self.groups.len() {
+            return Vec::new();
+        }
+        if self.group_has_selected_region(&self.groups[from]) {
+            let idxs: Vec<usize> = self
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| self.group_has_selected_region(g))
+                .map(|(i, _)| i)
+                .collect();
+            if !idxs.is_empty() {
+                return idxs;
+            }
+        }
+        vec![from]
+    }
+
+    /// 将 from 所属移动块 (多选整体或单项) 插到 anchor 之前/之后.
+    pub fn reorder_groups_block(&mut self, from: usize, anchor: usize, after: bool) {
+        let n = self.groups.len();
+        if from >= n || anchor >= n {
             return;
         }
-        let g = self.groups.remove(from);
-        self.groups.insert(to, g);
+        let moving = self.group_move_indices(from);
+        if moving.is_empty() {
+            return;
+        }
+        let moving_set: HashSet<usize> = moving.iter().copied().collect();
+        if moving_set.contains(&anchor) {
+            return;
+        }
+        let raw_insert = if after { anchor + 1 } else { anchor };
+        let insert_in_remaining =
+            raw_insert - moving.iter().filter(|&&i| i < raw_insert).count();
+
+        let mut remaining = Vec::with_capacity(n - moving.len());
+        let mut block = Vec::with_capacity(moving.len());
+        for (i, g) in self.groups.drain(..).enumerate() {
+            if moving_set.contains(&i) {
+                block.push(g);
+            } else {
+                remaining.push(g);
+            }
+        }
+        let insert_at = insert_in_remaining.min(remaining.len());
+        for (j, g) in block.into_iter().enumerate() {
+            remaining.insert(insert_at + j, g);
+        }
+        self.groups = remaining;
         self.groups_manual_order = true;
     }
 
@@ -980,16 +1027,42 @@ impl DocState {
             );
             new_region_ids.push(rid);
         }
+        let src_page_id = self.pages[index].id.clone();
         let insert_at = index + 1;
         self.pages.insert(insert_at, page);
-        for rid in &new_region_ids {
-            self.groups.push(Group {
-                id: new_id(),
-                region_ids: vec![rid.clone()],
-                name: String::new(),
+
+        // 插到「原页最后一个组合」之后、「下一页组合」之前 (含手动调序时也不丢到末尾)
+        let mut insert_group_at = None;
+        for (i, g) in self.groups.iter().enumerate() {
+            let belongs_src = g.region_ids.iter().any(|rid| {
+                self.get_region(rid)
+                    .is_some_and(|r| r.page_id == src_page_id)
             });
+            if belongs_src {
+                insert_group_at = Some(i + 1);
+            }
         }
-        self.sort_groups();
+        let insert_group_at = insert_group_at.unwrap_or_else(|| {
+            self.groups
+                .iter()
+                .enumerate()
+                .find(|(_, g)| self.group_sort_key(g).0 > index)
+                .map(|(i, _)| i)
+                .unwrap_or(self.groups.len())
+        });
+        for (j, rid) in new_region_ids.iter().enumerate() {
+            self.groups.insert(
+                insert_group_at + j,
+                Group {
+                    id: new_id(),
+                    region_ids: vec![rid.clone()],
+                    name: String::new(),
+                },
+            );
+        }
+        if !self.groups_manual_order {
+            self.sort_groups();
+        }
         self.current_page_index = insert_at;
         Some(insert_at)
     }
@@ -999,6 +1072,50 @@ impl DocState {
         let g = self.active_group()?;
         let rids = g.region_ids.clone();
         self.selected_region_ids = rids.iter().cloned().collect();
+        self.focus_page_for_regions(&rids)
+    }
+
+    /// Ctrl 点击输出组合: 将该组全部成员并入/移出多选; 普通点击等同 select_group.
+    pub fn click_group(&mut self, gid: &str, ctrl: bool) -> Option<usize> {
+        if !ctrl {
+            return self.select_group(gid);
+        }
+        let Some(g) = self.groups.iter().find(|g| g.id == gid) else {
+            return None;
+        };
+        let rids = g.region_ids.clone();
+        if rids.is_empty() {
+            self.active_group_id = Some(gid.to_string());
+            return None;
+        }
+        let all_selected = rids
+            .iter()
+            .all(|rid| self.selected_region_ids.contains(rid));
+        if all_selected {
+            for rid in &rids {
+                self.selected_region_ids.remove(rid);
+            }
+            if self.active_group_id.as_deref() == Some(gid) {
+                self.active_group_id = self
+                    .groups
+                    .iter()
+                    .find(|g| {
+                        g.region_ids
+                            .iter()
+                            .any(|r| self.selected_region_ids.contains(r))
+                    })
+                    .map(|g| g.id.clone());
+            }
+        } else {
+            for rid in &rids {
+                self.selected_region_ids.insert(rid.clone());
+            }
+            self.active_group_id = Some(gid.to_string());
+        }
+        self.focus_page_for_regions(&rids)
+    }
+
+    fn focus_page_for_regions(&mut self, rids: &[String]) -> Option<usize> {
         let first = rids.first()?;
         let (pi, _) = self.find_region(first)?;
         let page = self.current_page()?;
@@ -1027,6 +1144,30 @@ impl DocState {
                 break;
             }
         }
+    }
+
+    /// 全选当前页全部原子块, 并尽量把 active_group 落到第一个块所属组合.
+    pub fn select_all_current_page_regions(&mut self) {
+        let Some(page) = self.current_page() else {
+            return;
+        };
+        let ids: HashSet<String> = page.regions.keys().cloned().collect();
+        let mut regs: Vec<_> = page.regions.values().cloned().collect();
+        regs.sort_by_key(|r| (r.y0, r.y1));
+        let first_rid = regs.first().map(|r| r.id.clone());
+        self.selected_region_ids = ids;
+        self.active_group_id = first_rid.and_then(|rid| {
+            self.groups
+                .iter()
+                .find(|g| g.region_ids.iter().any(|id| id == &rid))
+                .map(|g| g.id.clone())
+        });
+    }
+
+    pub fn group_has_selected_region(&self, g: &Group) -> bool {
+        g.region_ids
+            .iter()
+            .any(|rid| self.selected_region_ids.contains(rid))
     }
 
     pub fn click_blank(&mut self, ctrl: bool) {

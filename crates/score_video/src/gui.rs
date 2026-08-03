@@ -1,5 +1,6 @@
 //! GPUI 图形界面: 视频轨道编辑 (预览窗 + 视频/淡入淡出/音频三轨 + 素材池 + 导出).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,8 +33,12 @@ actions!(
         MarkFadeIn,
         MarkFadeOut,
         DeleteSelected,
+        Undo,
+        Redo,
     ]
 );
+
+const VIDEO_HISTORY_LIMIT: usize = 64;
 
 /// 嵌入宿主 (score_sync) 启动时调用一次, 注册「视频」标签页下的快捷键.
 pub fn bind_keys(cx: &mut App) {
@@ -48,6 +53,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("o", MarkFadeOut, Some("ScoreVideo")),
         KeyBinding::new("delete", DeleteSelected, Some("ScoreVideo")),
         KeyBinding::new("backspace", DeleteSelected, Some("ScoreVideo")),
+        KeyBinding::new("ctrl-z", Undo, Some("ScoreVideo")),
+        KeyBinding::new("ctrl-y", Redo, Some("ScoreVideo")),
+        KeyBinding::new("ctrl-shift-z", Redo, Some("ScoreVideo")),
     ]);
 }
 
@@ -58,6 +66,8 @@ const TRACK_H: f32 = 40.0;
 const AUDIO_TRACK_H: f32 = 64.0;
 /// 底部横向缩放/滚动条高度.
 const TRACK_BAR_H: f32 = 18.0;
+/// 音频排序拖拽: 超过此像素位移才进入"已拖起" (与分块标签页一致).
+const AUDIO_REORDER_SLOP: f32 = 5.0;
 const EDGE_ZONE: f32 = 8.0;
 /// 波形基础采样密度 (每秒峰值点数). 基础数据按时长而非固定点数采样, 绘制时
 /// 再按当前片段的屏幕宽度 (随缩放变化) 重新降采样/插值, 分辨率因此始终跟着
@@ -98,9 +108,22 @@ enum VideoDrag {
         id: Uuid,
         last_t: f64,
     },
-    /// 拖动音频片段以调整播放顺序 (音频轨道只有顺序有意义, 不支持任意起点).
+    /// 拖动音频片段排序 (手感对齐分块标签页: 过阈值才 armed, 幽灵跟随,
+    /// 原位半透明, 落点左右边指示线, 松开才真正换序).
     AudioBody {
         id: Uuid,
+        from: usize,
+        to: usize,
+        line_at: Option<usize>,
+        line_after: bool,
+        start_x: f32,
+        start_y: f32,
+        origin_x: f32,
+        origin_y: f32,
+        x: f32,
+        y: f32,
+        label: SharedString,
+        armed: bool,
     },
     /// 拖动素材池自定义竖直滚动条滑块.
     PoolScroll {
@@ -179,6 +202,8 @@ pub struct ScoreVideoApp {
     aspect_h: u32,
     tracks_bounds: Bounds<Pixels>,
     preview_bounds: Bounds<Pixels>,
+    /// 音频片段屏幕 bounds (按当前顺序下标), 供排序拖拽判定落点/幽灵原点.
+    audio_clip_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 底部横向缩放/滚动条自身的屏幕 bounds.
     track_bar_bounds: Bounds<Pixels>,
     px_per_sec: f32,
@@ -216,6 +241,10 @@ pub struct ScoreVideoApp {
     /// 播放代数: 每次开始播放自增, 供 ticker 判断自身是否已过期而自行退出,
     /// 避免播放/暂停快速切换时残留多个 ticker 任务.
     play_gen: u64,
+    undo_stack: Vec<crate::model::TimelineSnapshot>,
+    redo_stack: Vec<crate::model::TimelineSnapshot>,
+    /// 当前拖拽是否已为本次变更压过撤销栈.
+    drag_undo_pushed: bool,
 }
 
 impl ScoreVideoApp {
@@ -230,6 +259,7 @@ impl ScoreVideoApp {
             aspect_h: 9,
             tracks_bounds: Bounds::default(),
             preview_bounds: Bounds::default(),
+            audio_clip_bounds: HashMap::new(),
             track_bar_bounds: Bounds::default(),
             px_per_sec: 20.0,
             track_user_zoomed: false,
@@ -250,6 +280,9 @@ impl ScoreVideoApp {
             export_progress: SharedString::default(),
             export_log: Vec::new(),
             play_gen: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            drag_undo_pushed: false,
         };
         app
     }
@@ -280,6 +313,55 @@ impl ScoreVideoApp {
         self.track_scroll = 0.0;
         self.track_user_zoomed = false;
         self.drag = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.drag_undo_pushed = false;
+        cx.notify();
+    }
+
+    fn push_undo(&mut self) {
+        self.undo_stack.push(self.timeline.snapshot());
+        if self.undo_stack.len() > VIDEO_HISTORY_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn ensure_drag_undo(&mut self) {
+        if !self.drag_undo_pushed {
+            self.push_undo();
+            self.drag_undo_pushed = true;
+        }
+    }
+
+    pub fn undo(&mut self, cx: &mut Context<Self>) {
+        let Some(prev) = self.undo_stack.pop() else {
+            self.status = "没有可撤回的操作.".into();
+            cx.notify();
+            return;
+        };
+        self.redo_stack.push(self.timeline.snapshot());
+        self.timeline.load_snapshot(prev);
+        self.audio.set_clips(self.timeline.audio_clips.clone());
+        self.drag = None;
+        self.status = "已撤回.".into();
+        cx.notify();
+    }
+
+    pub fn redo(&mut self, cx: &mut Context<Self>) {
+        let Some(next) = self.redo_stack.pop() else {
+            self.status = "没有可重做的操作.".into();
+            cx.notify();
+            return;
+        };
+        self.undo_stack.push(self.timeline.snapshot());
+        if self.undo_stack.len() > VIDEO_HISTORY_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.timeline.load_snapshot(next);
+        self.audio.set_clips(self.timeline.audio_clips.clone());
+        self.drag = None;
+        self.status = "已重做.".into();
         cx.notify();
     }
 
@@ -437,27 +519,44 @@ impl ScoreVideoApp {
     }
 
     pub fn insert_next(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
         match self.timeline.insert_next(&self.pool) {
             Ok(()) => self.status = "已插入下一张组合".into(),
-            Err(e) => self.status = e.into(),
+            Err(e) => {
+                self.undo_stack.pop();
+                self.status = e.into();
+            }
         }
         cx.notify();
     }
 
     pub fn mark_fade_in(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
         self.timeline.mark_fade(FadeKind::In, self.timeline.playhead);
         cx.notify();
     }
 
     pub fn mark_fade_out(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
         self.timeline
             .mark_fade(FadeKind::Out, self.timeline.playhead);
         cx.notify();
     }
 
     pub fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
+        let before = self.timeline.snapshot();
         self.timeline.delete_selected();
-        self.audio.set_clips(self.timeline.audio_clips.clone());
+        let after = self.timeline.snapshot();
+        // 无选中可删时撤回刚压的快照
+        if before.video_clips.len() == after.video_clips.len()
+            && before.fades.len() == after.fades.len()
+            && before.audio_clips.len() == after.audio_clips.len()
+        {
+            self.undo_stack.pop();
+        } else {
+            self.audio.set_clips(self.timeline.audio_clips.clone());
+        }
         cx.notify();
     }
 
@@ -468,11 +567,15 @@ impl ScoreVideoApp {
         else {
             return;
         };
+        let mut added = 0usize;
         for p in paths {
             let dur = crate::audio::probe_duration(&p).unwrap_or(0.0);
             if dur <= 0.001 {
                 self.status = format!("无法识别音频时长, 已跳过: {}", p.display()).into();
                 continue;
+            }
+            if added == 0 {
+                self.push_undo();
             }
             let label = p
                 .file_name()
@@ -486,8 +589,11 @@ impl ScoreVideoApp {
                 duration: dur,
                 offset: 0.0,
             });
+            added += 1;
         }
-        self.audio.set_clips(self.timeline.audio_clips.clone());
+        if added > 0 {
+            self.audio.set_clips(self.timeline.audio_clips.clone());
+        }
         cx.notify();
     }
 
@@ -520,10 +626,12 @@ impl ScoreVideoApp {
             return;
         }
         let t = self.x_to_time(x);
+        self.push_undo();
         if self.timeline.split_audio_at(t) {
             self.audio.set_clips(self.timeline.audio_clips.clone());
             self.status = format!("已在 {} 处分割音频", fmt_time(t)).into();
         } else {
+            self.undo_stack.pop();
             self.status = "该处没有可分割的音频片段 (太靠近边界或未落在片段上)".into();
         }
         cx.notify();
@@ -547,6 +655,7 @@ impl ScoreVideoApp {
         self.timeline.selected_clip = Some(id);
         self.timeline.selected_fade = None;
         self.timeline.selected_audio = None;
+        self.drag_undo_pushed = false;
         if let Some(c) = self.timeline.video_clips.iter().find(|c| c.id == id) {
             let origin_x = f32::from(self.tracks_bounds.origin.x) - (self.track_scroll as f32) * self.px_per_sec;
             let start_x = origin_x + (c.start as f32) * self.px_per_sec;
@@ -573,6 +682,7 @@ impl ScoreVideoApp {
         self.timeline.selected_fade = Some(id);
         self.timeline.selected_clip = None;
         self.timeline.selected_audio = None;
+        self.drag_undo_pushed = false;
         if let Some(f) = self.timeline.fades.iter().find(|f| f.id == id) {
             let origin_x = f32::from(self.tracks_bounds.origin.x) - (self.track_scroll as f32) * self.px_per_sec;
             let start_x = origin_x + (f.start as f32) * self.px_per_sec;
@@ -591,22 +701,93 @@ impl ScoreVideoApp {
         cx.notify();
     }
 
-    /// 音频条目上按下: 开始拖动排序 (轨道内位置始终由时长累加决定, 拖动只
-    /// 改变播放顺序, 与视频轨道"整体拖动"手感一致但语义是排序).
-    fn begin_audio_drag(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// 音频条目上按下: 开始排序拖拽 (未过阈值前只是选中, 不换序).
+    fn begin_audio_drag(&mut self, id: Uuid, x: f32, y: f32, cx: &mut Context<Self>) {
         if self.split_audio_armed {
             return;
         }
+        let Some(from) = self.timeline.audio_clips.iter().position(|c| c.id == id) else {
+            return;
+        };
         self.timeline.selected_audio = Some(id);
         self.timeline.selected_clip = None;
         self.timeline.selected_fade = None;
-        self.drag = Some(VideoDrag::AudioBody { id });
+        self.drag_undo_pushed = false;
+        let label = self.timeline.audio_clips[from].label.clone();
+        let (origin_x, origin_y) = self
+            .audio_clip_bounds
+            .get(&from)
+            .map(|b| (f32::from(b.origin.x), f32::from(b.origin.y)))
+            .unwrap_or((x, y));
+        self.drag = Some(VideoDrag::AudioBody {
+            id,
+            from,
+            to: from,
+            line_at: None,
+            line_after: false,
+            start_x: x,
+            start_y: y,
+            origin_x,
+            origin_y,
+            x,
+            y,
+            label,
+            armed: false,
+        });
         cx.notify();
     }
 
-    /// 由宿主 (score_sync 根节点) 在「视频」标签页激活时转发鼠标移动/松开事件,
-    /// 用于素材池 → 轨道的跨面板拖放; 轨道内部的裁剪/拖选等交互已在
-    /// `left_panel` 内自行处理, 不需要宿主转发.
+    fn audio_reorder_slop_exceeded(dx: f32, dy: f32) -> bool {
+        dx * dx + dy * dy >= AUDIO_REORDER_SLOP * AUDIO_REORDER_SLOP
+    }
+
+    /// 将「落在 anchor 之前/之后」换算成 remove 后再 insert 的下标.
+    fn reorder_to_index(from: usize, anchor: usize, after: bool) -> usize {
+        if after {
+            if from <= anchor {
+                anchor
+            } else {
+                anchor + 1
+            }
+        } else if from < anchor {
+            anchor - 1
+        } else {
+            anchor
+        }
+    }
+
+    /// 水平音轨: 原位无反应; 左半→该项左边, 右半→该项右边.
+    /// 返回 (to, line_at, line_after).
+    fn resolve_audio_drop(&self, from: usize, x: f32) -> (usize, Option<usize>, bool) {
+        let n = self.timeline.audio_clips.len();
+        if n == 0 {
+            return (from, None, false);
+        }
+        for i in 0..n {
+            let Some(b) = self.audio_clip_bounds.get(&i) else {
+                continue;
+            };
+            let left = f32::from(b.origin.x);
+            let right = left + f32::from(b.size.width);
+            if x < left || x > right {
+                continue;
+            }
+            if i == from {
+                return (from, None, false);
+            }
+            let mid = (left + right) * 0.5;
+            let after = x >= mid;
+            let to = Self::reorder_to_index(from, i, after);
+            return (to, Some(i), after);
+        }
+        (from, None, false)
+    }
+
+    pub fn has_active_drag(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// 由宿主在窗口外 / 跨面板时转发: 处理当前所有拖拽种类.
     pub fn root_mouse_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         match &mut self.drag {
             Some(VideoDrag::PoolDrop {
@@ -620,18 +801,25 @@ impl ScoreVideoApp {
                 let grab = *grab;
                 self.apply_pool_scroll_drag(y, grab, cx);
             }
-            _ => {}
+            Some(_) => {
+                // 鼠标已离开左面板 (或整个窗口) 时, 仍继续更新轨道内拖拽.
+                if !self.point_in_left_panel(x, y) {
+                    self.apply_left_drag_move(x, y, cx);
+                }
+            }
+            None => {}
         }
     }
 
     pub fn root_mouse_up(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        match self.drag.take() {
+        match self.drag.clone() {
             Some(VideoDrag::PoolDrop {
                 group_id,
                 start_x,
                 start_y,
                 ..
             }) => {
+                self.drag = None;
                 let moved = ((x - start_x).powi(2) + (y - start_y).powi(2)).sqrt();
                 let b = self.tracks_bounds;
                 let within = x >= f32::from(b.origin.x)
@@ -640,11 +828,10 @@ impl ScoreVideoApp {
                     && y <= f32::from(b.origin.y) + f32::from(b.size.height);
                 if within {
                     let t = self.x_to_time(x);
+                    self.push_undo();
                     self.timeline.insert_at(t, group_id);
                     self.status = "已从素材池拖入片段".into();
                 } else if moved < 4.0 {
-                    // 单击 (未拖动到轨道上): 展开/收起该素材的图片预览, 而不是
-                    // 直接插入时间轴 (插入请改为拖拽到视频轨道上的具体位置).
                     self.expanded_pool = if self.expanded_pool.as_deref() == Some(group_id.as_str())
                     {
                         None
@@ -655,10 +842,218 @@ impl ScoreVideoApp {
                 cx.notify();
             }
             Some(VideoDrag::PoolScroll { .. }) => {
+                self.drag = None;
+                cx.notify();
+            }
+            Some(_) => {
+                // 窗口外或右栏松开: 结束左面板发起的拖拽.
+                self.end_left_drag(x, cx);
+            }
+            None => {}
+        }
+    }
+
+    fn point_in_left_panel(&self, x: f32, y: f32) -> bool {
+        // tracks_bounds 覆盖三轨区域; 预览区也算左栏. 用 tracks + 一个宽松包络:
+        // 若尚未 layout, 视为不在左栏以便根节点接管.
+        let b = self.tracks_bounds;
+        let w = f32::from(b.size.width);
+        let h = f32::from(b.size.height);
+        if w < 1.0 || h < 1.0 {
+            return false;
+        }
+        // 左栏大致: 从窗口左边到侧栏分割线. tracks 的右缘即左栏右缘近似.
+        let left = 0.0;
+        let right = f32::from(b.origin.x) + w + 8.0;
+        let top = 0.0;
+        let bottom = f32::from(b.origin.y) + h + TRACK_BAR_H + 80.0;
+        x >= left && x <= right && y >= top && y <= bottom
+    }
+
+    fn apply_left_drag_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        match &self.drag {
+            None
+            | Some(VideoDrag::PoolDrop { .. })
+            | Some(VideoDrag::PoolScroll { .. }) => return,
+            _ => {}
+        }
+        match self.drag.clone() {
+            Some(VideoDrag::Seek) => self.seek_from_preview_x(x, cx),
+            Some(VideoDrag::TrimLeft { id }) => {
+                self.ensure_drag_undo();
+                let t = self.x_to_time(x);
+                self.timeline.trim_left(id, t);
+                cx.notify();
+            }
+            Some(VideoDrag::TrimRight { id }) => {
+                self.ensure_drag_undo();
+                let t = self.x_to_time(x);
+                self.timeline.trim_right(id, t);
+                cx.notify();
+            }
+            Some(VideoDrag::Body { id, last_t }) => {
+                self.ensure_drag_undo();
+                let t = self.x_to_time(x);
+                self.timeline.drag_body(id, t - last_t);
+                self.drag = Some(VideoDrag::Body { id, last_t: t });
+                cx.notify();
+            }
+            Some(VideoDrag::FadeSelect { anchor }) => {
+                let t = self.x_to_time(x);
+                self.timeline.fade_selection = Some((anchor, t));
+                cx.notify();
+            }
+            Some(VideoDrag::FadeTrimLeft { id }) => {
+                self.ensure_drag_undo();
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, Some(id));
+                self.timeline.trim_fade_left(id, t);
+                cx.notify();
+            }
+            Some(VideoDrag::FadeTrimRight { id }) => {
+                self.ensure_drag_undo();
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, Some(id));
+                self.timeline.trim_fade_right(id, t);
+                cx.notify();
+            }
+            Some(VideoDrag::FadeBody { id, last_t }) => {
+                self.ensure_drag_undo();
+                let raw = self.x_to_time(x);
+                let t = self.snap_time(raw, Some(id));
+                self.timeline.drag_fade_body(id, t - last_t);
+                self.drag = Some(VideoDrag::FadeBody { id, last_t: t });
+                cx.notify();
+            }
+            Some(VideoDrag::AudioBody {
+                id,
+                from,
+                start_x,
+                start_y,
+                origin_x,
+                origin_y,
+                label,
+                mut armed,
+                ..
+            }) => {
+                if !armed && Self::audio_reorder_slop_exceeded(x - start_x, y - start_y) {
+                    armed = true;
+                }
+                let (to, line_at, line_after) = if armed {
+                    self.resolve_audio_drop(from, x)
+                } else {
+                    (from, None, false)
+                };
+                self.drag = Some(VideoDrag::AudioBody {
+                    id,
+                    from,
+                    to,
+                    line_at,
+                    line_after,
+                    start_x,
+                    start_y,
+                    origin_x,
+                    origin_y,
+                    x,
+                    y,
+                    label,
+                    armed,
+                });
+                cx.notify();
+            }
+            Some(VideoDrag::TrackBarPan { grab }) => {
+                self.apply_track_bar_pan(x, grab, cx);
+            }
+            Some(VideoDrag::TrackBarZoomLeft { anchor_end_t }) => {
+                self.apply_track_bar_zoom_left(x, anchor_end_t, cx);
+            }
+            Some(VideoDrag::TrackBarZoomRight { anchor_start_t }) => {
+                self.apply_track_bar_zoom_right(x, anchor_start_t, cx);
+            }
+            Some(VideoDrag::FadeSelectTrimLeft) => {
+                let t = self.x_to_time(x);
+                if let Some((_, b)) = self.timeline.fade_selection {
+                    self.timeline.fade_selection = Some((t, b));
+                }
+                cx.notify();
+            }
+            Some(VideoDrag::FadeSelectTrimRight) => {
+                let t = self.x_to_time(x);
+                if let Some((a, _)) = self.timeline.fade_selection {
+                    self.timeline.fade_selection = Some((a, t));
+                }
                 cx.notify();
             }
             _ => {}
         }
+    }
+
+    fn end_left_drag(&mut self, x: f32, cx: &mut Context<Self>) {
+        match &self.drag {
+            None
+            | Some(VideoDrag::PoolDrop { .. })
+            | Some(VideoDrag::PoolScroll { .. }) => return,
+            _ => {}
+        }
+        if let Some(VideoDrag::FadeSelect { anchor }) = self.drag {
+            let t = self.x_to_time(x);
+            if (t - anchor).abs() < 0.15 {
+                self.timeline.fade_selection = None;
+                self.timeline.select_fade_at(anchor);
+            }
+        }
+        if let Some(VideoDrag::AudioBody {
+            from, to, armed, ..
+        }) = self.drag.take()
+        {
+            if armed && from != to {
+                self.push_undo();
+                self.timeline.move_audio(from, to);
+                self.audio.set_clips(self.timeline.audio_clips.clone());
+                self.status = "已调整音频顺序".into();
+            }
+            self.drag = None;
+            cx.notify();
+            return;
+        }
+        self.drag = None;
+        cx.notify();
+    }
+
+    pub fn audio_drag_ghost(&self) -> impl IntoElement {
+        let Some(VideoDrag::AudioBody {
+            start_x,
+            start_y,
+            origin_x,
+            origin_y,
+            x,
+            y,
+            label,
+            armed: true,
+            ..
+        }) = &self.drag
+        else {
+            return div().into_any_element();
+        };
+        let gx = origin_x + (x - start_x);
+        let gy = origin_y + (y - start_y);
+        div()
+            .id("sv-audio-drag-ghost")
+            .absolute()
+            .left(px(gx))
+            .top(px(gy))
+            .opacity(0.72)
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x0891b2))
+            .text_color(rgb(0xffffff))
+            .text_xs()
+            .border_1()
+            .border_color(rgb(0x0e7490))
+            .whitespace_nowrap()
+            .child(label.clone())
+            .into_any_element()
     }
 
     /// 拖动素材池自定义滚动条滑块 (可能由宿主跨面板转发调用).
@@ -1162,6 +1557,21 @@ impl ScoreVideoApp {
         let scroll = self.track_scroll;
         let selected = self.timeline.selected_audio;
         let split_armed = self.split_audio_armed;
+        let drag_from = match &self.drag {
+            Some(VideoDrag::AudioBody {
+                from, armed: true, ..
+            }) => Some(*from),
+            _ => None,
+        };
+        let (line_at, line_after) = match &self.drag {
+            Some(VideoDrag::AudioBody {
+                line_at,
+                line_after,
+                armed: true,
+                ..
+            }) => (*line_at, *line_after),
+            _ => (None, false),
+        };
         let mut row = div()
             .id("sv_audio_row")
             .relative()
@@ -1191,14 +1601,17 @@ impl ScoreVideoApp {
                 }),
             );
         let mut cum = 0.0f64;
-        for c in self.timeline.audio_clips.clone() {
+        for (idx, c) in self.timeline.audio_clips.clone().into_iter().enumerate() {
             let x = ((cum - scroll) as f32) * pps;
             let w = (c.duration as f32 * pps).max(2.0);
             let is_sel = selected == Some(c.id);
             let id = c.id;
+            let dragging = drag_from == Some(idx);
+            let show_line = line_at == Some(idx);
             let waveform = self.waveform_for(&c.path, cx);
             let mut clip = div()
                 .id(SharedString::from(format!("sv-audio-{id}")))
+                .relative()
                 .absolute()
                 .top_0()
                 .bottom_0()
@@ -1213,6 +1626,27 @@ impl ScoreVideoApp {
                 } else {
                     CursorStyle::PointingHand
                 })
+                .when(dragging, |d| d.opacity(0.35))
+                .when(show_line && !line_after, |d| {
+                    d.border_l_2().border_color(rgb(0xf59e0b))
+                })
+                .when(show_line && line_after, |d| {
+                    d.border_r_2().border_color(rgb(0xf59e0b))
+                })
+                .child({
+                    let entity = cx.entity().clone();
+                    canvas(
+                        move |bounds, _, cx| {
+                            entity.update(cx, |this, _| {
+                                this.audio_clip_bounds.insert(idx, bounds);
+                            });
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -1222,7 +1656,12 @@ impl ScoreVideoApp {
                             this.handle_split_audio_click(f32::from(ev.position.x), cx);
                             return;
                         }
-                        this.begin_audio_drag(id, cx);
+                        this.begin_audio_drag(
+                            id,
+                            f32::from(ev.position.x),
+                            f32::from(ev.position.y),
+                            cx,
+                        );
                     }),
                 );
             if let Some(peaks) = waveform {
@@ -1648,95 +2087,21 @@ impl ScoreVideoApp {
             .text_color(rgb(0xe2e8f0))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 let x = f32::from(ev.position.x);
-                match this.drag.clone() {
-                    Some(VideoDrag::Seek) => this.seek_from_preview_x(x, cx),
-                    Some(VideoDrag::TrimLeft { id }) => {
-                        let t = this.x_to_time(x);
-                        this.timeline.trim_left(id, t);
-                        cx.notify();
-                    }
-                    Some(VideoDrag::TrimRight { id }) => {
-                        let t = this.x_to_time(x);
-                        this.timeline.trim_right(id, t);
-                        cx.notify();
-                    }
-                    Some(VideoDrag::Body { id, last_t }) => {
-                        let t = this.x_to_time(x);
-                        this.timeline.drag_body(id, t - last_t);
-                        this.drag = Some(VideoDrag::Body { id, last_t: t });
-                        cx.notify();
-                    }
-                    Some(VideoDrag::FadeSelect { anchor }) => {
-                        let t = this.x_to_time(x);
-                        this.timeline.fade_selection = Some((anchor, t));
-                        cx.notify();
-                    }
-                    Some(VideoDrag::FadeTrimLeft { id }) => {
-                        let raw = this.x_to_time(x);
-                        let t = this.snap_time(raw, Some(id));
-                        this.timeline.trim_fade_left(id, t);
-                        cx.notify();
-                    }
-                    Some(VideoDrag::FadeTrimRight { id }) => {
-                        let raw = this.x_to_time(x);
-                        let t = this.snap_time(raw, Some(id));
-                        this.timeline.trim_fade_right(id, t);
-                        cx.notify();
-                    }
-                    Some(VideoDrag::FadeBody { id, last_t }) => {
-                        let raw = this.x_to_time(x);
-                        let t = this.snap_time(raw, Some(id));
-                        this.timeline.drag_fade_body(id, t - last_t);
-                        this.drag = Some(VideoDrag::FadeBody { id, last_t: t });
-                        cx.notify();
-                    }
-                    Some(VideoDrag::AudioBody { id }) => {
-                        let t = this.x_to_time(x);
-                        this.timeline.reorder_audio_by_time(id, t);
-                        cx.notify();
-                    }
-                    Some(VideoDrag::TrackBarPan { grab }) => {
-                        this.apply_track_bar_pan(x, grab, cx);
-                    }
-                    Some(VideoDrag::TrackBarZoomLeft { anchor_end_t }) => {
-                        this.apply_track_bar_zoom_left(x, anchor_end_t, cx);
-                    }
-                    Some(VideoDrag::TrackBarZoomRight { anchor_start_t }) => {
-                        this.apply_track_bar_zoom_right(x, anchor_start_t, cx);
-                    }
-                    Some(VideoDrag::FadeSelectTrimLeft) => {
-                        let t = this.x_to_time(x);
-                        if let Some((_, b)) = this.timeline.fade_selection {
-                            this.timeline.fade_selection = Some((t, b));
-                        }
-                        cx.notify();
-                    }
-                    Some(VideoDrag::FadeSelectTrimRight) => {
-                        let t = this.x_to_time(x);
-                        if let Some((a, _)) = this.timeline.fade_selection {
-                            this.timeline.fade_selection = Some((a, t));
-                        }
-                        cx.notify();
-                    }
-                    _ => {}
-                }
+                let y = f32::from(ev.position.y);
+                this.apply_left_drag_move(x, y, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseUpEvent, _, cx| {
-                    if let Some(VideoDrag::FadeSelect { anchor }) = this.drag {
-                        let x = f32::from(ev.position.x);
-                        let t = this.x_to_time(x);
-                        if (t - anchor).abs() < 0.15 {
-                            this.timeline.fade_selection = None;
-                            this.timeline.select_fade_at(anchor);
-                        }
+                    this.end_left_drag(f32::from(ev.position.x), cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+                    if this.drag.is_some() {
+                        this.end_left_drag(f32::from(ev.position.x), cx);
                     }
-                    if let Some(VideoDrag::AudioBody { .. }) = this.drag {
-                        this.audio.set_clips(this.timeline.audio_clips.clone());
-                    }
-                    this.drag = None;
-                    cx.notify();
                 }),
             )
             .child(self.transport_bar(cx))
@@ -2305,6 +2670,8 @@ impl Render for ScoreVideoApp {
             .on_action(cx.listener(|this, _: &MarkFadeIn, _, cx| this.mark_fade_in(cx)))
             .on_action(cx.listener(|this, _: &MarkFadeOut, _, cx| this.mark_fade_out(cx)))
             .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| this.delete_selected(cx)))
+            .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .flex()
             .flex_row()
             .size_full()
