@@ -1,0 +1,3 @@
+# 加速链接 (Windows MSVC). rust-lld 随 rustc 自带.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

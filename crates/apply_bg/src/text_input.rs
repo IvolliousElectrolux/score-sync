@@ -7,7 +7,7 @@ use gpui::{
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
-    TextRun, UTF16Selection, UnderlineStyle, Window,
+    Subscription, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::*;
 
@@ -43,6 +43,11 @@ pub struct TextInput {
     is_selecting: bool,
     /// 水平滚动: 内容左缘相对视口左缘的偏移 (像素, ≥0).
     scroll_offset: Pixels,
+    _blur_subscription: Option<Subscription>,
+    /// 刚失焦, 供外部一次性提交/校正.
+    blur_commit_pending: bool,
+    /// 紧凑样式 (色盘 RGB 等窄行).
+    compact: bool,
 }
 
 impl TextInput {
@@ -60,7 +65,34 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             scroll_offset: px(0.),
+            _blur_subscription: None,
+            blur_commit_pending: false,
+            compact: false,
         }
+    }
+
+    pub fn with_compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
+    }
+
+    /// 取出并清除「刚失焦」标记.
+    pub fn take_blur_commit(&mut self) -> bool {
+        let v = self.blur_commit_pending;
+        self.blur_commit_pending = false;
+        v
+    }
+
+    /// 失焦: 收起选区到末尾, 并 notify 让外部提交.
+    fn on_blur_clear_selection(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.is_selecting = false;
+        self.blur_commit_pending = true;
+        let len = self.content.len();
+        if self.selected_range != (len..len) || self.selection_reversed {
+            self.selected_range = len..len;
+            self.selection_reversed = false;
+        }
+        cx.notify();
     }
 
     pub fn text(&self) -> String {
@@ -620,15 +652,17 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
+        let focused = focus_handle.is_focused(window);
+        if focused {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
         }
         let line = prepaint.line.take().unwrap();
         let origin = point(bounds.origin.x - scroll, bounds.origin.y);
         line.paint(origin, window.line_height(), window, cx)
             .unwrap();
-
-        if focus_handle.is_focused(window) {
+        if focused {
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
@@ -642,7 +676,17 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self._blur_subscription.is_none() {
+            let handle = self.focus_handle.clone();
+            self._blur_subscription = Some(cx.on_blur(&handle, window, Self::on_blur_clear_selection));
+        }
+        let compact = self.compact;
+        let (inner_h, text_size, line_h) = if compact {
+            (px(18.), px(12.), px(16.))
+        } else {
+            (px(26.), px(13.), px(20.))
+        };
         div()
             .flex()
             .key_context("TextInput")
@@ -666,19 +710,21 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .rounded_md()
+            .when(compact, |d| d.rounded_sm())
+            .when(!compact, |d| d.rounded_md())
             .border_1()
             .border_color(rgb(0xcbd5e1))
             .bg(rgb(0xf8fafc))
-            .line_height(px(20.))
-            .text_size(px(13.))
+            .line_height(line_h)
+            .text_size(text_size)
             .text_color(rgb(0x0f172a))
             .child(
                 div()
-                    .h(px(28.))
+                    .h(inner_h)
                     .w_full()
-                    .px_2()
-                    .py_1()
+                    .px_1()
+                    .flex()
+                    .items_center()
                     .overflow_x_hidden()
                     .child(TextElement {
                         input: cx.entity(),

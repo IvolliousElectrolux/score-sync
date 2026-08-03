@@ -45,8 +45,15 @@ impl Region {
 #[derive(Clone, Debug)]
 pub struct Page {
     pub id: String,
+    /// 显示用路径 / 原始文件名
     pub path: PathBuf,
-    pub image: RgbImage,
+    /// 会话 tmp (或工程解压落盘) 上的 PNG 备份
+    pub disk_path: PathBuf,
+    /// 仅内存窗口内有值; 窗口外为 None
+    pub image: Option<RgbImage>,
+    /// 卸载后仍可用的尺寸缓存
+    pub img_w: u32,
+    pub img_h: u32,
     pub regions: HashMap<String, Region>,
 }
 
@@ -60,11 +67,24 @@ impl Page {
     }
 
     pub fn height(&self) -> u32 {
-        self.image.height()
+        if let Some(img) = self.image.as_ref() {
+            img.height()
+        } else {
+            self.img_h
+        }
     }
 
     pub fn width(&self) -> u32 {
-        self.image.width()
+        if let Some(img) = self.image.as_ref() {
+            img.width()
+        } else {
+            self.img_w
+        }
+    }
+
+    /// 估算本页解码后占用的字节数.
+    pub fn estimated_bytes(&self) -> u64 {
+        (self.width() as u64) * (self.height() as u64) * 3
     }
 }
 
@@ -170,17 +190,91 @@ impl DocState {
         }
     }
 
-    /// 裁切某页上的区域条带 (整宽).
+    /// 同步确保某页像素在内存中.
+    pub fn ensure_image(&mut self, page_idx: usize) -> Result<(), String> {
+        let Some(page) = self.pages.get(page_idx) else {
+            return Err("页不存在".into());
+        };
+        if page.image.is_some() {
+            return Ok(());
+        }
+        let path = page.disk_path.clone();
+        let img = crate::page_cache::load_rgb(&path)?;
+        let (w, h) = (img.width(), img.height());
+        if let Some(page) = self.pages.get_mut(page_idx) {
+            page.img_w = w;
+            page.img_h = h;
+            page.image = Some(img);
+        }
+        Ok(())
+    }
+
+    pub fn ensure_images(&mut self, indices: &[usize]) -> Result<(), String> {
+        for &i in indices {
+            self.ensure_image(i)?;
+        }
+        Ok(())
+    }
+
+    pub fn unload_page_image(&mut self, page_idx: usize) {
+        if let Some(page) = self.pages.get_mut(page_idx) {
+            if let Some(img) = page.image.take() {
+                page.img_w = img.width();
+                page.img_h = img.height();
+            }
+        }
+    }
+
+    /// 内存只保留 `center ± radius` 页的像素.
+    pub fn retain_window(&mut self, center: usize, radius: usize) {
+        let n = self.pages.len();
+        if n == 0 {
+            return;
+        }
+        let center = center.min(n - 1);
+        let lo = center.saturating_sub(radius);
+        let hi = (center + radius).min(n - 1);
+        for i in 0..n {
+            if i < lo || i > hi {
+                self.unload_page_image(i);
+            } else if self.pages[i].image.is_none() {
+                let _ = self.ensure_image(i);
+            }
+        }
+    }
+
+    pub fn page_indices_for_group(&self, group_id: &str) -> Vec<usize> {
+        let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
+            return Vec::new();
+        };
+        let mut idxs = Vec::new();
+        for rid in &g.region_ids {
+            if let Some((pi, _)) = self.find_region(rid) {
+                if !idxs.contains(&pi) {
+                    idxs.push(pi);
+                }
+            }
+        }
+        idxs
+    }
+
+    pub fn ensure_group_pages(&mut self, group_id: &str) -> Result<(), String> {
+        let idxs = self.page_indices_for_group(group_id);
+        self.ensure_images(&idxs)
+    }
+
+    /// 裁切某页上的区域条带 (整宽). 调用前须 `ensure` 相关页.
     pub fn crop_region(&self, region_id: &str) -> Option<image::RgbImage> {
         let (pi, r) = self.find_region(region_id)?;
         let page = self.pages.get(pi)?;
+        let img = page.image.as_ref()?;
         let w = page.width();
         let y0 = r.y0.max(0) as u32;
         let y1 = (r.y1 as u32).min(page.height().saturating_sub(1));
         if y1 < y0 {
             return None;
         }
-        Some(image::imageops::crop_imm(&page.image, 0, y0, w, y1 - y0 + 1).to_image())
+        Some(image::imageops::crop_imm(img, 0, y0, w, y1 - y0 + 1).to_image())
     }
 
     /// 按组内成员顺序竖向拼合 (与导出一致, 不含蒙版).
@@ -343,6 +437,57 @@ impl DocState {
         }
     }
 
+    /// 组合内最上块的排序键 (页序, y0, y1); 空组给哨兵值.
+    pub fn group_top_key(&self, g: &Group) -> (usize, i32, i32) {
+        g.region_ids
+            .iter()
+            .map(|rid| self.region_sort_key(rid))
+            .min()
+            .unwrap_or((usize::MAX, i32::MAX, i32::MAX))
+    }
+
+    /// 来源号 `p<页码>c<该页内按最上块 y 的序号>` (1-based).
+    /// 页码取组合最上块所在页; `c` 只在「最上块落在同一页」的组合之间计数.
+    pub fn group_origin_code(&self, group_index: usize) -> String {
+        let Some(g) = self.groups.get(group_index) else {
+            return "p?c?".into();
+        };
+        let top = self.group_top_key(g);
+        if top.0 == usize::MAX {
+            return "p?c?".into();
+        }
+        let page_no = top.0 + 1;
+        let mut same_page: Vec<(usize, (usize, i32, i32))> = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter_map(|(i, og)| {
+                let k = self.group_top_key(og);
+                if k.0 == top.0 {
+                    Some((i, k))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        same_page.sort_by_key(|(_, k)| *k);
+        let c = same_page
+            .iter()
+            .position(|(i, _)| *i == group_index)
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        format!("p{page_no}c{c}")
+    }
+
+    /// 分块「输出组合」列表用: `排序号. 来源号`, 如 `5. p2c2`.
+    pub fn group_crop_label(&self, group_index: usize) -> String {
+        format!(
+            "{}. {}",
+            group_index + 1,
+            self.group_origin_code(group_index)
+        )
+    }
+
     pub fn sort_groups(&mut self) {
         if self.groups_manual_order {
             return;
@@ -467,29 +612,81 @@ impl DocState {
         self.group_masks.retain(|k, _| valid.contains(k));
     }
 
-    /// 加载一页 RGB 图并自动识别. `switch_to`: 是否切到新页.
-    pub fn add_page(&mut self, path: PathBuf, image: RgbImage, switch_to: bool) -> usize {
+    /// 加载一页 RGB 图并写入会话 tmp, 再自动识别. `switch_to`: 是否切到新页.
+    pub fn add_page(
+        &mut self,
+        path: PathBuf,
+        image: RgbImage,
+        switch_to: bool,
+    ) -> Result<usize, String> {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("page.png");
+        let disk_path = crate::page_cache::write_rgb_png(&image, name)?;
+        let (w, h) = (image.width(), image.height());
         let page = Page {
             id: new_id(),
             path,
-            image,
+            disk_path,
+            image: Some(image),
+            img_w: w,
+            img_h: h,
             regions: HashMap::new(),
         };
         self.pages.push(page);
         let idx = self.pages.len() - 1;
-        self.detect_page(idx, true);
         if switch_to {
             self.current_page_index = idx;
         }
-        idx
+        self.detect_page(idx, true);
+        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        Ok(idx)
+    }
+
+    /// 已有磁盘 PNG (会话 tmp / PDF 渲染输出 / 工程解压) 登记为新页.
+    pub fn add_page_from_disk(
+        &mut self,
+        path: PathBuf,
+        disk_path: PathBuf,
+        switch_to: bool,
+        run_detect: bool,
+    ) -> Result<usize, String> {
+        let (w, h) = image::image_dimensions(&disk_path)
+            .map_err(|e| format!("读取页尺寸失败 ({}): {e}", disk_path.display()))?;
+        let page = Page {
+            id: new_id(),
+            path,
+            disk_path,
+            image: None,
+            img_w: w,
+            img_h: h,
+            regions: HashMap::new(),
+        };
+        self.pages.push(page);
+        let idx = self.pages.len() - 1;
+        if switch_to {
+            self.current_page_index = idx;
+        }
+        if run_detect {
+            self.detect_page(idx, true);
+        }
+        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        Ok(idx)
     }
 
     pub fn detect_page(&mut self, page_idx: usize, reset_groups: bool) {
+        if self.ensure_image(page_idx).is_err() {
+            return;
+        }
         let Some(page) = self.pages.get(page_idx) else {
             return;
         };
+        let Some(img) = page.image.as_ref() else {
+            return;
+        };
         let old_ids: HashSet<String> = page.regions.keys().cloned().collect();
-        let bands = detect_bands(&page.image, self.ink_threshold, self.margin);
+        let bands = detect_bands(img, self.ink_threshold, self.margin);
         let bands = if bands.is_empty() {
             vec![Band {
                 y0: 0,
@@ -561,10 +758,13 @@ impl DocState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn detect_all(&mut self) {
         let n = self.pages.len();
         for i in 0..n {
             self.detect_page(i, true);
+            // 逐页识别后立刻裁回窗口, 避免全部页图堆在内存
+            self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
         }
     }
 
@@ -664,6 +864,24 @@ impl DocState {
         }
         ids.sort_by_key(|rid| self.region_sort_key(rid));
         let id_set: HashSet<String> = ids.iter().cloned().collect();
+        // 以排序后第一个块所在组合的原位置为准插入 (手动调序时 sort_groups 不会跑).
+        let first_rid = &ids[0];
+        let old_idx = self
+            .groups
+            .iter()
+            .position(|g| g.region_ids.iter().any(|x| x == first_rid))
+            .unwrap_or(self.groups.len());
+        let mut insert_at = 0usize;
+        for (i, g) in self.groups.iter().enumerate() {
+            if i >= old_idx {
+                break;
+            }
+            let keep = g.region_ids.iter().any(|x| !id_set.contains(x));
+            if keep {
+                insert_at += 1;
+            }
+        }
+
         let mut new_groups: Vec<Group> = Vec::new();
         for g in &self.groups {
             let remain: Vec<String> = g
@@ -686,7 +904,8 @@ impl DocState {
             name: String::new(),
         };
         let gid = g_new.id.clone();
-        new_groups.push(g_new);
+        let insert_at = insert_at.min(new_groups.len());
+        new_groups.insert(insert_at, g_new);
         self.groups = new_groups;
         self.sort_groups();
         self.active_group_id = Some(gid);
@@ -957,6 +1176,7 @@ impl DocState {
         } else if index < self.current_page_index {
             self.current_page_index -= 1;
         }
+        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
         true
     }
 
@@ -974,6 +1194,7 @@ impl DocState {
             self.current_page_index += 1;
         }
         self.sort_groups();
+        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
     }
 
     pub fn copy_page_at(&mut self, index: usize) -> Option<usize> {
@@ -1001,14 +1222,22 @@ impl DocState {
             format!("{stem}_copy{suf}")
         };
         let new_path = src.path.with_file_name(copy_name);
-        let image = src.image.clone();
+        let disk_path = match crate::page_cache::duplicate_disk_png(&src.disk_path) {
+            Ok(p) => p,
+            Err(_) => return None,
+        };
+        let (img_w, img_h) = (src.width(), src.height());
+        // 复制页不克隆像素; 若在窗口内再按需加载
         let mut ordered: Vec<Region> = src.regions.values().cloned().collect();
         ordered.sort_by_key(|r| (r.y0, r.y1));
 
         let mut page = Page {
             id: new_page_id.clone(),
             path: new_path,
-            image,
+            disk_path,
+            image: None,
+            img_w,
+            img_h,
             regions: HashMap::new(),
         };
         let mut new_region_ids = Vec::new();
@@ -1064,6 +1293,7 @@ impl DocState {
             self.sort_groups();
         }
         self.current_page_index = insert_at;
+        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
         Some(insert_at)
     }
 

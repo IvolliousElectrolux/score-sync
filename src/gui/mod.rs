@@ -20,8 +20,9 @@ use image::{Frame, ImageBuffer, RgbaImage};
 use smallvec::smallvec;
 
 use crate::config;
-use crate::export::export_groups;
-use crate::model::{is_image_path, is_open_path, is_pdf_path, parse_color_hex, DocState, Group, Region};
+use crate::model::{
+    is_image_path, is_open_path, is_pdf_path, parse_color_hex, DocState, Group, Page, Region,
+};
 use crate::pdf;
 use crate::project::{self, is_project_path};
 use crate::text_input::{self, TextInput};
@@ -76,13 +77,16 @@ const HELP_TEXT: &str = "\
   N 添加新块 | S 分割块 | M 合并组合 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
   E 导出组合 | R 重置本页分组 | F 适应窗口 | H / F1 操作说明\n\
   Ctrl+A 全选本页原子块 | 输出组合 Ctrl+点击多选 (拖拽时整块一起调序)\n\
-  Ctrl+Z/Y 撤重 (按当前标签页独立记忆)\n\
+  Ctrl+Z/Y 撤重 (按当前标签页独立记忆; 关闭页面亦可撤回)\n\
 \n\
 【蒙版】快捷键 (右侧切到蒙版后):\n\
   B 框选 | L 折线 (逐点连线, 吸附首点闭环) | P 平移 | 画笔/橡皮 (侧栏, 可调色/粗细)\n\
   E 导出本页图片 | F 适应 | Delete 删除选中\n\
   Ctrl+A 全选蒙版 | Ctrl+Z/Y 撤重 (按组合独立记忆, 切走再回来仍可撤)\n\
+  Ctrl+S 保存工程 (各面板通用)\n\
   有选中时透明度滑条改选中项; 无选中时改后续新建默认透明度\n\
+  点击色块打开浮动取色器: HSV / 最近色 / RGB 手输; 滴管可从左侧图取色\n\
+  (悬浮实时预览色盘与 RGB, 单击确认, Esc/右键取消); 画笔光标为圆形预览\n\
 \n\
 【视频】快捷键 (右侧切到视频后, 先在轨道/预览区点一下获得焦点):\n\
   空格 播放/暂停 | ← / → 快退/快进 1 秒 | Shift+← / Shift+→ 快退/快进 5 秒\n\
@@ -96,16 +100,17 @@ const HELP_TEXT: &str = "\
   底部横条可整体拖动平移, 拖两端圆点改变缩放.\n\
 \n\
 操作步骤:\n\
-1. 打开/拖入图片或 PDF → 多标签页; PDF 会先转到临时 PNG 再按页加载.\n\
-2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续.\n\
+1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留当前页±4.\n\
+2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
-4. 每页独立识别分块; 「识别全部页」一次处理所有标签.\n\
+4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
 6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
 7. Ctrl 多选可跨页, 「合并组合」; 脚注可用「共享脚注」让同一块出现在多组导出中.\n\
-8. 「输出组合」可 Ctrl 多选并以整块拖拽调序 (导出按此顺序); 未手动调序时按组内首块 (页序, y) 自动排.\n\
+8. 「输出组合」可 Ctrl 多选并以整块拖拽调序 (导出按列表顺序); 标签为「排序号. p页c页内」\n\
+   (p/c 按该组最上块所在页及该页内自上而下序号; 未手动调序时亦按最上块自动排).\n\
    左侧点选块或切回分块时, 列表会滚到对应组合.\n\
-9. 「蒙版」编辑当前组合的竖向拼合图; 蒙版坐标相对拼合图, 各组合独立\n\
+9. 「蒙版」编辑当前组合的竖向拼合图; 组合标签与分块一致为「排序号. 来源号」\n\
    (共享脚注可在不同组画不同遮盖). 标签栏/侧栏切换组合; 与分块互相切换时会定位并滚动到对应组合.\n\
 10. 「导出组合」按「输出组合」列表顺序拼接并套用各组蒙版; 蒙版侧「导出本页图片」只导出当前组合.\n\
 11. 「工程」页「应用到工程组合」把工程底色作为可撤销的底层异步叠加到各输出组合 (不卡界面),\n\
@@ -121,6 +126,8 @@ const HELP_TEXT: &str = "\
 其他:\n\
   空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
   右侧顶栏可切换「分块 / 蒙版 / 工程 / 视频」四个面板.\n\
+  标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
+  「工程」面板可「清除视频缓存」删除旁路 `.staffcrop.cache`.\n\
   PDF 导入依赖 pdfium、视频导出依赖 ffmpeg, 需把对应文件放在程序所在目录 (或系统 PATH) 下.";
 
 /// 画布编辑工具 (互斥)
@@ -157,9 +164,14 @@ enum SideTool {
 }
 
 /// 分块面板一次可撤操作的快照 (按「触发时所在页」入栈; 可含多页 regions).
+/// 删除/复制页等结构变更另存完整 `pages`, 走 `page_struct_history`.
 #[derive(Clone)]
 struct CropSnap {
     page_regions: HashMap<String, HashMap<String, Region>>,
+    /// 页级结构快照; `Some` 时 apply 整表替换 pages (含图), 忽略 page_regions.
+    pages: Option<Vec<Page>>,
+    current_page_index: Option<usize>,
+    group_masks: Option<HashMap<String, Vec<MaskRect>>>,
     groups: Vec<Group>,
     selected_region_ids: HashSet<String>,
     active_group_id: Option<String>,
@@ -265,6 +277,8 @@ enum DialogKind {
         title: String,
         body: String,
     },
+    /// 关窗时有未保存改动
+    UnsavedExit,
 }
 
 struct TabContextMenu {
@@ -359,6 +373,20 @@ struct ScoreSyncApp {
     video_sync_gen: u64,
     /// 分块撤重: key = page_id, 各标签页互不影响.
     crop_histories: HashMap<String, CropHistory>,
+    /// 删页/复制页等文档结构撤重 (与单页 regions 栈分开).
+    page_struct_history: CropHistory,
+    /// 有未保存改动
+    dirty: bool,
+    /// 切页异步加载代数, 防止连切时旧结果覆盖
+    page_load_gen: u64,
+    /// 视频池组合脏标记 (分块/蒙版/底色变更后需重算缓存)
+    video_pool_dirty: HashSet<String>,
+    /// 全部视频池视为脏 (底色整体变更等)
+    video_pool_all_dirty: bool,
+    /// 用户确认退出后允许关窗
+    allow_close: bool,
+    /// 保存中转圈动画相位 (0..1)
+    save_spin_phase: f32,
 }
 
 impl ScoreSyncApp {
@@ -376,7 +404,18 @@ impl ScoreSyncApp {
         let apply_bg = cx.new(ApplyBgApp::new);
         cx.observe(&apply_bg, |_, _, cx| cx.notify()).detach();
         let score_video = cx.new(ScoreVideoApp::new);
-        cx.observe(&score_video, |_, _, cx| cx.notify()).detach();
+        cx.observe(&score_video, |this, video, cx| {
+            let snap = video.read(cx).timeline_snapshot();
+            let saved = &this.doc.video_state;
+            if snap.video_clips != saved.video_clips
+                || snap.fades != saved.fades
+                || snap.audio_clips != saved.audio_clips
+            {
+                this.dirty = true;
+            }
+            cx.notify();
+        })
+        .detach();
         let mut app = Self {
             focus_handle: cx.focus_handle(),
             doc: {
@@ -425,6 +464,13 @@ impl ScoreSyncApp {
             opening: false,
             video_sync_gen: 0,
             crop_histories: HashMap::new(),
+            page_struct_history: CropHistory::default(),
+            dirty: false,
+            page_load_gen: 0,
+            video_pool_dirty: HashSet::new(),
+            video_pool_all_dirty: true,
+            allow_close: false,
+            save_spin_phase: 0.0,
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -635,7 +681,13 @@ impl ScoreSyncApp {
         };
         self.img_w = page.width();
         self.img_h = page.height();
-        let rgb = &page.image;
+        let Some(rgb) = page.image.as_ref() else {
+            // 占位: 尺寸已知但像素未到, 触发异步窗口加载
+            self.render_image = None;
+            self.request_page_window(cx);
+            cx.notify();
+            return;
+        };
         let (w, h) = (self.img_w, self.img_h);
         let mut rgba: RgbaImage = ImageBuffer::from_fn(w, h, |x, y| {
             let p = rgb.get_pixel(x, y);
@@ -655,6 +707,134 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
+    /// 异步加载当前页 ±4 窗口并释放窗外页图.
+    fn request_page_window(&mut self, cx: &mut Context<Self>) {
+        self.page_load_gen = self.page_load_gen.wrapping_add(1);
+        let gen = self.page_load_gen;
+        let center = self.doc.current_page_index;
+        let radius = crate::page_cache::WINDOW_RADIUS;
+        let n = self.doc.pages.len();
+        if n == 0 {
+            return;
+        }
+        let lo = center.saturating_sub(radius);
+        let hi = (center + radius).min(n - 1);
+        let mut jobs: Vec<(usize, PathBuf)> = Vec::new();
+        for i in lo..=hi {
+            if self.doc.pages[i].image.is_none() {
+                jobs.push((i, self.doc.pages[i].disk_path.clone()));
+            }
+        }
+        // 窗外立刻卸掉
+        for i in 0..n {
+            if i < lo || i > hi {
+                self.doc.unload_page_image(i);
+            }
+        }
+        if jobs.is_empty() {
+            // 当前页已在内存则刷新贴图
+            if self.doc.pages.get(center).and_then(|p| p.image.as_ref()).is_some()
+                && self.render_image.is_none()
+            {
+                self.refresh_render(cx);
+            }
+            return;
+        }
+        let (tx, rx) = async_channel::unbounded::<(usize, Result<image::RgbImage, String>)>();
+        std::thread::spawn(move || {
+            for (idx, path) in jobs {
+                let r = crate::page_cache::load_rgb(&path);
+                let _ = tx.send_blocking((idx, r));
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok((idx, result)) = rx.recv().await {
+                this.update(cx, |view, cx| {
+                    if view.page_load_gen != gen {
+                        return;
+                    }
+                    if let Ok(img) = result {
+                        if let Some(page) = view.doc.pages.get_mut(idx) {
+                            page.img_w = img.width();
+                            page.img_h = img.height();
+                            page.image = Some(img);
+                        }
+                    }
+                    if idx == view.doc.current_page_index {
+                        view.refresh_render(cx);
+                    } else {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// 保存进行中时驱动标题栏拖尾转圈.
+    fn start_save_spinner(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(33))
+                .await;
+            let cont = this
+                .update(cx, |view, cx| {
+                    if !view.saving {
+                        return false;
+                    }
+                    view.save_spin_phase = (view.save_spin_phase + 0.08) % 1.0;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !cont {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// 落盘蒙版/同步视频时间轴后, 判定是否仍有未保存改动.
+    fn refresh_dirty_from_panels(&mut self, cx: &mut Context<Self>) {
+        if self.side_tool == SideTool::Mask {
+            self.flush_mask_to_doc(cx);
+        }
+        let video_snap = self.score_video.read(cx).timeline_snapshot();
+        let saved = &self.doc.video_state;
+        if video_snap.video_clips != saved.video_clips
+            || video_snap.fades != saved.fades
+            || video_snap.audio_clips != saved.audio_clips
+        {
+            self.dirty = true;
+        }
+    }
+
+    fn mark_video_pool_dirty_all(&mut self) {
+        self.video_pool_all_dirty = true;
+        self.video_pool_dirty.clear();
+        self.mark_dirty();
+    }
+
+    fn mark_video_pool_dirty_group(&mut self, gid: &str) {
+        if !self.video_pool_all_dirty {
+            self.video_pool_dirty.insert(gid.to_string());
+        }
+        self.mark_dirty();
+    }
+
+    fn pool_cache_dir(&self) -> PathBuf {
+        if let Some(ref p) = self.project_path {
+            crate::page_cache::project_cache_dir(p)
+        } else {
+            crate::page_cache::session_dir().join("pool_cache")
+        }
+    }
+
     fn sync_mask_image(&mut self, cx: &mut Context<Self>) {
         if self.side_tool != SideTool::Mask {
             return;
@@ -670,6 +850,13 @@ impl ScoreSyncApp {
             });
             return;
         };
+        if self.doc.ensure_group_pages(&gid).is_err() {
+            self.mask_tool.update(cx, |m, cx| {
+                m.set_embed_side_width(side_w);
+                m.clear_view("无法加载该组合页图", cx);
+            });
+            return;
+        }
         let Some((rgb, voff)) = self.doc.compose_group_preview(&gid) else {
             self.mask_tool.update(cx, |m, cx| {
                 m.set_embed_side_width(side_w);
@@ -688,21 +875,13 @@ impl ScoreSyncApp {
                 m
             })
             .collect();
-        let gname = self
+        let label = self
             .doc
             .groups
             .iter()
             .position(|g| g.id == gid)
-            .map(|i| self.doc.groups[i].display_name(i))
+            .map(|i| self.doc.group_crop_label(i))
             .unwrap_or_else(|| "组合".into());
-        let n = self
-            .doc
-            .groups
-            .iter()
-            .find(|g| g.id == gid)
-            .map(|g| g.region_ids.len())
-            .unwrap_or(0);
-        let label = format!("{gname} (拼合 {n} 块)");
         let mask_prefs = self.doc.mask_prefs.clone();
         self.mask_tool.update(cx, |m, cx| {
             m.set_embed_side_width(side_w);
@@ -743,6 +922,8 @@ impl ScoreSyncApp {
         self.doc.set_group_masks(&gid, masks);
         self.doc.mask_prefs = prefs.clone();
         config::remember_mask_prefs(&prefs);
+        self.mark_dirty();
+        self.mark_video_pool_dirty_group(&gid);
     }
 
     fn set_mask_target(&mut self, group_id: String, cx: &mut Context<Self>) {
@@ -764,6 +945,10 @@ impl ScoreSyncApp {
         }
         if self.side_tool == SideTool::Mask {
             self.flush_mask_to_doc(cx);
+            self.doc.retain_window(
+                self.doc.current_page_index,
+                crate::page_cache::WINDOW_RADIUS,
+            );
         }
         self.side_tool = tool;
         match tool {
@@ -808,15 +993,7 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
-    /// 把「输出组合」(已排序) 渲染为最终合成图, 同步给视频素材池.
-    ///
-    /// 对每个组合都要重新拼合+ (可能) 叠加工程底色裁切, 组合一多或底色一大
-    /// 就很容易卡住 UI (尤其应用/取消工程底色时一次性影响全部组合). 这里
-    /// 不整体克隆一份 `DocState` 扔给后台线程 (页图本就可能很大, 克隆一份
-    /// 等于内存翻倍, 在页面文件/内存本就紧张时容易引发底层崩溃), 而是分批
-    /// 在主线程上直接对 `self.doc` 分块合成, 每批之间让出一次事件循环, 让
-    /// UI 能插入重绘/输入, 不会被整段合成一次性卡死; `video_sync_gen` 防止
-    /// 旧的一轮在完成前被新一轮取代后, 结果反而覆盖了新状态.
+    /// 把「输出组合」渲染为终稿写入工程旁持久缓存, 再同步给视频素材池 (LRU 热加载).
     fn sync_video_pool(&mut self, cx: &mut Context<Self>) {
         self.video_sync_gen = self.video_sync_gen.wrapping_add(1);
         let gen = self.video_sync_gen;
@@ -827,10 +1004,22 @@ impl ScoreSyncApp {
             self.score_video.update(cx, |v, cx| v.set_pool(Vec::new(), cx));
             return;
         }
-        const CHUNK: usize = 4;
+        let cache_root = self.pool_cache_dir().join("pool");
+        let _ = std::fs::create_dir_all(&cache_root);
+        let all_dirty = self.video_pool_all_dirty;
+        let dirty_set = self.video_pool_dirty.clone();
+        // 估算并发: 取当前页峰值近似
+        let peak = self
+            .doc
+            .pages
+            .first()
+            .map(|p| p.estimated_bytes().saturating_mul(3))
+            .unwrap_or(64 * 1024 * 1024);
+        let conc = crate::page_cache::concurrency_for_peak(peak.max(128 * 1024 * 1024));
+
         cx.spawn(async move |this, cx| {
             let mut items: Vec<MaterialItem> = Vec::with_capacity(group_ids.len());
-            for (chunk_i, chunk) in group_ids.chunks(CHUNK).enumerate() {
+            for (chunk_i, chunk) in group_ids.chunks(conc.max(1)).enumerate() {
                 if chunk_i > 0 {
                     cx.background_executor()
                         .timer(Duration::from_millis(1))
@@ -838,7 +1027,6 @@ impl ScoreSyncApp {
                 }
                 let cancelled = this
                     .update(cx, |view, _| {
-                        // 已被更晚的一轮请求取代 (比如快速连续应用/取消底色), 放弃.
                         if view.video_sync_gen != gen {
                             return true;
                         }
@@ -849,13 +1037,38 @@ impl ScoreSyncApp {
                                 continue;
                             };
                             let label = view.doc.groups[idx].display_name(idx);
-                            if let Ok(Some(rgb)) = view.doc.render_group_final(gid) {
+                            let cache_path = cache_root.join(format!("{gid}.png"));
+                            let need_rebuild = all_dirty
+                                || dirty_set.contains(gid)
+                                || !cache_path.is_file();
+                            if need_rebuild {
+                                let _ = view.doc.ensure_group_pages(gid);
+                                match view.doc.render_group_final(gid) {
+                                    Ok(Some(rgb)) => {
+                                        if rgb.save(&cache_path).is_err() {
+                                            continue;
+                                        }
+                                        items.push(MaterialItem {
+                                            group_id: gid.clone(),
+                                            label: label.into(),
+                                            width: rgb.width(),
+                                            height: rgb.height(),
+                                            cache_path,
+                                        });
+                                    }
+                                    _ => continue,
+                                }
+                                view.doc.retain_window(
+                                    view.doc.current_page_index,
+                                    crate::page_cache::WINDOW_RADIUS,
+                                );
+                            } else if let Ok((w, h)) = image::image_dimensions(&cache_path) {
                                 items.push(MaterialItem {
                                     group_id: gid.clone(),
                                     label: label.into(),
-                                    image: Arc::new(
-                                        image::DynamicImage::ImageRgb8(rgb).to_rgba8(),
-                                    ),
+                                    width: w,
+                                    height: h,
+                                    cache_path,
                                 });
                             }
                         }
@@ -868,6 +1081,8 @@ impl ScoreSyncApp {
             }
             this.update(cx, |view, cx| {
                 if view.video_sync_gen == gen {
+                    view.video_pool_all_dirty = false;
+                    view.video_pool_dirty.clear();
                     view.score_video.update(cx, |v, cx| v.set_pool(items, cx));
                     cx.notify();
                 }
@@ -894,9 +1109,8 @@ impl ScoreSyncApp {
         if let Some(rid) = g.region_ids.first() {
             if let Some((pi, _)) = self.doc.find_region(rid) {
                 if pi != self.doc.current_page_index {
-                    self.doc.current_page_index = pi;
+                    self.switch_page(pi, cx);
                     self.scroll_group_list_to_active();
-                    self.refresh_render(cx);
                     return;
                 }
             }
@@ -907,6 +1121,8 @@ impl ScoreSyncApp {
 
     fn after_doc_change(&mut self, cx: &mut Context<Self>) {
         self.doc.sync_group_colors();
+        self.mark_dirty();
+        self.mark_video_pool_dirty_all();
         // 若当前页尺寸变了不必重渲整图, 但区域会重绘
         if let Some(page) = self.doc.current_page() {
             if page.width() != self.img_w || page.height() != self.img_h {
@@ -963,6 +1179,33 @@ impl ScoreSyncApp {
         }
         CropSnap {
             page_regions,
+            pages: None,
+            current_page_index: None,
+            group_masks: None,
+            groups: self.doc.groups.clone(),
+            selected_region_ids: self.doc.selected_region_ids.clone(),
+            active_group_id: self.doc.active_group_id.clone(),
+            groups_manual_order: self.doc.groups_manual_order,
+        }
+    }
+
+    fn capture_crop_snap_pages(&self) -> CropSnap {
+        // 结构撤重只保留路径 + 元数据, 不克隆整幅位图
+        let pages = self
+            .doc
+            .pages
+            .iter()
+            .map(|p| {
+                let mut p = p.clone();
+                p.image = None;
+                p
+            })
+            .collect();
+        CropSnap {
+            page_regions: HashMap::new(),
+            pages: Some(pages),
+            current_page_index: Some(self.doc.current_page_index),
+            group_masks: Some(self.doc.group_masks.clone()),
             groups: self.doc.groups.clone(),
             selected_region_ids: self.doc.selected_region_ids.clone(),
             active_group_id: self.doc.active_group_id.clone(),
@@ -998,10 +1241,34 @@ impl ScoreSyncApp {
         self.push_crop_undo_for(&ids);
     }
 
+    fn push_crop_undo_page_structure(&mut self) {
+        let snap = self.capture_crop_snap_pages();
+        let h = &mut self.page_struct_history;
+        h.undo.push(snap);
+        if h.undo.len() > CROP_HISTORY_LIMIT {
+            h.undo.remove(0);
+        }
+        h.redo.clear();
+    }
+
     fn apply_crop_snap(&mut self, snap: CropSnap) {
-        for (pid, regions) in snap.page_regions {
-            if let Some(p) = self.doc.pages.iter_mut().find(|p| p.id == pid) {
-                p.regions = regions;
+        if let Some(pages) = snap.pages {
+            self.doc.pages = pages;
+            if let Some(idx) = snap.current_page_index {
+                self.doc.current_page_index = idx.min(self.doc.pages.len().saturating_sub(1));
+            }
+            if let Some(masks) = snap.group_masks {
+                self.doc.group_masks = masks;
+            }
+            self.doc.retain_window(
+                self.doc.current_page_index,
+                crate::page_cache::WINDOW_RADIUS,
+            );
+        } else {
+            for (pid, regions) in snap.page_regions {
+                if let Some(p) = self.doc.pages.iter_mut().find(|p| p.id == pid) {
+                    p.regions = regions;
+                }
             }
         }
         self.doc.groups = snap.groups;
@@ -1009,73 +1276,76 @@ impl ScoreSyncApp {
         self.doc.active_group_id = snap.active_group_id;
         self.doc.groups_manual_order = snap.groups_manual_order;
         self.doc.ensure_active_group();
+        self.mark_dirty();
+        self.mark_video_pool_dirty_all();
     }
 
     fn undo_crop(&mut self, cx: &mut Context<Self>) {
-        let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) else {
-            self.status = "没有可撤回的操作.".into();
-            cx.notify();
-            return;
-        };
-        let prev = {
-            let Some(h) = self.crop_histories.get_mut(&cur) else {
-                self.status = "没有可撤回的操作.".into();
-                cx.notify();
-                return;
-            };
-            match h.undo.pop() {
-                Some(p) => p,
-                None => {
-                    self.status = "没有可撤回的操作.".into();
-                    cx.notify();
+        // 1) 当前页的 regions 撤重
+        if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+            if let Some(h) = self.crop_histories.get_mut(&cur) {
+                if let Some(prev) = h.undo.pop() {
+                    let ids: Vec<String> = prev.page_regions.keys().cloned().collect();
+                    let now = self.capture_crop_snap(&ids);
+                    if let Some(h) = self.crop_histories.get_mut(&cur) {
+                        h.redo.push(now);
+                    }
+                    self.apply_crop_snap(prev);
+                    self.status = "已撤回.".into();
+                    self.hint = self.status.clone();
+                    self.after_doc_change(cx);
                     return;
                 }
             }
-        };
-        let ids: Vec<String> = prev.page_regions.keys().cloned().collect();
-        let now = self.capture_crop_snap(&ids);
-        if let Some(h) = self.crop_histories.get_mut(&cur) {
-            h.redo.push(now);
         }
-        self.apply_crop_snap(prev);
-        self.status = "已撤回.".into();
-        self.hint = self.status.clone();
-        self.after_doc_change(cx);
+        // 2) 删页等结构撤重
+        if let Some(prev) = self.page_struct_history.undo.pop() {
+            let now = self.capture_crop_snap_pages();
+            self.page_struct_history.redo.push(now);
+            self.apply_crop_snap(prev);
+            self.status = "已撤回页操作.".into();
+            self.hint = self.status.clone();
+            self.refresh_render(cx);
+            return;
+        }
+        self.status = "没有可撤回的操作.".into();
+        cx.notify();
     }
 
     fn redo_crop(&mut self, cx: &mut Context<Self>) {
-        let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) else {
-            self.status = "没有可重做的操作.".into();
-            cx.notify();
-            return;
-        };
-        let next = {
-            let Some(h) = self.crop_histories.get_mut(&cur) else {
-                self.status = "没有可重做的操作.".into();
-                cx.notify();
-                return;
-            };
-            match h.redo.pop() {
-                Some(n) => n,
-                None => {
-                    self.status = "没有可重做的操作.".into();
-                    cx.notify();
+        if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+            if let Some(h) = self.crop_histories.get_mut(&cur) {
+                if let Some(next) = h.redo.pop() {
+                    let ids: Vec<String> = next.page_regions.keys().cloned().collect();
+                    let now = self.capture_crop_snap(&ids);
+                    if let Some(h) = self.crop_histories.get_mut(&cur) {
+                        h.undo.push(now);
+                        if h.undo.len() > CROP_HISTORY_LIMIT {
+                            h.undo.remove(0);
+                        }
+                    }
+                    self.apply_crop_snap(next);
+                    self.status = "已重做.".into();
+                    self.hint = self.status.clone();
+                    self.after_doc_change(cx);
                     return;
                 }
             }
-        };
-        let ids: Vec<String> = next.page_regions.keys().cloned().collect();
-        let now = self.capture_crop_snap(&ids);
-        if let Some(h) = self.crop_histories.get_mut(&cur) {
-            h.undo.push(now);
-            if h.undo.len() > CROP_HISTORY_LIMIT {
-                h.undo.remove(0);
-            }
         }
-        self.apply_crop_snap(next);
-        self.status = "已重做.".into();
-        self.hint = self.status.clone();
-        self.after_doc_change(cx);
+        if let Some(next) = self.page_struct_history.redo.pop() {
+            let now = self.capture_crop_snap_pages();
+            self.page_struct_history.undo.push(now);
+            if self.page_struct_history.undo.len() > CROP_HISTORY_LIMIT {
+                self.page_struct_history.undo.remove(0);
+            }
+            self.apply_crop_snap(next);
+            self.status = "已重做页操作.".into();
+            self.hint = self.status.clone();
+            self.refresh_render(cx);
+            return;
+        }
+        self.status = "没有可重做的操作.".into();
+        cx.notify();
     }
 
     fn undo_action(&mut self, cx: &mut Context<Self>) {
@@ -1136,8 +1406,19 @@ impl ScoreSyncApp {
             match image::open(&path) {
                 Ok(im) => {
                     let rgb = im.to_rgb8();
-                    self.doc.add_page(path, rgb, true);
-                    added += 1;
+                    match self.doc.add_page(path.clone(), rgb, true) {
+                        Ok(_) => {
+                            added += 1;
+                            self.mark_dirty();
+                            self.mark_video_pool_dirty_all();
+                        }
+                        Err(e) => {
+                            self.dialog = Some(DialogKind::Info {
+                                title: "打开失败".into(),
+                                body: format!("{}: {e}", path.display()),
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
                     self.dialog = Some(DialogKind::Info {
@@ -1217,12 +1498,17 @@ impl ScoreSyncApp {
                             total,
                             pdf_name,
                         } => {
-                            match image::open(&path) {
-                                Ok(im) => {
-                                    let was_empty = view.doc.pages.is_empty();
-                                    let rgb = im.to_rgb8();
-                                    // 首张切过去并刷新; 后续只追加标签, 不打断当前浏览
-                                    view.doc.add_page(path, rgb, was_empty);
+                            let was_empty = view.doc.pages.is_empty();
+                            let display = PathBuf::from(format!(
+                                "{pdf_name}_p{:03}.png",
+                                index + 1
+                            ));
+                            // PDF 渲染输出已是磁盘 PNG, 直接登记; 识别后 retain 窗口
+                            match view.doc.add_page_from_disk(display, path.clone(), was_empty, true)
+                            {
+                                Ok(_) => {
+                                    view.mark_dirty();
+                                    view.mark_video_pool_dirty_all();
                                     if was_empty {
                                         view.refresh_render(cx);
                                     }
@@ -1326,6 +1612,9 @@ impl ScoreSyncApp {
                         let video_snap = doc.video_state.clone();
                         view.doc = doc;
                         view.project_path = Some(path.clone());
+                        view.dirty = false;
+                        view.video_pool_all_dirty = false;
+                        view.video_pool_dirty.clear();
                         config::remember_last_project(&path);
                         view.drag = None;
                         view.dialog = None;
@@ -1333,6 +1622,7 @@ impl ScoreSyncApp {
                         view.param_edit = None;
                         view.region_y_edit = None;
                         view.crop_histories.clear();
+                        view.page_struct_history = CropHistory::default();
                         view.side_tool = SideTool::Crop;
                         view.canvas_tool = CanvasTool::Normal;
                         view.mask_target = None;
@@ -1434,17 +1724,23 @@ impl ScoreSyncApp {
         self.flush_mask_to_doc(cx);
         self.doc.video_state = self.score_video.read(cx).timeline_snapshot();
         self.saving = true;
+        self.save_spin_phase = 0.0;
         self.status = "正在保存工程…".into();
         self.hint = self.status.clone();
         cx.notify();
+        self.start_save_spinner(cx);
 
-        // 快照后放到后台做 PNG/zip, 避免卡住 UI
-        let doc = self.doc.clone();
+        // 快照后放到后台做 PNG/zip; 不克隆窗口内位图
+        let mut doc = self.doc.clone();
+        for p in &mut doc.pages {
+            p.image = None;
+        }
         let (tx, rx) = async_channel::bounded::<Result<PathBuf, String>>(1);
         std::thread::spawn(move || {
             let _ = tx.send_blocking(project::save_project(&doc, &path));
         });
 
+        let quit_after = matches!(self.dialog, Some(DialogKind::UnsavedExit));
         cx.spawn(async move |this, cx| {
             let result = rx.recv().await;
             this.update(cx, |view, cx| {
@@ -1452,9 +1748,18 @@ impl ScoreSyncApp {
                 match result {
                     Ok(Ok(saved)) => {
                         view.project_path = Some(saved.clone());
+                        view.dirty = false;
+                        // 保存成功后对齐视频快照基准, 避免关窗误判仍脏
+                        view.doc.video_state =
+                            view.score_video.read(cx).timeline_snapshot();
                         config::remember_last_project(&saved);
                         view.status = format!("工程已保存: {}", saved.display()).into();
                         view.hint = view.status.clone();
+                        if quit_after {
+                            view.dialog = None;
+                            view.allow_close = true;
+                            cx.quit();
+                        }
                     }
                     Ok(Err(e)) => {
                         view.dialog = Some(DialogKind::Info {
@@ -1520,10 +1825,48 @@ impl ScoreSyncApp {
             return;
         }
         self.push_crop_undo_all_pages();
-        self.doc.detect_all();
-        self.status = format!("已识别全部 {} 页.", self.doc.pages.len()).into();
+        let n = self.doc.pages.len();
+        let peak = self
+            .doc
+            .pages
+            .iter()
+            .map(|p| p.estimated_bytes())
+            .max()
+            .unwrap_or(64 * 1024 * 1024);
+        let conc = crate::page_cache::concurrency_for_peak(peak);
+        self.status = format!("正在识别全部 {n} 页…").into();
         self.hint = self.status.clone();
-        self.after_doc_change(cx);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            for start in (0..n).step_by(conc) {
+                let end = (start + conc).min(n);
+                this.update(cx, |view, _| {
+                    for i in start..end {
+                        view.doc.detect_page(i, true);
+                    }
+                    view.doc.retain_window(
+                        view.doc.current_page_index,
+                        crate::page_cache::WINDOW_RADIUS,
+                    );
+                    view.status = format!("识别进度 {}/{n}…", end).into();
+                    view.hint = view.status.clone();
+                })
+                .ok();
+                cx.background_executor()
+                    .timer(Duration::from_millis(1))
+                    .await;
+            }
+            this.update(cx, |view, cx| {
+                view.mark_dirty();
+                view.mark_video_pool_dirty_all();
+                view.status = format!("已识别全部 {n} 页.").into();
+                view.hint = view.status.clone();
+                view.after_doc_change(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn toggle_add_block(&mut self, cx: &mut Context<Self>) {
@@ -1692,25 +2035,89 @@ impl ScoreSyncApp {
         else {
             return;
         };
-        match export_groups(&self.doc, &out) {
-            Ok((saved, path)) => {
-                self.dialog = Some(DialogKind::Info {
-                    title: "完成".into(),
-                    body: format!(
-                        "已导出 {saved} 个组合到:\n{}\n(已按输出组合列表顺序拼接并套用各组蒙版)",
-                        path.display()
-                    ),
-                });
-                self.status = format!("已导出 {saved} 个组合.").into();
-            }
-            Err(e) => {
-                self.dialog = Some(DialogKind::Info {
-                    title: "导出失败".into(),
-                    body: e,
-                });
-            }
-        }
+        let group_ids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
+        let n = group_ids.len();
+        let peak = self
+            .doc
+            .pages
+            .iter()
+            .map(|p| p.estimated_bytes())
+            .max()
+            .unwrap_or(64 * 1024 * 1024)
+            .saturating_mul(2);
+        let conc = crate::page_cache::concurrency_for_peak(peak);
+        self.status = format!("正在导出 {n} 个组合…").into();
+        self.hint = self.status.clone();
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let mut saved = 0usize;
+            let mut err: Option<String> = None;
+            let mut abs = 0usize;
+            for (chunk_i, chunk) in group_ids.chunks(conc.max(1)).enumerate() {
+                if chunk_i > 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                }
+                let base = abs;
+                abs += chunk.len();
+                let batch = this
+                    .update(cx, |view, _| {
+                        match crate::export::export_groups_chunk(
+                            &mut view.doc,
+                            &out,
+                            chunk,
+                            base,
+                        ) {
+                            Ok(n) => {
+                                saved += n;
+                                view.doc.retain_window(
+                                    view.doc.current_page_index,
+                                    crate::page_cache::WINDOW_RADIUS,
+                                );
+                                view.status =
+                                    format!("导出进度 {saved}/{}…", group_ids.len()).into();
+                                view.hint = view.status.clone();
+                                None
+                            }
+                            Err(e) => Some(e),
+                        }
+                    })
+                    .unwrap_or(Some("导出任务中断".into()));
+                if let Some(e) = batch {
+                    err = Some(e);
+                    break;
+                }
+            }
+            this.update(cx, |view, cx| {
+                view.doc.retain_window(
+                    view.doc.current_page_index,
+                    crate::page_cache::WINDOW_RADIUS,
+                );
+                match err {
+                    Some(e) => {
+                        view.dialog = Some(DialogKind::Info {
+                            title: "导出失败".into(),
+                            body: e,
+                        });
+                    }
+                    None => {
+                        view.dialog = Some(DialogKind::Info {
+                            title: "完成".into(),
+                            body: format!(
+                                "已导出 {saved} 个组合到:\n{}\n(已按输出组合列表顺序拼接并套用各组蒙版)",
+                                out.display()
+                            ),
+                        });
+                        view.status = format!("已导出 {saved} 个组合.").into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn show_help(&mut self, cx: &mut Context<Self>) {
@@ -1724,16 +2131,34 @@ impl ScoreSyncApp {
             return;
         }
         self.doc.current_page_index = index;
-        self.refresh_render(cx);
+        if self.doc.pages[index].image.is_some() {
+            self.request_page_window(cx);
+            self.refresh_render(cx);
+        } else {
+            self.render_image = None;
+            self.img_w = self.doc.pages[index].width();
+            self.img_h = self.doc.pages[index].height();
+            self.request_page_window(cx);
+            cx.notify();
+        }
     }
 
     fn close_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.doc.pages.len() {
+            return;
+        }
+        self.push_crop_undo_page_structure();
         let pid = self.doc.pages.get(index).map(|p| p.id.clone());
         if self.doc.close_page_at(index) {
             if let Some(id) = pid {
                 self.crop_histories.remove(&id);
             }
+            self.status = "已关闭页面 (Ctrl+Z 可撤回).".into();
+            self.hint = self.status.clone();
             self.refresh_render(cx);
+        } else {
+            // close 失败则丢掉刚压的空操作
+            self.page_struct_history.undo.pop();
         }
     }
 
@@ -1784,21 +2209,9 @@ impl ScoreSyncApp {
                     }
                 }
                 let cross = if pages_in.len() > 1 { "跨页 " } else { "" };
-                let first = g
-                    .region_ids
-                    .first()
-                    .and_then(|rid| self.doc.get_region(rid))
-                    .map(|fr| {
-                        format!(
-                            "首P{} y={} | ",
-                            self.doc.page_no(&fr.page_id),
-                            fr.y0
-                        )
-                    })
-                    .unwrap_or_default();
                 let text = format!(
-                    "{cross}{}  {first}[{}]",
-                    g.display_name(i),
+                    "{cross}{} | [{}]",
+                    self.doc.group_crop_label(i),
                     labels.join(", ")
                 );
                 ListRow {
@@ -2082,8 +2495,13 @@ impl ScoreSyncApp {
             self.drag,
             Some(DragKind::Edge { .. }) | Some(DragKind::PagePan { .. })
         ) {
+            let edged = matches!(self.drag, Some(DragKind::Edge { undid: true, .. }));
             self.drag = None;
-            cx.notify();
+            if edged {
+                self.after_doc_change(cx);
+            } else {
+                cx.notify();
+            }
         }
     }
 
@@ -2560,11 +2978,7 @@ impl ScoreSyncApp {
         for (i, g) in self.doc.groups.iter().enumerate() {
             let gid = g.id.clone();
             let active = active_gid.as_ref() == Some(&gid);
-            let nmask = self.doc.get_group_masks(&gid).len();
-            let mut label = g.display_name(i);
-            if nmask > 0 {
-                label = format!("{label}·{nmask}");
-            }
+            let label = self.doc.group_crop_label(i);
             let bg = if active {
                 rgb(0x2563eb)
             } else {
@@ -2772,6 +3186,13 @@ impl ScoreSyncApp {
                                 false,
                                 |this, window, cx| this.save_project_as(window, cx),
                                 cx,
+                            ))
+                            .child(self.btn(
+                                "proj_clear_video_cache",
+                                "清除视频缓存",
+                                false,
+                                |this, _, cx| this.clear_video_pool_cache(cx),
+                                cx,
                             )),
                     )
                     .child(
@@ -2819,6 +3240,20 @@ impl ScoreSyncApp {
             )
     }
 
+    fn clear_video_pool_cache(&mut self, cx: &mut Context<Self>) {
+        let dir = self.pool_cache_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        self.mark_video_pool_dirty_all();
+        self.score_video
+            .update(cx, |v, cx| v.set_pool(Vec::new(), cx));
+        self.status = format!("已清除视频缓存: {}", dir.display()).into();
+        self.hint = self.status.clone();
+        if self.side_tool == SideTool::Video {
+            self.sync_video_pool(cx);
+        }
+        cx.notify();
+    }
+
     fn apply_project_bg(&mut self, cx: &mut Context<Self>) {
         if self.doc.groups.is_empty() {
             self.dialog = Some(DialogKind::Info {
@@ -2849,9 +3284,14 @@ impl ScoreSyncApp {
                 {
                     Ok(()) => {
                         // 试合成第一组, 尽早发现底色太小等问题
-                        if let Some(g) = self.doc.groups.first() {
-                            if let Err(e) = self.doc.render_group_final(&g.id) {
+                        if let Some(gid) = self.doc.groups.first().map(|g| g.id.clone()) {
+                            let _ = self.doc.ensure_group_pages(&gid);
+                            if let Err(e) = self.doc.render_group_final(&gid) {
                                 self.doc.clear_project_bg();
+                                self.doc.retain_window(
+                                    self.doc.current_page_index,
+                                    crate::page_cache::WINDOW_RADIUS,
+                                );
                                 self.dialog = Some(DialogKind::Info {
                                     title: "底色不适用".into(),
                                     body: format!(
@@ -2861,7 +3301,13 @@ impl ScoreSyncApp {
                                 cx.notify();
                                 return;
                             }
+                            self.doc.retain_window(
+                                self.doc.current_page_index,
+                                crate::page_cache::WINDOW_RADIUS,
+                            );
                         }
+                        self.mark_dirty();
+                        self.mark_video_pool_dirty_all();
                         self.status = format!(
                             "已为 {} 个组合启用底色层 {} ({}:{})",
                             self.doc.groups.len(),
@@ -2904,6 +3350,8 @@ impl ScoreSyncApp {
             return;
         }
         self.doc.clear_project_bg();
+        self.mark_dirty();
+        self.mark_video_pool_dirty_all();
         self.status = "已取消工程底色层.".into();
         self.hint = self.status.clone();
         self.force_refresh_mask_preview(cx);
@@ -2955,16 +3403,7 @@ impl ScoreSyncApp {
         for (i, g) in self.doc.groups.iter().enumerate() {
             let gid = g.id.clone();
             let active = active_gid.as_ref() == Some(&gid);
-            let nmask = self.doc.get_group_masks(&gid).len();
-            let mut label = g.display_name(i);
-            if let Some(rid) = g.region_ids.first() {
-                if let Some((pi, _)) = self.doc.find_region(rid) {
-                    label = format!("{label}·P{}", pi + 1);
-                }
-            }
-            if nmask > 0 {
-                label = format!("{label}·蒙{nmask}");
-            }
+            let label = self.doc.group_crop_label(i);
             let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
             let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
             row = row.child(
@@ -3535,6 +3974,8 @@ impl ScoreSyncApp {
             _ => None,
         };
 
+        let loading = render_image.is_none() && !self.doc.pages.is_empty();
+
         div()
             .id("image_view")
             .flex_1()
@@ -3543,6 +3984,7 @@ impl ScoreSyncApp {
             .h_full()
             .bg(rgb(0x2b2b2b))
             .overflow_hidden()
+            .relative()
             .cursor(cursor)
             .on_mouse_down(
                 MouseButton::Left,
@@ -3685,6 +4127,20 @@ impl ScoreSyncApp {
                 )
                 .size_full(),
             )
+            .when(loading, |d| {
+                d.child(
+                    div()
+                        .id("page_loading")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(0xe2e8f0))
+                        .text_sm()
+                        .child("加载中…"),
+                )
+            })
     }
 
     fn scroll_handle(&self, which: ScrollList) -> &ScrollHandle {
@@ -4156,7 +4612,7 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("输出组合 (拖拽调序; 可跨页; 导出按此顺序)"),
+                    .child("输出组合 (排序号. p页c页内; 拖拽调序; 导出按此顺序)"),
             );
 
         let mut glist = div()
@@ -4590,9 +5046,13 @@ impl ScoreSyncApp {
         let Some(ref dlg) = self.dialog else {
             return div().into_any_element();
         };
+        if matches!(dlg, DialogKind::UnsavedExit) {
+            return self.unsaved_exit_dialog(cx).into_any_element();
+        }
         let (title, body) = match dlg {
             DialogKind::Help => ("操作说明".to_string(), HELP_TEXT.to_string()),
             DialogKind::Info { title, body } => (title.clone(), body.clone()),
+            DialogKind::UnsavedExit => unreachable!(),
         };
         let body_el = div()
             .id("dlg_body")
@@ -4700,6 +5160,90 @@ impl ScoreSyncApp {
                     ),
             )
             .into_any_element()
+    }
+
+    fn unsaved_exit_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("dialog_backdrop_unsaved")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000080))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .id("dialog_card_unsaved")
+                    .w(px(420.))
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("未保存的改动"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x334155))
+                            .child("当前工程有未保存改动. 要在退出前保存吗?"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .justify_end()
+                            .child(self.btn(
+                                "exit_save",
+                                "保存并退出",
+                                true,
+                                |this, window, cx| {
+                                    // 保持 UnsavedExit 标记, 供保存成功后 quit
+                                    if this.project_path.is_some() {
+                                        this.save_project(window, cx);
+                                    } else {
+                                        this.save_project_as(window, cx);
+                                    }
+                                },
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "exit_discard",
+                                "不保存退出",
+                                false,
+                                |this, _, cx| {
+                                    this.dialog = None;
+                                    this.dirty = false;
+                                    this.allow_close = true;
+                                    cx.quit();
+                                },
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "exit_cancel",
+                                "取消",
+                                false,
+                                |this, _, cx| {
+                                    this.dialog = None;
+                                    cx.notify();
+                                },
+                                cx,
+                            )),
+                    ),
+            )
     }
 
     fn tab_context_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5059,7 +5603,7 @@ impl ScoreSyncApp {
 
 impl Render for ScoreSyncApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title: SharedString = if let Some(page) = self.doc.current_page() {
+        let title_core: SharedString = if let Some(page) = self.doc.current_page() {
             format!(
                 "曲谱同步 — [{}/{}] {}",
                 self.doc.current_page_index + 1,
@@ -5070,6 +5614,9 @@ impl Render for ScoreSyncApp {
         } else {
             "曲谱同步 / Score Sync".into()
         };
+        let saving = self.saving;
+        let dirty = self.dirty;
+        let spin_phase = self.save_spin_phase;
 
         // A4-ish: side panel fixed; left takes rest (ratio used as min width hint)
         let _ = A4_RATIO;
@@ -5328,10 +5875,47 @@ impl Render for ScoreSyncApp {
                             .px_3()
                             .pt_2()
                             .pb_1()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x0f172a))
-                            .child(title),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .flex_shrink_0()
+                                    .when(saving, |d| {
+                                        d.child(
+                                            canvas(
+                                                |_, _, _| {},
+                                                move |bounds, _, window, _| {
+                                                    paint_save_spinner(
+                                                        window,
+                                                        bounds,
+                                                        spin_phase,
+                                                    );
+                                                },
+                                            )
+                                            .size_full(),
+                                        )
+                                    })
+                                    .when(!saving && dirty, |d| {
+                                        d.flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_lg()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0xdc2626))
+                                            .child("*")
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x0f172a))
+                                    .child(title_core),
+                            ),
                     )
                     .child(
                         div()
@@ -5394,6 +5978,13 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreSync")),
             KeyBinding::new("ctrl-s", SaveProject, Some("ScoreSync")),
             KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("ScoreSync")),
+            // 任意面板 (含视频 / 输入框失焦前) 都能保存
+            KeyBinding::new("ctrl-s", SaveProject, None),
+            KeyBinding::new("ctrl-shift-s", SaveProjectAs, None),
+            KeyBinding::new("ctrl-shift-o", OpenProject, None),
+            KeyBinding::new("ctrl-s", SaveProject, Some("ScoreVideo")),
+            KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("ScoreVideo")),
+            KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreVideo")),
             KeyBinding::new("d", DetectPage, Some("ScoreSync")),
             KeyBinding::new("a", DetectAll, Some("ScoreSync")),
             KeyBinding::new("n", ToggleAddBlock, Some("ScoreSync")),
@@ -5446,16 +6037,67 @@ pub fn run_gui(initial: Vec<PathBuf>) {
                 ..Default::default()
             },
             move |window, cx| {
-                cx.new(|cx| {
+                let entity = cx.new(|cx| {
                     let app = ScoreSyncApp::new(cx, initial.clone());
                     app.focus_handle.focus(window);
                     app
-                })
+                });
+                let weak = entity.downgrade();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    let Some(entity) = weak.upgrade() else {
+                        return true;
+                    };
+                    entity.update(cx, |app, cx| {
+                        if app.allow_close {
+                            return true;
+                        }
+                        app.refresh_dirty_from_panels(cx);
+                        if !app.dirty {
+                            return true;
+                        }
+                        app.dialog = Some(DialogKind::UnsavedExit);
+                        cx.notify();
+                        false
+                    })
+                });
+                entity
             },
         )
         .unwrap();
         cx.activate(true);
     });
+}
+
+/// 标题栏保存中指示: 圆圈拖尾转圈 (非盲文点阵).
+fn paint_save_spinner(window: &mut Window, bounds: Bounds<Pixels>, phase: f32) {
+    let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) * 0.5;
+    let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5;
+    let radius = f32::from(bounds.size.width)
+        .min(f32::from(bounds.size.height))
+        * 0.36;
+    const N: i32 = 14;
+    for i in 0..N {
+        let t = i as f32 / N as f32;
+        // 头部在 phase, 尾迹向后拖
+        let ang = (phase - t * 0.72) * std::f32::consts::TAU;
+        let alpha = ((1.0 - t).powf(1.55)).clamp(0.08, 1.0);
+        let dot = 1.6 + (1.0 - t) * 2.8;
+        let x = cx + ang.cos() * radius;
+        let y = cy + ang.sin() * radius;
+        let mut fill = rgb(0x2563eb);
+        fill.a = alpha;
+        window.paint_quad(quad(
+            Bounds {
+                origin: point(px(x - dot * 0.5), px(y - dot * 0.5)),
+                size: size(px(dot), px(dot)),
+            },
+            px(dot),
+            fill,
+            px(0.),
+            fill,
+            Default::default(),
+        ));
+    }
 }
 
 /// 首选尺寸夹紧到主屏内并留边距, 保证四边都在屏幕内.

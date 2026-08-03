@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{
     actions, canvas, div, point, prelude::*, px, quad, relative, rgb, size, App, Application,
-    Bounds, Context, Corners, CursorStyle, ExternalPaths, FocusHandle, Focusable,
+    Bounds, Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathBuilder, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
     SharedString, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
@@ -58,6 +58,72 @@ const HUE_TEX_H: u32 = 256;
 
 fn color_rgb_u32(c: [u8; 3]) -> u32 {
     ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32)
+}
+
+/// 滴管 / 取色图标 (约 14×14 视口内绘制).
+fn eyedropper_icon(active: bool) -> impl IntoElement {
+    let stroke = if active {
+        rgb(0xf8fafc)
+    } else {
+        rgb(0xe2e8f0)
+    };
+    div()
+        .size(px(14.))
+        .flex_shrink_0()
+        .child(
+            canvas(|_, _, _| {}, {
+                move |bounds, _, window, _| {
+                    let ox = f32::from(bounds.origin.x);
+                    let oy = f32::from(bounds.origin.y);
+                    let s = f32::from(bounds.size.width)
+                        .min(f32::from(bounds.size.height))
+                        .max(1.0);
+                    let p = |x: f32, y: f32| {
+                        point(px(ox + x / 16.0 * s), px(oy + y / 16.0 * s))
+                    };
+                    let thick = px((1.4_f32 * s / 14.0).max(1.0));
+                    // 笔杆
+                    let mut shaft = PathBuilder::stroke(thick);
+                    shaft.move_to(p(3.2, 12.8));
+                    shaft.line_to(p(10.2, 5.8));
+                    if let Ok(path) = shaft.build() {
+                        window.paint_path(path, stroke);
+                    }
+                    // 笔尖 V
+                    let mut tip = PathBuilder::stroke(thick);
+                    tip.move_to(p(2.0, 11.2));
+                    tip.line_to(p(3.2, 12.8));
+                    tip.line_to(p(4.8, 11.4));
+                    if let Ok(path) = tip.build() {
+                        window.paint_path(path, stroke);
+                    }
+                    // 顶部笔头 / 储液
+                    let mut bulb = PathBuilder::stroke(thick);
+                    bulb.move_to(p(9.0, 4.6));
+                    bulb.line_to(p(11.0, 2.6));
+                    bulb.line_to(p(13.2, 4.8));
+                    bulb.line_to(p(11.2, 6.8));
+                    bulb.close();
+                    if let Ok(path) = bulb.build() {
+                        window.paint_path(path, stroke);
+                    }
+                    // 一小滴
+                    let drop = Bounds {
+                        origin: p(2.4, 13.0),
+                        size: size(px(2.2 / 16.0 * s), px(2.2 / 16.0 * s)),
+                    };
+                    window.paint_quad(quad(
+                        drop,
+                        px(1.2 / 16.0 * s),
+                        stroke,
+                        px(0.),
+                        stroke,
+                        Default::default(),
+                    ));
+                }
+            })
+            .size_full(),
+        )
 }
 
 /// 预览用画笔: 沿折线叠圆形章 (与导出 `stamp_polyline` 同模型).
@@ -294,10 +360,22 @@ pub struct MaskToolApp {
     picker_v: f32,
     sb_image: Option<Arc<RenderImage>>,
     hue_image: Option<Arc<RenderImage>>,
+    /// 调色盘 RGB 三通道文本框
+    rgb_r_input: Entity<apply_bg::text_input::TextInput>,
+    rgb_g_input: Entity<apply_bg::text_input::TextInput>,
+    rgb_b_input: Entity<apply_bg::text_input::TextInput>,
+    /// 正在从 HSV 回写 RGB 文本, 避免 observe 回环
+    rgb_syncing: bool,
+    /// 取色器: 已按下, 在左侧图上预览/单击确认
+    eyedropper_armed: bool,
+    /// 进入取色前的 HSV + RGB, Esc/右键取消时还原
+    eyedropper_backup: Option<(f32, f32, f32, [u8; 3])>,
     /// 折线草稿顶点 (图像坐标); 非空表示正在勾形.
     poly_draft: Option<Vec<(f32, f32)>>,
     /// 折线橡皮筋终点 (当前鼠标图像坐标).
     poly_cursor: Option<(f32, f32)>,
+    /// 画笔圆形光标中心 (图像坐标); 仅 Brush 模式跟踪.
+    brush_cursor: Option<(f32, f32)>,
     /// 透明度拖动时是否已为「改选中项」压过撤销栈.
     opacity_undid: bool,
     drag: Option<DragKind>,
@@ -313,6 +391,18 @@ pub struct MaskToolApp {
 
 impl MaskToolApp {
     pub fn new(cx: &mut Context<Self>, initial: Option<PathBuf>) -> Self {
+        let rgb_r_input =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "255", "R").with_compact(true));
+        let rgb_g_input =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "255", "G").with_compact(true));
+        let rgb_b_input =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "255", "B").with_compact(true));
+        cx.observe(&rgb_r_input, |this, _, cx| this.apply_rgb_inputs(cx))
+            .detach();
+        cx.observe(&rgb_g_input, |this, _, cx| this.apply_rgb_inputs(cx))
+            .detach();
+        cx.observe(&rgb_b_input, |this, _, cx| this.apply_rgb_inputs(cx))
+            .detach();
         let mut app = Self {
             focus_handle: cx.focus_handle(),
             image_path: None,
@@ -352,8 +442,15 @@ impl MaskToolApp {
             picker_v: 1.0,
             sb_image: None,
             hue_image: None,
+            rgb_r_input,
+            rgb_g_input,
+            rgb_b_input,
+            rgb_syncing: false,
+            eyedropper_armed: false,
+            eyedropper_backup: None,
             poly_draft: None,
             poly_cursor: None,
+            brush_cursor: None,
             opacity_undid: false,
             drag: None,
             status: "就绪".into(),
@@ -474,6 +571,7 @@ impl MaskToolApp {
         if self.hue_image.is_none() {
             self.rebuild_hue_image();
         }
+        self.sync_rgb_inputs_from_picker(cx);
         cx.notify();
     }
 
@@ -486,6 +584,8 @@ impl MaskToolApp {
         prefs.push_recent(c);
         self.recent_colors = prefs.recent_colors;
         self.mark_prefs_dirty();
+        self.eyedropper_armed = false;
+        self.eyedropper_backup = None;
         self.color_picker_open = false;
         self.opacity_undid = false;
         if matches!(
@@ -522,7 +622,7 @@ impl MaskToolApp {
         }
         // 最近色 8 格单行: 8×22 + 7×gap4 = 204; 再加 padding/border
         let pop_w = Self::picker_pop_w();
-        let pop_h = 14.0 + 16.0 + 22.0 + 8.0 + SB_SIZE + 36.0;
+        let pop_h = 14.0 + 16.0 + 22.0 + 8.0 + SB_SIZE + 36.0 + 44.0;
         let caret = 8.0;
         let gap = 6.0;
         let layer_left = f32::from(layer.origin.x);
@@ -703,6 +803,131 @@ impl MaskToolApp {
         hsv_to_rgb(self.picker_h, self.picker_s, self.picker_v)
     }
 
+    fn sync_rgb_inputs_from_picker(&mut self, cx: &mut Context<Self>) {
+        let [r, g, b] = self.picker_rgb();
+        self.rgb_syncing = true;
+        self.rgb_r_input
+            .update(cx, |t, cx| t.set_text(r.to_string(), cx));
+        self.rgb_g_input
+            .update(cx, |t, cx| t.set_text(g.to_string(), cx));
+        self.rgb_b_input
+            .update(cx, |t, cx| t.set_text(b.to_string(), cx));
+        self.rgb_syncing = false;
+    }
+
+    fn apply_rgb_inputs(&mut self, cx: &mut Context<Self>) {
+        if self.rgb_syncing || !self.color_picker_open {
+            return;
+        }
+        let blur = self.rgb_r_input.update(cx, |t, _| t.take_blur_commit())
+            | self.rgb_g_input.update(cx, |t, _| t.take_blur_commit())
+            | self.rgb_b_input.update(cx, |t, _| t.take_blur_commit());
+        let parse = |s: String| -> Option<u8> {
+            let t = s.trim();
+            if t.is_empty() {
+                return None;
+            }
+            t.parse::<u8>().ok()
+        };
+        let r = parse(self.rgb_r_input.read(cx).text());
+        let g = parse(self.rgb_g_input.read(cx).text());
+        let b = parse(self.rgb_b_input.read(cx).text());
+        let (Some(r), Some(g), Some(b)) = (r, g, b) else {
+            if blur {
+                // 失焦时输入不完整: 回写当前合法色并视为已提交
+                self.sync_rgb_inputs_from_picker(cx);
+            }
+            return;
+        };
+        if [r, g, b] == self.picker_rgb() {
+            return;
+        }
+        self.set_picker_from_rgb([r, g, b], cx);
+    }
+
+    fn set_picker_from_rgb(&mut self, rgb: [u8; 3], cx: &mut Context<Self>) {
+        let (h, s, v) = rgb_to_hsv(rgb);
+        self.picker_h = h;
+        self.picker_s = s;
+        self.picker_v = v;
+        self.rebuild_sb_image();
+        self.commit_picker_color(false);
+        // 不回写文本框: 用户正在输入时回写会打断编辑
+        cx.notify();
+    }
+
+    fn sample_image_rgb(&self, ix: f32, iy: f32) -> Option<[u8; 3]> {
+        let img = self.rgb_image.as_ref()?;
+        if self.img_w == 0 || self.img_h == 0 {
+            return None;
+        }
+        let x = ix.round().clamp(0.0, (self.img_w - 1) as f32) as u32;
+        let y = iy.round().clamp(0.0, (self.img_h - 1) as f32) as u32;
+        let p = img.get_pixel(x, y);
+        Some([p[0], p[1], p[2]])
+    }
+
+    /// 取色预览: 只改色盘/HSV/目标色与 RGB 文本, 不改已选蒙版项、不入最近色.
+    fn preview_eyedropper_rgb(&mut self, rgb: [u8; 3], cx: &mut Context<Self>) {
+        let (h, s, v) = rgb_to_hsv(rgb);
+        self.picker_h = h;
+        self.picker_s = s;
+        self.picker_v = v;
+        self.rebuild_sb_image();
+        match self.color_picker_target {
+            ColorPickerTarget::Mask => self.mask_color = rgb,
+            ColorPickerTarget::Brush => self.brush_color = rgb,
+        }
+        self.sync_rgb_inputs_from_picker(cx);
+        cx.notify();
+    }
+
+    fn arm_eyedropper(&mut self, cx: &mut Context<Self>) {
+        if !self.color_picker_open {
+            return;
+        }
+        if self.eyedropper_armed {
+            self.cancel_eyedropper(cx);
+            return;
+        }
+        let c = self.picker_rgb();
+        self.eyedropper_backup = Some((self.picker_h, self.picker_s, self.picker_v, c));
+        self.eyedropper_armed = true;
+        self.status = "取色: 在左侧图上移动预览, 单击确认, Esc/右键取消".into();
+        cx.notify();
+    }
+
+    fn cancel_eyedropper(&mut self, cx: &mut Context<Self>) {
+        if !self.eyedropper_armed {
+            return;
+        }
+        if let Some((h, s, v, c)) = self.eyedropper_backup.take() {
+            self.picker_h = h;
+            self.picker_s = s;
+            self.picker_v = v;
+            self.rebuild_sb_image();
+            match self.color_picker_target {
+                ColorPickerTarget::Mask => self.mask_color = c,
+                ColorPickerTarget::Brush => self.brush_color = c,
+            }
+            self.sync_rgb_inputs_from_picker(cx);
+        }
+        self.eyedropper_armed = false;
+        self.status = "已取消取色".into();
+        cx.notify();
+    }
+
+    fn confirm_eyedropper_at(&mut self, ix: f32, iy: f32, cx: &mut Context<Self>) {
+        if let Some(rgb) = self.sample_image_rgb(ix, iy) {
+            self.preview_eyedropper_rgb(rgb, cx);
+            self.commit_picker_color(true);
+        }
+        self.eyedropper_armed = false;
+        self.eyedropper_backup = None;
+        self.status = "已取色".into();
+        cx.notify();
+    }
+
     fn commit_picker_color(&mut self, push_recent: bool) {
         let c = self.picker_rgb();
         match self.color_picker_target {
@@ -764,6 +989,7 @@ impl MaskToolApp {
         self.picker_s = ((x - left) / w).clamp(0.0, 1.0);
         self.picker_v = (1.0 - (y - top) / h).clamp(0.0, 1.0);
         self.commit_picker_color(false);
+        self.sync_rgb_inputs_from_picker(cx);
         cx.notify();
     }
 
@@ -773,6 +999,7 @@ impl MaskToolApp {
         self.picker_h = ((y - top) / h).clamp(0.0, 1.0) * 360.0;
         self.rebuild_sb_image();
         self.commit_picker_color(false);
+        self.sync_rgb_inputs_from_picker(cx);
         cx.notify();
     }
 
@@ -785,6 +1012,7 @@ impl MaskToolApp {
         self.opacity_undid = false;
         self.commit_picker_color(true);
         self.opacity_undid = false;
+        self.sync_rgb_inputs_from_picker(cx);
         cx.notify();
     }
 
@@ -809,6 +1037,10 @@ impl MaskToolApp {
     }
 
     pub fn cancel_poly_draft(&mut self, cx: &mut Context<Self>) {
+        if self.eyedropper_armed {
+            self.cancel_eyedropper(cx);
+            return;
+        }
         if self.poly_draft.is_none() {
             return;
         }
@@ -1152,6 +1384,7 @@ impl MaskToolApp {
         self.drag = None;
         self.poly_draft = None;
         self.poly_cursor = None;
+        self.brush_cursor = None;
         if self.mode != ToolMode::Brush {
             self.color_picker_open = false;
         }
@@ -1465,11 +1698,18 @@ impl MaskToolApp {
             return;
         }
         if ev.button != MouseButton::Left {
+            if ev.button == MouseButton::Right && self.eyedropper_armed {
+                self.cancel_eyedropper(cx);
+            }
             return;
         }
         let (sx, sy) = self.screen_in_view(ev.position);
         let xform = self.xform();
         let (ix, iy) = xform.screen_to_image(sx, sy);
+        if self.eyedropper_armed {
+            self.confirm_eyedropper_at(ix, iy, cx);
+            return;
+        }
         let control = ev.modifiers.control;
         let shift = ev.modifiers.shift;
 
@@ -1630,6 +1870,14 @@ impl MaskToolApp {
 
     fn apply_mouse_move_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (sx, sy) = self.screen_in_view(position);
+        if self.eyedropper_armed {
+            let xform = self.xform();
+            let (ix, iy) = xform.screen_to_image(sx, sy);
+            if let Some(rgb) = self.sample_image_rgb(ix, iy) {
+                self.preview_eyedropper_rgb(rgb, cx);
+            }
+            return;
+        }
         match self.drag.take() {
             Some(DragKind::Draw { x0, y0, .. }) => {
                 let xform = self.xform();
@@ -1645,7 +1893,10 @@ impl MaskToolApp {
             Some(DragKind::Brush { id, undid }) => {
                 let xform = self.xform();
                 let (ix, iy) = xform.screen_to_image(sx, sy);
+                self.brush_cursor = Some((ix, iy));
                 if self.append_brush_point(&id, ix, iy) {
+                    cx.notify();
+                } else {
                     cx.notify();
                 }
                 self.drag = Some(DragKind::Brush { id, undid });
@@ -1761,6 +2012,11 @@ impl MaskToolApp {
                     let (ix, iy) = xform.screen_to_image(sx, sy);
                     let (ix, iy, _) = self.poly_maybe_snap(ix, iy);
                     self.poly_cursor = Some((ix, iy));
+                    cx.notify();
+                } else if self.mode == ToolMode::Brush {
+                    let xform = self.xform();
+                    let (ix, iy) = xform.screen_to_image(sx, sy);
+                    self.brush_cursor = Some((ix, iy));
                     cx.notify();
                 }
             }
@@ -2048,6 +2304,7 @@ impl MaskToolApp {
             .flex()
             .flex_col()
             .gap_2()
+            .overflow_hidden()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -2305,6 +2562,118 @@ impl MaskToolApp {
                             ),
                     ),
             )
+            .child({
+                let r_in = self.rgb_r_input.clone();
+                let g_in = self.rgb_g_input.clone();
+                let b_in = self.rgb_b_input.clone();
+                let drop_on = self.eyedropper_armed;
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xcbd5e1))
+                                    .child("RGB"),
+                            )
+                            .child(
+                                div()
+                                    .id("eyedropper_btn")
+                                    .size(px(20.))
+                                    .rounded_sm()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if drop_on {
+                                        rgb(0x38bdf8)
+                                    } else {
+                                        rgb(0x475569)
+                                    })
+                                    .bg(if drop_on {
+                                        rgb(0x0ea5e9)
+                                    } else {
+                                        rgb(0x334155)
+                                    })
+                                    .child(eyedropper_icon(drop_on))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.arm_eyedropper(cx);
+                                        }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x94a3b8))
+                                    .flex_shrink_0()
+                                    .child("R"),
+                            )
+                            .child(
+                                div()
+                                    .id("rgb_r_box")
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .h(px(20.))
+                                    .child(r_in),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x94a3b8))
+                                    .flex_shrink_0()
+                                    .child("G"),
+                            )
+                            .child(
+                                div()
+                                    .id("rgb_g_box")
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .h(px(20.))
+                                    .child(g_in),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x94a3b8))
+                                    .flex_shrink_0()
+                                    .child("B"),
+                            )
+                            .child(
+                                div()
+                                    .id("rgb_b_box")
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .h(px(20.))
+                                    .child(b_in),
+                            ),
+                    )
+            })
     }
 
     pub fn side_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2698,13 +3067,20 @@ impl MaskToolApp {
         };
         let poly_draft = self.poly_draft.clone();
         let poly_cursor = self.poly_cursor;
+        let brush_cursor = self.brush_cursor;
+        let brush_size = self.brush_size;
+        let brush_color = self.brush_color;
+        let brush_opacity = self.brush_opacity;
         let mask_color = self.mask_color;
-        let cursor = match self.mode {
-            ToolMode::Draw | ToolMode::Brush | ToolMode::Poly | ToolMode::Eraser => {
-                CursorStyle::Crosshair
+        let cursor = if self.eyedropper_armed {
+            CursorStyle::Crosshair
+        } else {
+            match self.mode {
+                ToolMode::Brush => CursorStyle::None,
+                ToolMode::Draw | ToolMode::Poly | ToolMode::Eraser => CursorStyle::Crosshair,
+                ToolMode::Pan => CursorStyle::OpenHand,
+                ToolMode::Select => CursorStyle::Arrow,
             }
-            ToolMode::Pan => CursorStyle::OpenHand,
-            ToolMode::Select => CursorStyle::Arrow,
         };
 
         div()
@@ -2719,7 +3095,9 @@ impl MaskToolApp {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, _, cx| {
-                    if this.mode == ToolMode::Poly {
+                    if this.eyedropper_armed {
+                        this.cancel_eyedropper(cx);
+                    } else if this.mode == ToolMode::Poly {
                         this.cancel_poly_draft(cx);
                     }
                 }),
@@ -2984,6 +3362,34 @@ impl MaskToolApp {
                                     ));
                                 }
                             }
+                        }
+
+                        // 画笔圆形光标 (与粗细/颜色一致)
+                        if let Some((bx, by)) = brush_cursor {
+                            let screen_r = (brush_size * 0.5 * xform.scale).max(1.5);
+                            let cx_s = f32::from(bounds.origin.x) + xform.origin_x + bx * xform.scale;
+                            let cy_s = f32::from(bounds.origin.y) + xform.origin_y + by * xform.scale;
+                            let [cr, cg, cb] = brush_color;
+                            let mut fill = rgb(
+                                ((cr as u32) << 16) | ((cg as u32) << 8) | (cb as u32),
+                            );
+                            fill.a = (brush_opacity * 0.35).clamp(0.12, 0.55);
+                            let mut ring = rgb(
+                                ((cr as u32) << 16) | ((cg as u32) << 8) | (cb as u32),
+                            );
+                            ring.a = brush_opacity.clamp(0.45, 1.0);
+                            let b = Bounds {
+                                origin: point(px(cx_s - screen_r), px(cy_s - screen_r)),
+                                size: size(px(screen_r * 2.0), px(screen_r * 2.0)),
+                            };
+                            window.paint_quad(quad(
+                                b,
+                                px(screen_r),
+                                fill,
+                                px(1.5),
+                                ring,
+                                Default::default(),
+                            ));
                         }
                     },
                 )

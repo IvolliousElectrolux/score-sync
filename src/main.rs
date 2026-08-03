@@ -8,6 +8,7 @@ mod config;
 mod export;
 mod gui;
 mod model;
+mod page_cache;
 mod pdf;
 mod project;
 mod staff_detect;
@@ -43,7 +44,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    // 退出时清理 PDF 临时目录
+    // 启动建会话目录; 退出清理会话 tmp (保留工程旁视频池缓存)
+    page_cache::init_session();
     let _guard = scopeguard_cleanup();
     gui::run_gui(args.paths);
     ExitCode::SUCCESS
@@ -53,7 +55,7 @@ fn scopeguard_cleanup() -> impl Drop {
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
-            pdf::cleanup_pdf_tmps();
+            page_cache::cleanup_session();
         }
     }
     Guard

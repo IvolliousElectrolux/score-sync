@@ -8,18 +8,28 @@
 //! 时间轴总长取当前非空音/视频轨的较短末端; 删短一轨时会把较长轨裁齐.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use gpui::SharedString;
 use image::RgbaImage;
 use uuid::Uuid;
 
-/// 素材池条目: 对应「输出组合」列表 (已按导出顺序排好) 中的一张最终合成图.
+/// 素材池条目: 对应「输出组合」列表中的一张最终合成图 (全分辨率落盘, 内存按 LRU 热加载).
 #[derive(Clone)]
 pub struct MaterialItem {
     pub group_id: String,
     pub label: SharedString,
-    pub image: Arc<RgbaImage>,
+    /// 工程旁 `.staffcrop.cache/pool/<id>.png` (或会话临时池目录)
+    pub cache_path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MaterialItem {
+    pub fn load_rgba(&self) -> Result<RgbaImage, String> {
+        image::open(&self.cache_path)
+            .map_err(|e| format!("读取素材缓存失败 ({}): {e}", self.cache_path.display()))
+            .map(|i| i.to_rgba8())
+    }
 }
 
 /// 视频轨道上的一段.
@@ -634,7 +644,7 @@ impl Timeline {
 
 /// 时间轴的纯数据快照 (无 `Uuid`/`SharedString`/UI 交互态), 供宿主
 /// (score_sync) 序列化进工程文件, 不需要给这个 crate 引入 `serde`.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct TimelineSnapshot {
     /// (group_id, start, end)
     pub video_clips: Vec<(String, f64, f64)>,
@@ -653,7 +663,9 @@ mod tests {
         MaterialItem {
             group_id: id.to_string(),
             label: id.to_string().into(),
-            image: Arc::new(RgbaImage::new(1, 1)),
+            cache_path: PathBuf::from("missing.png"),
+            width: 1,
+            height: 1,
         }
     }
 

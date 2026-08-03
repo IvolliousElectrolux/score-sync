@@ -157,8 +157,14 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     let mut page_pngs: Vec<(String, Vec<u8>)> = Vec::with_capacity(doc.pages.len());
     for page in &doc.pages {
         let rel = format!("pages/{}.png", page.id);
-        let png = encode_png(&page.image)
-            .map_err(|e| format!("保存页图失败 ({}): {e}", page.id))?;
+        let png = if page.disk_path.is_file() {
+            std::fs::read(&page.disk_path)
+                .map_err(|e| format!("读取页图失败 ({}): {e}", page.disk_path.display()))?
+        } else if let Some(img) = page.image.as_ref() {
+            encode_png(img).map_err(|e| format!("保存页图失败 ({}): {e}", page.id))?
+        } else {
+            return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));
+        };
         page_pngs.push((rel.clone(), png));
         let mut regions: Vec<ProjectRegion> = page
             .regions
@@ -340,11 +346,15 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
     }
 
     let mut pages = Vec::with_capacity(meta.pages.len());
+    // 解压到会话 tmp, 不一次全解码进内存
+    let session = crate::page_cache::session_dir();
     for p in &meta.pages {
         let png = read_zip_entry(&mut zip, &p.image)?;
-        let image = image::load_from_memory(&png)
-            .map_err(|e| format!("解码页图失败 ({}): {e}", p.image))?
-            .to_rgb8();
+        let disk_path = session.join(format!("proj_{}.png", p.id));
+        std::fs::write(&disk_path, &png)
+            .map_err(|e| format!("写出页图到会话目录失败 ({}): {e}", p.id))?;
+        let (w, h) = image::image_dimensions(&disk_path)
+            .map_err(|e| format!("读取页尺寸失败 ({}): {e}", p.id))?;
         let mut regions = HashMap::new();
         for r in &p.regions {
             regions.insert(
@@ -367,7 +377,10 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         pages.push(Page {
             id: p.id.clone(),
             path: display_path,
-            image,
+            disk_path,
+            image: None,
+            img_w: w,
+            img_h: h,
             regions,
         });
     }
@@ -457,5 +470,6 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         .collect();
     doc.selected_region_ids
         .retain(|id| valid_regions.contains(id));
+    doc.retain_window(doc.current_page_index, crate::page_cache::WINDOW_RADIUS);
     Ok(doc)
 }

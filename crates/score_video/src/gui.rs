@@ -204,6 +204,10 @@ pub struct ScoreVideoApp {
     focus_handle: FocusHandle,
     pool: Vec<MaterialItem>,
     render_cache: std::collections::HashMap<String, Arc<RenderImage>>,
+    /// 全分辨率 RGBA 热集 (按 group_id), 超出容量时 LRU 淘汰.
+    image_hot: std::collections::HashMap<String, Arc<image::RgbaImage>>,
+    image_lru: std::collections::VecDeque<String>,
+    image_lru_cap: usize,
     timeline: Timeline,
     audio: AudioEngine,
     aspect_w: u32,
@@ -261,6 +265,9 @@ impl ScoreVideoApp {
             focus_handle: cx.focus_handle(),
             pool: Vec::new(),
             render_cache: std::collections::HashMap::new(),
+            image_hot: std::collections::HashMap::new(),
+            image_lru: std::collections::VecDeque::new(),
+            image_lru_cap: 12,
             timeline: Timeline::new(),
             audio: AudioEngine::new(),
             aspect_w: 16,
@@ -374,9 +381,10 @@ impl ScoreVideoApp {
     }
 
     pub fn set_pool(&mut self, pool: Vec<MaterialItem>, cx: &mut Context<Self>) {
-        // 素材内容 (例如工程底色叠加状态) 可能已变化但 group_id 不变, 因此
-        // 整体清空缓存而不是按 id 保留, 避免残留旧贴图.
+        // 素材内容可能已变化但 group_id 不变, 因此整体清空缓存.
         self.render_cache.clear();
+        self.image_hot.clear();
+        self.image_lru.clear();
         self.pool = pool;
         if let Some(gid) = &self.expanded_pool {
             if !self.pool.iter().any(|m| &m.group_id == gid) {
@@ -384,6 +392,29 @@ impl ScoreVideoApp {
             }
         }
         cx.notify();
+    }
+
+    /// 从磁盘缓存加载全分辨率图并放入 LRU 热集.
+    fn full_rgba(&mut self, group_id: &str) -> Option<Arc<image::RgbaImage>> {
+        if let Some(img) = self.image_hot.get(group_id) {
+            if let Some(pos) = self.image_lru.iter().position(|k| k == group_id) {
+                if let Some(k) = self.image_lru.remove(pos) {
+                    self.image_lru.push_back(k);
+                }
+            }
+            return Some(img.clone());
+        }
+        let item = self.pool.iter().find(|m| m.group_id == group_id)?;
+        let rgba = item.load_rgba().ok()?;
+        let arc = Arc::new(rgba);
+        self.image_hot.insert(group_id.to_string(), arc.clone());
+        self.image_lru.push_back(group_id.to_string());
+        while self.image_lru.len() > self.image_lru_cap {
+            if let Some(old) = self.image_lru.pop_front() {
+                self.image_hot.remove(&old);
+            }
+        }
+        Some(arc)
     }
 
     /// 仅在播放期间才启动的进度 ticker (每次开始播放时新建一个).
@@ -427,26 +458,19 @@ impl ScoreVideoApp {
         if let Some(img) = self.render_cache.get(group_id) {
             return Some(img.clone());
         }
-        let item = self.pool.iter().find(|m| m.group_id == group_id)?;
-        // 谱面组合拼合 (+ 可能叠加的工程底色补边) 后经常是很高的整图 (几千
-        // 甚至上万像素), 若原样整张丢给 GPU 当贴图, 可能超出显卡/后端的纹理
-        // 尺寸上限, 曾在切到「视频」面板/展开素材预览时触发底层渲染崩溃
-        // (STATUS_STACK_BUFFER_OVERRUN, 无 Rust panic 输出, 是原生层面的问题).
-        // 这里只按屏幕预览需要限幅缩小一份副本用于显示; 导出仍读取素材池里
-        // 未缩放的原图 (见 `export::dump_pool_images`), 不受影响.
+        let rgba_src = self.full_rgba(group_id)?;
+        // 谱面组合拼合 (+ 可能叠加的工程底色补边) 后经常是很高的整图; 预览限幅.
         const MAX_PREVIEW_DIM: u32 = 2048;
-        let (w, h) = item.image.dimensions();
+        let (w, h) = rgba_src.dimensions();
         let mut rgba = if w > MAX_PREVIEW_DIM || h > MAX_PREVIEW_DIM {
             let scale = (MAX_PREVIEW_DIM as f32 / w.max(h) as f32).min(1.0);
             let nw = ((w as f32 * scale).round() as u32).max(1);
             let nh = ((h as f32 * scale).round() as u32).max(1);
-            image::imageops::resize(&*item.image, nw, nh, image::imageops::FilterType::Triangle)
+            image::imageops::resize(&*rgba_src, nw, nh, image::imageops::FilterType::Triangle)
         } else {
-            (*item.image).clone()
+            (*rgba_src).clone()
         };
-        // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素, 而素材池里的图是标准
-        // RGBA (来自 `image` 库); 不交换 R/B 通道的话画面颜色会整体错位 (例如
-        // 暖色调底色显示成冷色调), 这里与 `mask_tool::gui::load_rgb` 保持一致.
+        // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素.
         for px in rgba.chunks_exact_mut(4) {
             px.swap(0, 2);
         }
@@ -2779,6 +2803,10 @@ pub fn run_gui(images: Vec<PathBuf>, audio: Option<PathBuf>) {
                     let mut pool = Vec::new();
                     for (i, p) in images.iter().enumerate() {
                         if let Ok(im) = image::open(p) {
+                            let rgba = im.to_rgba8();
+                            let (w, h) = rgba.dimensions();
+                            let cache = std::env::temp_dir().join(format!("sv_dbg_{i}.png"));
+                            let _ = rgba.save(&cache);
                             pool.push(MaterialItem {
                                 group_id: format!("g{i}"),
                                 label: p
@@ -2787,7 +2815,9 @@ pub fn run_gui(images: Vec<PathBuf>, audio: Option<PathBuf>) {
                                     .unwrap_or("素材")
                                     .to_string()
                                     .into(),
-                                image: Arc::new(im.to_rgba8()),
+                                cache_path: cache,
+                                width: w,
+                                height: h,
                             });
                         }
                     }

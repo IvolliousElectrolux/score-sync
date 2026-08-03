@@ -1,0 +1,2 @@
+# 图标生成脚本仅供本地重做 ico, 不计入仓库语言统计
+crates/apply_bg/assets/gen_squircle_icon.py linguist-generated=true

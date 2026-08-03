@@ -1,10 +1,11 @@
 [package]
 name = "mask_tool"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 description = "半透明白色蒙版工具 (GPUI)"
 
 [dependencies]
+async-channel = "2"
 clap = { version = "4", features = ["derive"] }
 gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
@@ -12,12 +13,18 @@ rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
+apply_bg = { path = "../apply_bg" }
 
 [build-dependencies]
 embed-resource = "3"
 
 [profile.release]
-lto = true
-codegen-units = 1
+lto = false
+codegen-units = 16
 opt-level = 3
 strip = true
+
+[profile.release-max]
+inherits = "release"
+lto = true
+codegen-units = 1

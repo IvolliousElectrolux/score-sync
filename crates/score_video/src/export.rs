@@ -99,7 +99,7 @@ impl ExportOptions {
     pub fn size_from_pool(pool: &[MaterialItem]) -> (u32, u32) {
         let (w, h) = pool
             .first()
-            .map(|m| m.image.dimensions())
+            .map(|m| (m.width, m.height))
             .unwrap_or((1920, 1080));
         (even_dim(w), even_dim(h))
     }
@@ -237,13 +237,19 @@ fn dump_pool_images(
     let mut map = HashMap::new();
     for item in pool {
         let path = dir.join(format!("{}.png", item.group_id));
-        let (w, h) = item.image.dimensions();
+        let rgba = item.load_rgba()?;
+        let (w, h) = rgba.dimensions();
         // 即便原图尺寸与目标「看起来」一样, 只要目标被 even_dim 抬过 (原图是
         // 奇数), 也必须走 fit_pad 补齐, 否则 libx264 会因奇数分辨率打不开.
         let result = if w == target_w && h == target_h {
-            item.image.save(&path)
+            // 已是目标尺寸时可直接拷缓存文件, 省一次编解码
+            if std::fs::copy(&item.cache_path, &path).is_ok() {
+                Ok(())
+            } else {
+                rgba.save(&path).map(|_| ())
+            }
         } else {
-            fit_pad(&item.image, target_w, target_h).save(&path)
+            fit_pad(&rgba, target_w, target_h).save(&path)
         };
         result.map_err(|e| format!("写入素材图 {} 失败: {e}", item.group_id))?;
         map.insert(item.group_id.clone(), path);

@@ -4,6 +4,7 @@
 Thumbs.db
 *.staffcrop
 *.staffcrop.files/
+*.staffcrop.cache/
 
 **/.tmp*
 
