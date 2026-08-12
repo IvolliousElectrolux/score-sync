@@ -175,6 +175,41 @@ impl DocState {
         }
     }
 
+    /// 后台保存用快照: 不拷贝页图像素 (走 disk_path), 避免与 UI 窗口图叠成双倍内存.
+    /// 底色仍按需拷一份 (通常一张).
+    pub fn clone_for_save(&self) -> Self {
+        Self {
+            pages: self
+                .pages
+                .iter()
+                .map(|p| Page {
+                    id: p.id.clone(),
+                    path: p.path.clone(),
+                    disk_path: p.disk_path.clone(),
+                    image: None,
+                    img_w: p.img_w,
+                    img_h: p.img_h,
+                    regions: p.regions.clone(),
+                })
+                .collect(),
+            groups: self.groups.clone(),
+            selected_region_ids: self.selected_region_ids.clone(),
+            active_group_id: self.active_group_id.clone(),
+            current_page_index: self.current_page_index,
+            margin: self.margin,
+            ink_threshold: self.ink_threshold,
+            group_masks: self.group_masks.clone(),
+            mask_prefs: self.mask_prefs.clone(),
+            groups_manual_order: self.groups_manual_order,
+            bg_enabled: self.bg_enabled,
+            bg_image: self.bg_image.clone(),
+            bg_source_path: self.bg_source_path.clone(),
+            bg_aspect_w: self.bg_aspect_w,
+            bg_aspect_h: self.bg_aspect_h,
+            video_state: self.video_state.clone(),
+        }
+    }
+
     pub fn get_group_masks(&self, group_id: &str) -> &[MaskRect] {
         self.group_masks
             .get(group_id)

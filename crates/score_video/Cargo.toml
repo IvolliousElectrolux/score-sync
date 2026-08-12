@@ -1,6 +1,6 @@
 [package]
 name = "score_video"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "谱面同步视频轨道编辑与 ffmpeg 导出 (GPUI)"
 

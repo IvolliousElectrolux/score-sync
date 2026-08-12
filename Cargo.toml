@@ -1,6 +1,6 @@
 [package]
 name = "score_sync"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "方便曲谱同步一条龙制作的 Rust GPUI 工具"
 license = "MIT"

@@ -1730,11 +1730,8 @@ impl ScoreSyncApp {
         cx.notify();
         self.start_save_spinner(cx);
 
-        // 快照后放到后台做 PNG/zip; 不克隆窗口内位图
-        let mut doc = self.doc.clone();
-        for p in &mut doc.pages {
-            p.image = None;
-        }
+        // 快照后放到后台流式打 zip; clone_for_save 不拷页图像素, 避免整首页一次进内存
+        let doc = self.doc.clone_for_save();
         let (tx, rx) = async_channel::bounded::<Result<PathBuf, String>>(1);
         std::thread::spawn(move || {
             let _ = tx.send_blocking(project::save_project(&doc, &path));

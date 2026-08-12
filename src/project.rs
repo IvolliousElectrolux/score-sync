@@ -147,25 +147,27 @@ fn encode_png(image: &image::RgbImage) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
+/// 把已有 PNG 文件流式写入 zip 条目 (不整文件读进内存).
+fn copy_file_into_zip(zip: &mut ZipWriter<File>, path: &Path) -> Result<(), String> {
+    let mut src = File::open(path).map_err(|e| format!("读取页图失败 ({}): {e}", path.display()))?;
+    std::io::copy(&mut src, zip).map_err(|e| format!("写入页图失败 ({}): {e}", path.display()))?;
+    Ok(())
+}
+
 /// 保存工程为单个 zip 文件. `path` 可为无扩展名, 会自动补 `.staffcrop`.
+///
+/// 页图逐张流式写入, PNG 用 Stored (本身已压缩); 不再把全部页一次读进内存.
 pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     let project_path = ensure_staffcrop_ext(path.to_path_buf());
     // 先写临时文件再替换, 避免写到一半失败毁掉旧工程
     let tmp_path = project_path.with_extension("staffcrop.tmp");
 
     let mut pages = Vec::with_capacity(doc.pages.len());
-    let mut page_pngs: Vec<(String, Vec<u8>)> = Vec::with_capacity(doc.pages.len());
     for page in &doc.pages {
         let rel = format!("pages/{}.png", page.id);
-        let png = if page.disk_path.is_file() {
-            std::fs::read(&page.disk_path)
-                .map_err(|e| format!("读取页图失败 ({}): {e}", page.disk_path.display()))?
-        } else if let Some(img) = page.image.as_ref() {
-            encode_png(img).map_err(|e| format!("保存页图失败 ({}): {e}", page.id))?
-        } else {
+        if !page.disk_path.is_file() && page.image.is_none() {
             return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));
-        };
-        page_pngs.push((rel.clone(), png));
+        }
         let mut regions: Vec<ProjectRegion> = page
             .regions
             .values()
@@ -200,24 +202,17 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     let mut selected: Vec<String> = doc.selected_region_ids.iter().cloned().collect();
     selected.sort();
 
-    let mut bg_png: Option<Vec<u8>> = None;
-    let bg_meta = if doc.bg_enabled {
-        if let Some(img) = doc.bg_image.as_ref() {
-            let png = encode_png(img).map_err(|e| format!("编码底色失败: {e}"))?;
-            bg_png = Some(png);
-            Some(ProjectBg {
-                enabled: true,
-                aspect_w: doc.bg_aspect_w,
-                aspect_h: doc.bg_aspect_h,
-                image: "bg.png".into(),
-                source_path: doc
-                    .bg_source_path
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
-            })
-        } else {
-            None
-        }
+    let bg_meta = if doc.bg_enabled && doc.bg_image.is_some() {
+        Some(ProjectBg {
+            enabled: true,
+            aspect_w: doc.bg_aspect_w,
+            aspect_h: doc.bg_aspect_h,
+            image: "bg.png".into(),
+            source_path: doc
+                .bg_source_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
+        })
     } else {
         None
     };
@@ -278,25 +273,41 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     {
         let file = File::create(&tmp_path).map_err(|e| format!("创建临时工程失败: {e}"))?;
         let mut zip = ZipWriter::new(file);
-        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        // JSON 可压; PNG 已是压缩格式, Stored 更快且几乎不占额外内存
+        let json_opts =
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let png_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
-        zip.start_file("project.json", opts)
+        zip.start_file("project.json", json_opts)
             .map_err(|e| format!("写入 project.json 失败: {e}"))?;
         zip.write_all(&json)
             .map_err(|e| format!("写入 project.json 失败: {e}"))?;
+        // json 缓冲可先释放
+        drop(json);
 
-        for (rel, png) in &page_pngs {
-            zip.start_file(rel, opts)
+        for page in &doc.pages {
+            let rel = format!("pages/{}.png", page.id);
+            zip.start_file(&rel, png_opts)
                 .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
-            zip.write_all(png)
-                .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
+            if page.disk_path.is_file() {
+                copy_file_into_zip(&mut zip, &page.disk_path)?;
+            } else if let Some(img) = page.image.as_ref() {
+                let png = encode_png(img).map_err(|e| format!("保存页图失败 ({}): {e}", page.id))?;
+                zip.write_all(&png)
+                    .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
+            } else {
+                return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));
+            }
         }
 
-        if let Some(png) = bg_png {
-            zip.start_file("bg.png", opts)
-                .map_err(|e| format!("写入 bg.png 失败: {e}"))?;
-            zip.write_all(&png)
-                .map_err(|e| format!("写入 bg.png 失败: {e}"))?;
+        if doc.bg_enabled {
+            if let Some(img) = doc.bg_image.as_ref() {
+                let png = encode_png(img).map_err(|e| format!("编码底色失败: {e}"))?;
+                zip.start_file("bg.png", png_opts)
+                    .map_err(|e| format!("写入 bg.png 失败: {e}"))?;
+                zip.write_all(&png)
+                    .map_err(|e| format!("写入 bg.png 失败: {e}"))?;
+            }
         }
 
         zip.finish()

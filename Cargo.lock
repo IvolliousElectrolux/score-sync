@@ -136,7 +136,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apply_bg"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "async-channel 2.5.0",
  "clap",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "mask_tool"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -4564,7 +4564,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "score_sync"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -4586,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "score_video"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
