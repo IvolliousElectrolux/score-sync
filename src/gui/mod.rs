@@ -40,6 +40,7 @@ actions!(
     [
         OpenFile,
         OpenProject,
+        NewProject,
         SaveProject,
         SaveProjectAs,
         DetectPage,
@@ -72,7 +73,7 @@ const REORDER_DRAG_SLOP: f32 = 5.0;
 const SIDE_PANEL_MAX: f32 = 720.0;
 const HELP_TEXT: &str = "\
 【分块】快捷键:\n\
-  Ctrl+O 打开图片/PDF | Ctrl+Shift+O 打开工程 | Ctrl+S 保存工程 | Ctrl+Shift+S 另存工程\n\
+  Ctrl+O 打开图片/PDF | Ctrl+Shift+N 新建工程 | Ctrl+Shift+O 打开工程 | Ctrl+S 保存工程 | Ctrl+Shift+S 另存工程\n\
   D 识别本页 | A 识别全部页\n\
   N 添加新块 | S 分割块 | M 合并组合 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
   E 导出组合 | R 重置本页分组 | F 适应窗口 | H / F1 操作说明\n\
@@ -101,7 +102,7 @@ const HELP_TEXT: &str = "\
 \n\
 操作步骤:\n\
 1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留当前页±4.\n\
-2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续; 有未保存改动关窗会确认.\n\
+2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续; Ctrl+Shift+N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
@@ -279,6 +280,8 @@ enum DialogKind {
     },
     /// 关窗时有未保存改动
     UnsavedExit,
+    /// 新建工程前有未保存改动
+    UnsavedNew,
 }
 
 struct TabContextMenu {
@@ -1668,6 +1671,63 @@ impl ScoreSyncApp {
         .detach();
     }
 
+    /// 新建空白工程: 有未保存改动时先确认.
+    fn request_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.opening || self.saving {
+            self.status = "工程读写进行中, 请稍候…".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        self.refresh_dirty_from_panels(cx);
+        if self.dirty {
+            self.dialog = Some(DialogKind::UnsavedNew);
+            cx.notify();
+            return;
+        }
+        let _ = window;
+        self.do_new_project(cx);
+    }
+
+    /// 清空当前文档/视频/蒙版状态, 回到可重新导入的空白工程.
+    fn do_new_project(&mut self, cx: &mut Context<Self>) {
+        let mask_prefs = self.doc.mask_prefs.clone();
+        self.flush_mask_to_doc(cx);
+        self.doc = DocState::new();
+        self.doc.mask_prefs = mask_prefs.clone();
+        self.project_path = None;
+        self.dirty = false;
+        self.video_pool_all_dirty = true;
+        self.video_pool_dirty.clear();
+        self.drag = None;
+        self.dialog = None;
+        self.tab_menu = None;
+        self.param_edit = None;
+        self.region_y_edit = None;
+        self.crop_histories.clear();
+        self.page_struct_history = CropHistory::default();
+        self.side_tool = SideTool::Crop;
+        self.canvas_tool = CanvasTool::Normal;
+        self.mask_target = None;
+        self.mask_tool.update(cx, |m, cx| {
+            m.clear_view("", cx);
+            m.apply_color_prefs(mask_prefs);
+        });
+        self.score_video.update(cx, |v, cx| {
+            v.load_timeline_snapshot(score_video::model::TimelineSnapshot::default(), cx);
+            v.set_pool(Vec::new(), cx);
+        });
+        self.render_image = None;
+        self.img_w = 0;
+        self.img_h = 0;
+        self.user_zoomed = false;
+        self.zoom = 1.0;
+        self.pan = point(0.0, 0.0);
+        self.status = "已新建空白工程. 可用 Ctrl+O 导入图片/PDF.".into();
+        self.hint = self.status.clone();
+        cx.notify();
+    }
+
     fn save_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = self.project_path.clone() {
             self.save_project_to(path, cx);
@@ -1738,6 +1798,7 @@ impl ScoreSyncApp {
         });
 
         let quit_after = matches!(self.dialog, Some(DialogKind::UnsavedExit));
+        let new_after = matches!(self.dialog, Some(DialogKind::UnsavedNew));
         cx.spawn(async move |this, cx| {
             let result = rx.recv().await;
             this.update(cx, |view, cx| {
@@ -1756,6 +1817,8 @@ impl ScoreSyncApp {
                             view.dialog = None;
                             view.allow_close = true;
                             cx.quit();
+                        } else if new_after {
+                            view.do_new_project(cx);
                         }
                     }
                     Ok(Err(e)) => {
@@ -3163,6 +3226,13 @@ impl ScoreSyncApp {
                             .flex_row()
                             .flex_wrap()
                             .gap_2()
+                            .child(self.btn(
+                                "proj_new",
+                                "新建工程",
+                                false,
+                                |this, window, cx| this.request_new_project(window, cx),
+                                cx,
+                            ))
                             .child(self.btn(
                                 "proj_open",
                                 "打开工程",
@@ -5046,10 +5116,13 @@ impl ScoreSyncApp {
         if matches!(dlg, DialogKind::UnsavedExit) {
             return self.unsaved_exit_dialog(cx).into_any_element();
         }
+        if matches!(dlg, DialogKind::UnsavedNew) {
+            return self.unsaved_new_dialog(cx).into_any_element();
+        }
         let (title, body) = match dlg {
             DialogKind::Help => ("操作说明".to_string(), HELP_TEXT.to_string()),
             DialogKind::Info { title, body } => (title.clone(), body.clone()),
-            DialogKind::UnsavedExit => unreachable!(),
+            DialogKind::UnsavedExit | DialogKind::UnsavedNew => unreachable!(),
         };
         let body_el = div()
             .id("dlg_body")
@@ -5231,6 +5304,88 @@ impl ScoreSyncApp {
                             ))
                             .child(self.btn(
                                 "exit_cancel",
+                                "取消",
+                                false,
+                                |this, _, cx| {
+                                    this.dialog = None;
+                                    cx.notify();
+                                },
+                                cx,
+                            )),
+                    ),
+            )
+    }
+
+    fn unsaved_new_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("dialog_backdrop_unsaved_new")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000080))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .id("dialog_card_unsaved_new")
+                    .w(px(420.))
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("未保存的改动"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x334155))
+                            .child("当前工程有未保存改动. 新建前要先保存吗?"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .justify_end()
+                            .child(self.btn(
+                                "new_save",
+                                "保存后新建",
+                                true,
+                                |this, window, cx| {
+                                    // 保持 UnsavedNew, 供保存成功后清空
+                                    if this.project_path.is_some() {
+                                        this.save_project(window, cx);
+                                    } else {
+                                        this.save_project_as(window, cx);
+                                    }
+                                },
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "new_discard",
+                                "不保存新建",
+                                false,
+                                |this, _, cx| {
+                                    this.dirty = false;
+                                    this.do_new_project(cx);
+                                },
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "new_cancel",
                                 "取消",
                                 false,
                                 |this, _, cx| {
@@ -5715,6 +5870,9 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
                 this.open_project(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &NewProject, window, cx| {
+                this.request_new_project(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &SaveProject, window, cx| {
                 this.save_project(window, cx)
             }))
@@ -5972,6 +6130,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
         score_video::gui::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-o", OpenFile, Some("ScoreSync")),
+            KeyBinding::new("ctrl-shift-n", NewProject, Some("ScoreSync")),
             KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreSync")),
             KeyBinding::new("ctrl-s", SaveProject, Some("ScoreSync")),
             KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("ScoreSync")),
@@ -5979,9 +6138,11 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("ctrl-s", SaveProject, None),
             KeyBinding::new("ctrl-shift-s", SaveProjectAs, None),
             KeyBinding::new("ctrl-shift-o", OpenProject, None),
+            KeyBinding::new("ctrl-shift-n", NewProject, None),
             KeyBinding::new("ctrl-s", SaveProject, Some("ScoreVideo")),
             KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("ScoreVideo")),
             KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreVideo")),
+            KeyBinding::new("ctrl-shift-n", NewProject, Some("ScoreVideo")),
             KeyBinding::new("d", DetectPage, Some("ScoreSync")),
             KeyBinding::new("a", DetectAll, Some("ScoreSync")),
             KeyBinding::new("n", ToggleAddBlock, Some("ScoreSync")),
@@ -6007,6 +6168,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             // 蒙版工具 (右侧切换到蒙版时 key_context=MaskTool)
             KeyBinding::new("ctrl-o", mask_tool::gui::OpenFile, Some("MaskTool")),
             KeyBinding::new("ctrl-shift-o", OpenProject, Some("MaskTool")),
+            KeyBinding::new("ctrl-shift-n", NewProject, Some("MaskTool")),
             KeyBinding::new("ctrl-s", SaveProject, Some("MaskTool")),
             KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("MaskTool")),
             KeyBinding::new("e", mask_tool::gui::ExportImage, Some("MaskTool")),

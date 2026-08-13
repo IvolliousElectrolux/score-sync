@@ -1,6 +1,6 @@
 [package]
 name = "apply_bg"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 description = "谱面加底色并裁成 2560:1440 (rayon + GPUI)"
 
