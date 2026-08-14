@@ -285,6 +285,12 @@ enum DialogKind {
     UnsavedExit,
     /// 新建工程前有未保存改动
     UnsavedNew,
+    /// GitHub 上有更新的正式版
+    UpdateAvailable {
+        current: String,
+        latest: String,
+        url: String,
+    },
 }
 
 struct TabContextMenu {
@@ -395,6 +401,8 @@ struct ScoreSyncApp {
     save_spin_phase: f32,
     /// 按下发生在标签栏「+」上; 仅空点松开时才打开文件.
     tab_add_press: bool,
+    /// 启动检查到的更新; 等当前对话框关掉后再弹出.
+    pending_update: Option<crate::update::UpdateInfo>,
 }
 
 impl ScoreSyncApp {
@@ -480,6 +488,7 @@ impl ScoreSyncApp {
             allow_close: false,
             save_spin_phase: 0.0,
             tab_add_press: false,
+            pending_update: None,
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -508,7 +517,48 @@ impl ScoreSyncApp {
                 }
             }
         }
+        app.start_update_check(cx);
         app
+    }
+
+    fn start_update_check(&mut self, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::bounded::<crate::update::UpdateInfo>(1);
+        std::thread::spawn(move || {
+            if let Some(info) = crate::update::check_latest() {
+                let _ = tx.send_blocking(info);
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(info) = rx.recv().await {
+                this.update(cx, |view, cx| {
+                    view.pending_update = Some(info);
+                    view.try_show_update_dialog(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn try_show_update_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let Some(info) = self.pending_update.take() else {
+            return;
+        };
+        self.dialog = Some(DialogKind::UpdateAvailable {
+            current: info.current,
+            latest: info.latest,
+            url: info.url,
+        });
+        cx.notify();
+    }
+
+    fn dismiss_dialog(&mut self, cx: &mut Context<Self>) {
+        self.dialog = None;
+        self.try_show_update_dialog(cx);
+        cx.notify();
     }
 
     fn xform(&self) -> ViewXform {
@@ -1782,6 +1832,7 @@ impl ScoreSyncApp {
                         )
                         .into();
                         view.hint = view.status.clone();
+                        view.try_show_update_dialog(cx);
                     }
                     Ok(Err(e)) => {
                         view.dialog = Some(DialogKind::Info {
@@ -1857,6 +1908,7 @@ impl ScoreSyncApp {
         self.pan = point(0.0, 0.0);
         self.status = "已新建空白工程. 可用 Ctrl+O 导入图片/PDF.".into();
         self.hint = self.status.clone();
+        self.try_show_update_dialog(cx);
         cx.notify();
     }
 
@@ -5458,10 +5510,15 @@ impl ScoreSyncApp {
         if matches!(dlg, DialogKind::UnsavedNew) {
             return self.unsaved_new_dialog(cx).into_any_element();
         }
+        if matches!(dlg, DialogKind::UpdateAvailable { .. }) {
+            return self.update_available_dialog(cx).into_any_element();
+        }
         let (title, body) = match dlg {
             DialogKind::Help => ("操作说明".to_string(), HELP_TEXT.to_string()),
             DialogKind::Info { title, body } => (title.clone(), body.clone()),
-            DialogKind::UnsavedExit | DialogKind::UnsavedNew => unreachable!(),
+            DialogKind::UnsavedExit
+            | DialogKind::UnsavedNew
+            | DialogKind::UpdateAvailable { .. } => unreachable!(),
         };
         let body_el = div()
             .id("dlg_body")
@@ -5561,8 +5618,7 @@ impl ScoreSyncApp {
                                 "确定",
                                 true,
                                 |this, _, cx| {
-                                    this.dialog = None;
-                                    cx.notify();
+                                    this.dismiss_dialog(cx);
                                 },
                                 cx,
                             )),
@@ -5646,8 +5702,7 @@ impl ScoreSyncApp {
                                 "取消",
                                 false,
                                 |this, _, cx| {
-                                    this.dialog = None;
-                                    cx.notify();
+                                    this.dismiss_dialog(cx);
                                 },
                                 cx,
                             )),
@@ -5728,6 +5783,84 @@ impl ScoreSyncApp {
                                 "取消",
                                 false,
                                 |this, _, cx| {
+                                    this.dismiss_dialog(cx);
+                                },
+                                cx,
+                            )),
+                    ),
+            )
+    }
+
+    fn update_available_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (current, latest, url) = match &self.dialog {
+            Some(DialogKind::UpdateAvailable {
+                current,
+                latest,
+                url,
+            }) => (current.clone(), latest.clone(), url.clone()),
+            _ => return div().into_any_element(),
+        };
+        let url_open = url.clone();
+        div()
+            .id("dialog_backdrop_update")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000080))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .id("dialog_card_update")
+                    .w(px(420.))
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("发现新版本"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x334155))
+                            .child(format!(
+                                "当前 {current}, GitHub 最新 {latest}.\n可前往发布页下载安装包."
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .justify_end()
+                            .child(self.btn(
+                                "update_open",
+                                "打开下载页",
+                                true,
+                                move |this, _, cx| {
+                                    crate::update::open_in_browser(&url_open);
+                                    this.dismiss_dialog(cx);
+                                },
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "update_later",
+                                "以后再说",
+                                false,
+                                |this, _, cx| {
                                     this.dialog = None;
                                     cx.notify();
                                 },
@@ -5735,6 +5868,7 @@ impl ScoreSyncApp {
                             )),
                     ),
             )
+            .into_any_element()
     }
 
     fn tab_context_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {

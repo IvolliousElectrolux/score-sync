@@ -60,6 +60,24 @@ fn color_rgb_u32(c: [u8; 3]) -> u32 {
     ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32)
 }
 
+/// 画笔光标边框: 取 RGB 反色; 反色太接近时改用黑/白, 保证白笔也能看清.
+fn opposite_rgb(c: [u8; 3]) -> [u8; 3] {
+    let inv = [255 - c[0], 255 - c[1], 255 - c[2]];
+    let dist = (inv[0] as i16 - c[0] as i16).unsigned_abs()
+        + (inv[1] as i16 - c[1] as i16).unsigned_abs()
+        + (inv[2] as i16 - c[2] as i16).unsigned_abs();
+    if dist < 180 {
+        let y = 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
+        if y >= 128.0 {
+            [0, 0, 0]
+        } else {
+            [255, 255, 255]
+        }
+    } else {
+        inv
+    }
+}
+
 /// 滴管 / 取色图标 (约 14×14 视口内绘制).
 fn eyedropper_icon(active: bool) -> impl IntoElement {
     let stroke = if active {
@@ -1633,55 +1651,97 @@ impl MaskToolApp {
         cx.notify();
     }
 
-    pub fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("打开图片")
-            .add_filter(
-                "Images",
-                &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"],
-            );
-        if let Some(ref p) = self.image_path {
-            if let Some(parent) = p.parent() {
-                dialog = dialog.set_directory(parent);
+    fn spawn_native_dialog<T, F, A>(cx: &mut Context<Self>, work: F, apply: A)
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        A: FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        let (tx, rx) = async_channel::bounded::<T>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(work());
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(val) = rx.recv().await {
+                this.update(cx, |view, cx| apply(view, val, cx)).ok();
             }
-        }
-        if let Some(path) = dialog.pick_file() {
-            self.load_image(path, cx);
-        }
+        })
+        .detach();
+    }
+
+    pub fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let start = self
+            .image_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        Self::spawn_native_dialog(
+            cx,
+            move || {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("打开图片")
+                    .add_filter(
+                        "Images",
+                        &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"],
+                    );
+                if let Some(parent) = start {
+                    dialog = dialog.set_directory(parent);
+                }
+                dialog.pick_file()
+            },
+            |this, path, cx| {
+                if let Some(path) = path {
+                    this.load_image(path, cx);
+                }
+            },
+        );
     }
 
     pub fn export_image(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ref base) = self.rgb_image else {
+        if self.rgb_image.is_none() {
             self.status = "请先打开图片.".into();
             cx.notify();
             return;
-        };
+        }
         let suggested = default_export_path(self.image_path.as_deref());
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("导出已遮盖图片")
-            .add_filter("PNG", &["png"])
-            .add_filter("JPEG", &["jpg", "jpeg"])
-            .set_file_name(
-                suggested
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("masked.png"),
-            );
-        if let Some(parent) = suggested.parent().filter(|p| p.is_dir()) {
-            dialog = dialog.set_directory(parent);
-        }
-        let Some(path) = dialog.save_file() else {
-            return;
-        };
-        match export_masked(base, &self.masks, self.mask_opacity, &path) {
-            Ok(()) => {
-                self.status = format!("已保存: {}", path.display()).into();
-            }
-            Err(e) => {
-                self.status = e.into();
-            }
-        }
-        cx.notify();
+        let file_name = suggested
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("masked.png")
+            .to_string();
+        let start_dir = suggested.parent().filter(|p| p.is_dir()).map(|p| p.to_path_buf());
+        Self::spawn_native_dialog(
+            cx,
+            move || {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("导出已遮盖图片")
+                    .add_filter("PNG", &["png"])
+                    .add_filter("JPEG", &["jpg", "jpeg"])
+                    .set_file_name(file_name);
+                if let Some(parent) = start_dir {
+                    dialog = dialog.set_directory(parent);
+                }
+                dialog.save_file()
+            },
+            |this, path, cx| {
+                let Some(path) = path else {
+                    return;
+                };
+                let Some(ref base) = this.rgb_image else {
+                    this.status = "请先打开图片.".into();
+                    cx.notify();
+                    return;
+                };
+                match export_masked(base, &this.masks, this.mask_opacity, &path) {
+                    Ok(()) => {
+                        this.status = format!("已保存: {}", path.display()).into();
+                    }
+                    Err(e) => {
+                        this.status = e.into();
+                    }
+                }
+                cx.notify();
+            },
+        );
     }
 
     fn on_view_mouse_down(
@@ -3364,7 +3424,7 @@ impl MaskToolApp {
                             }
                         }
 
-                        // 画笔圆形光标 (与粗细/颜色一致)
+                        // 画笔圆形光标: 填充跟画笔色, 边框用反色 (白笔黑框)
                         if let Some((bx, by)) = brush_cursor {
                             let screen_r = (brush_size * 0.5 * xform.scale).max(1.5);
                             let cx_s = f32::from(bounds.origin.x) + xform.origin_x + bx * xform.scale;
@@ -3374,10 +3434,12 @@ impl MaskToolApp {
                                 ((cr as u32) << 16) | ((cg as u32) << 8) | (cb as u32),
                             );
                             fill.a = (brush_opacity * 0.35).clamp(0.12, 0.55);
+                            let [rr, rg, rb] = opposite_rgb(brush_color);
                             let mut ring = rgb(
-                                ((cr as u32) << 16) | ((cg as u32) << 8) | (cb as u32),
+                                ((rr as u32) << 16) | ((rg as u32) << 8) | (rb as u32),
                             );
-                            ring.a = brush_opacity.clamp(0.45, 1.0);
+                            ring.a = 1.0;
+                            let ring_w = (screen_r * 0.08).clamp(1.5, 2.5);
                             let b = Bounds {
                                 origin: point(px(cx_s - screen_r), px(cy_s - screen_r)),
                                 size: size(px(screen_r * 2.0), px(screen_r * 2.0)),
@@ -3386,7 +3448,7 @@ impl MaskToolApp {
                                 b,
                                 px(screen_r),
                                 fill,
-                                px(1.5),
+                                px(ring_w),
                                 ring,
                                 Default::default(),
                             ));

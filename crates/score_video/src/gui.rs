@@ -621,13 +621,42 @@ impl ScoreVideoApp {
         cx.notify();
     }
 
+    fn spawn_native_dialog<T, F, A>(cx: &mut Context<Self>, work: F, apply: A)
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        A: FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        let (tx, rx) = async_channel::bounded::<T>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(work());
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(val) = rx.recv().await {
+                this.update(cx, |view, cx| apply(view, val, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     pub fn import_audio(&mut self, cx: &mut Context<Self>) {
-        let Some(paths) = rfd::FileDialog::new()
-            .add_filter("音频", &["wav", "mp3", "flac", "ogg", "m4a", "aac"])
-            .pick_files()
-        else {
-            return;
-        };
+        Self::spawn_native_dialog(
+            cx,
+            || {
+                rfd::FileDialog::new()
+                    .add_filter("音频", &["wav", "mp3", "flac", "ogg", "m4a", "aac"])
+                    .pick_files()
+            },
+            |this, paths, cx| {
+                let Some(paths) = paths else {
+                    return;
+                };
+                this.add_audio_paths(paths, cx);
+            },
+        );
+    }
+
+    fn add_audio_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut added = 0usize;
         for p in paths {
             let dur = crate::audio::probe_duration(&p).unwrap_or(0.0);
@@ -1181,13 +1210,28 @@ impl ScoreVideoApp {
             return;
         }
         let ext = self.export_container.ext();
-        let Some(out_path) = rfd::FileDialog::new()
-            .add_filter(self.export_container.label(), &[ext])
-            .set_file_name(&format!("output.{ext}"))
-            .save_file()
-        else {
+        let label = self.export_container.label();
+        Self::spawn_native_dialog(
+            cx,
+            move || {
+                rfd::FileDialog::new()
+                    .add_filter(label, &[ext])
+                    .set_file_name(format!("output.{ext}"))
+                    .save_file()
+            },
+            |this, out_path, cx| {
+                let Some(out_path) = out_path else {
+                    return;
+                };
+                this.begin_export(out_path, cx);
+            },
+        );
+    }
+
+    fn begin_export(&mut self, out_path: PathBuf, cx: &mut Context<Self>) {
+        if self.exporting {
             return;
-        };
+        }
         let (w, h) = ExportOptions::size_from_pool(&self.pool);
         let opts = ExportOptions {
             container: self.export_container,

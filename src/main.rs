@@ -15,6 +15,7 @@ mod project;
 mod staff_detect;
 mod text_input;
 mod trace;
+mod update;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
