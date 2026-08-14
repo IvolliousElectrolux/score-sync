@@ -30,7 +30,17 @@ pub fn init() {
         *g = Some(path.clone());
     }
     maybe_attach_console();
+    install_panic_hook();
     log(&format!("trace 已启动 → {}", path.display()));
+}
+
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        log(&format!("PANIC: {info}\n{bt}"));
+        default_hook(info);
+    }));
 }
 
 fn chrono_now() -> String {

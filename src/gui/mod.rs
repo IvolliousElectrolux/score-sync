@@ -1070,6 +1070,11 @@ impl ScoreSyncApp {
                         .timer(Duration::from_millis(1))
                         .await;
                 }
+                crate::trace::log(&format!(
+                    "video_pool: 开始 chunk {} ({} 组)",
+                    chunk_i + 1,
+                    chunk.len()
+                ));
                 let cancelled = this
                     .update(cx, |view, _| {
                         if view.video_sync_gen != gen {
@@ -1120,10 +1125,15 @@ impl ScoreSyncApp {
                         false
                     })
                     .unwrap_or(true);
+                crate::trace::log(&format!(
+                    "video_pool: chunk {} 结束 cancelled={cancelled}",
+                    chunk_i + 1
+                ));
                 if cancelled {
                     return;
                 }
             }
+            crate::trace::log("video_pool: 全部 chunk 完成, 写回素材池");
             this.update(cx, |view, cx| {
                 if view.video_sync_gen == gen {
                     view.video_pool_all_dirty = false;
@@ -1647,29 +1657,61 @@ impl ScoreSyncApp {
         .detach();
     }
 
+    fn spawn_native_dialog<T, F, A>(cx: &mut Context<Self>, work: F, apply: A)
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        A: FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        let (tx, rx) = async_channel::bounded::<T>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(work());
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(val) = rx.recv().await {
+                this.update(cx, |view, cx| apply(view, val, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let files = rfd::FileDialog::new()
-            .set_title("打开图片 / PDF (可多选)")
-            .add_filter(
-                "Images / PDF",
-                &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "pdf"],
-            )
-            .add_filter("PDF", &["pdf"])
-            .add_filter("Images", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"])
-            .pick_files();
-        if let Some(paths) = files {
-            self.load_paths(paths, cx);
-        }
+        Self::spawn_native_dialog(
+            cx,
+            || {
+                rfd::FileDialog::new()
+                    .set_title("打开图片 / PDF (可多选)")
+                    .add_filter(
+                        "Images / PDF",
+                        &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "pdf"],
+                    )
+                    .add_filter("PDF", &["pdf"])
+                    .add_filter("Images", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"])
+                    .pick_files()
+            },
+            |this, files, cx| {
+                if let Some(paths) = files {
+                    this.load_paths(paths, cx);
+                }
+            },
+        );
     }
 
     fn open_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let file = rfd::FileDialog::new()
-            .set_title("打开工程")
-            .add_filter("Score Sync 工程", &["staffcrop"])
-            .pick_file();
-        if let Some(path) = file {
-            self.open_project_path(path, cx);
-        }
+        Self::spawn_native_dialog(
+            cx,
+            || {
+                rfd::FileDialog::new()
+                    .set_title("打开工程")
+                    .add_filter("Score Sync 工程", &["staffcrop"])
+                    .pick_file()
+            },
+            |this, file, cx| {
+                if let Some(path) = file {
+                    this.open_project_path(path, cx);
+                }
+            },
+        );
     }
 
     fn open_project_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -1835,25 +1877,41 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
-        let mut dlg = rfd::FileDialog::new()
-            .set_title("保存工程")
-            .add_filter("Score Sync 工程", &["staffcrop"]);
-        if let Some(ref p) = self.project_path {
-            if let Some(parent) = p.parent() {
-                dlg = dlg.set_directory(parent);
-            }
-            if let Some(name) = p.file_name() {
-                dlg = dlg.set_file_name(name.to_string_lossy());
-            }
-        } else if let Some(page) = self.doc.pages.first() {
-            if let Some(stem) = page.path.file_stem().and_then(|s| s.to_str()) {
-                dlg = dlg.set_file_name(format!("{stem}.staffcrop"));
-            }
-        }
-        let Some(path) = dlg.save_file() else {
-            return;
-        };
-        self.save_project_to(path, cx);
+        let start_dir = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let start_name = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .or_else(|| {
+                self.doc
+                    .pages
+                    .first()
+                    .and_then(|page| page.path.file_stem().and_then(|s| s.to_str()))
+                    .map(|stem| format!("{stem}.staffcrop"))
+            });
+        Self::spawn_native_dialog(
+            cx,
+            move || {
+                let mut dlg = rfd::FileDialog::new()
+                    .set_title("保存工程")
+                    .add_filter("Score Sync 工程", &["staffcrop"]);
+                if let Some(dir) = start_dir {
+                    dlg = dlg.set_directory(dir);
+                }
+                if let Some(name) = start_name {
+                    dlg = dlg.set_file_name(name);
+                }
+                dlg.save_file()
+            },
+            |this, path, cx| {
+                if let Some(path) = path {
+                    this.save_project_to(path, cx);
+                }
+            },
+        );
     }
 
     fn save_project_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -2201,12 +2259,23 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
-        let Some(out) = rfd::FileDialog::new()
-            .set_title("选择导出目录")
-            .pick_folder()
-        else {
-            return;
-        };
+        Self::spawn_native_dialog(
+            cx,
+            || {
+                rfd::FileDialog::new()
+                    .set_title("选择导出目录")
+                    .pick_folder()
+            },
+            |this, out, cx| {
+                let Some(out) = out else {
+                    return;
+                };
+                this.start_export_groups(out, cx);
+            },
+        );
+    }
+
+    fn start_export_groups(&mut self, out: PathBuf, cx: &mut Context<Self>) {
         let group_ids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
         let n = group_ids.len();
         let peak = self
@@ -3511,6 +3580,7 @@ impl ScoreSyncApp {
     }
 
     fn apply_project_bg(&mut self, cx: &mut Context<Self>) {
+        crate::trace::log("apply_bg: 点击应用到工程组合");
         if self.doc.groups.is_empty() {
             self.dialog = Some(DialogKind::Info {
                 title: "提示".into(),
@@ -3531,9 +3601,18 @@ impl ScoreSyncApp {
                 return;
             }
         };
+        crate::trace::log(&format!(
+            "apply_bg: 打开底色 {} 比例 {aw}:{ah}",
+            path.display()
+        ));
         match image::open(&path) {
             Ok(im) => {
                 let rgb = im.to_rgb8();
+                crate::trace::log(&format!(
+                    "apply_bg: 底色已解码 {}x{}",
+                    rgb.width(),
+                    rgb.height()
+                ));
                 match self
                     .doc
                     .set_project_bg(rgb, Some(path.clone()), aw, ah)
@@ -3575,8 +3654,11 @@ impl ScoreSyncApp {
                         )
                         .into();
                         self.hint = self.status.clone();
+                        crate::trace::log("apply_bg: 即将刷新蒙版预览");
                         self.force_refresh_mask_preview(cx);
+                        crate::trace::log("apply_bg: 即将同步视频池");
                         self.sync_video_pool(cx);
+                        crate::trace::log("apply_bg: 应用到工程完成");
                         cx.notify();
                     }
                     Err(e) => {

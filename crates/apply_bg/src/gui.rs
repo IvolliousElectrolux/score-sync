@@ -1,7 +1,22 @@
 //! GPUI 图形界面.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn host_trace(msg: &str) {
+    if std::env::var_os("SCORE_SYNC_TRACE").is_none() {
+        return;
+    }
+    let line = format!("[apply_bg] {msg}");
+    eprintln!("{line}");
+    let path = std::env::temp_dir().join("score_sync_trace.log");
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+        let _ = f.flush();
+    }
+}
 
 use gpui::{
     div, prelude::*, px, rgb, relative, size, App, Application, Bounds, Context, Entity,
@@ -270,30 +285,70 @@ impl ApplyBgApp {
         cx.notify();
     }
 
+    fn spawn_native_dialog<T, F, A>(cx: &mut Context<Self>, work: F, apply: A)
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        A: FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        let (tx, rx) = async_channel::bounded::<T>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(work());
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(val) = rx.recv().await {
+                this.update(cx, |view, cx| apply(view, val, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     fn pick_bg(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        host_trace("pick_bg: 进入");
         if self.running {
+            host_trace("pick_bg: running=true, 直接返回");
             return;
         }
         let start = PathBuf::from(self.bg_input.read(cx).text());
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("选择底色")
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]);
-        if start.is_file() {
-            dialog = dialog
-                .set_file_name(
-                    start
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("底色.png"),
-                )
-                .set_directory(start.parent().unwrap_or(std::path::Path::new(".")));
-        }
-        if let Some(p) = dialog.pick_file() {
-            self.bg_input
-                .update(cx, |input, cx| input.set_text(p.display().to_string(), cx));
-            self.persist(cx);
-            cx.notify();
-        }
+        host_trace(&format!(
+            "pick_bg: start={} is_file={}",
+            start.display(),
+            start.is_file()
+        ));
+        host_trace("pick_bg: 后台线程打开对话框 (不阻塞 GPUI)");
+        Self::spawn_native_dialog(
+            cx,
+            move || {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("选择底色")
+                    .add_filter(
+                        "Images",
+                        &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+                    );
+                if start.is_file() {
+                    dialog = dialog
+                        .set_file_name(
+                            start
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("底色.png"),
+                        )
+                        .set_directory(start.parent().unwrap_or(std::path::Path::new(".")));
+                }
+                dialog.pick_file()
+            },
+            |this, picked, cx| match picked {
+                Some(p) => {
+                    host_trace(&format!("pick_bg: 选中 {}", p.display()));
+                    this.bg_input.update(cx, |input, cx| {
+                        input.set_text(p.display().to_string(), cx)
+                    });
+                    this.persist(cx);
+                    cx.notify();
+                }
+                None => host_trace("pick_bg: 取消选择"),
+            },
+        );
     }
 
     fn pick_in(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -301,23 +356,31 @@ impl ApplyBgApp {
             return;
         }
         let start = PathBuf::from(self.in_input.read(cx).text());
-        let picked = rfd::FileDialog::new()
-            .set_title("选择谱面目录")
-            .set_directory(if start.is_dir() {
-                start
-            } else {
-                PathBuf::from(".")
-            })
-            .pick_folder();
-        if let Some(p) = picked {
-            let out = p.join("加底色").display().to_string();
-            self.in_input
-                .update(cx, |input, cx| input.set_text(p.display().to_string(), cx));
-            self.out_input
-                .update(cx, |input, cx| input.set_text(out, cx));
-            self.persist(cx);
-            cx.notify();
-        }
+        Self::spawn_native_dialog(
+            cx,
+            move || {
+                rfd::FileDialog::new()
+                    .set_title("选择谱面目录")
+                    .set_directory(if start.is_dir() {
+                        start
+                    } else {
+                        PathBuf::from(".")
+                    })
+                    .pick_folder()
+            },
+            |this, picked, cx| {
+                if let Some(p) = picked {
+                    let out = p.join("加底色").display().to_string();
+                    this.in_input.update(cx, |input, cx| {
+                        input.set_text(p.display().to_string(), cx)
+                    });
+                    this.out_input
+                        .update(cx, |input, cx| input.set_text(out, cx));
+                    this.persist(cx);
+                    cx.notify();
+                }
+            },
+        );
     }
 
     fn pick_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -325,22 +388,30 @@ impl ApplyBgApp {
             return;
         }
         let start = PathBuf::from(self.out_input.read(cx).text());
-        let picked = rfd::FileDialog::new()
-            .set_title("选择输出目录")
-            .set_directory(if start.is_dir() {
-                start
-            } else if let Some(parent) = start.parent().filter(|p| p.is_dir()) {
-                parent.to_path_buf()
-            } else {
-                PathBuf::from(".")
-            })
-            .pick_folder();
-        if let Some(p) = picked {
-            self.out_input
-                .update(cx, |input, cx| input.set_text(p.display().to_string(), cx));
-            self.persist(cx);
-            cx.notify();
-        }
+        Self::spawn_native_dialog(
+            cx,
+            move || {
+                rfd::FileDialog::new()
+                    .set_title("选择输出目录")
+                    .set_directory(if start.is_dir() {
+                        start
+                    } else if let Some(parent) = start.parent().filter(|p| p.is_dir()) {
+                        parent.to_path_buf()
+                    } else {
+                        PathBuf::from(".")
+                    })
+                    .pick_folder()
+            },
+            |this, picked, cx| {
+                if let Some(p) = picked {
+                    this.out_input.update(cx, |input, cx| {
+                        input.set_text(p.display().to_string(), cx)
+                    });
+                    this.persist(cx);
+                    cx.notify();
+                }
+            },
+        );
     }
 
     fn start_run(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
