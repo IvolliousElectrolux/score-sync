@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod detect_cache;
 mod export;
 mod gui;
 mod model;
@@ -13,6 +14,7 @@ mod pdf;
 mod project;
 mod staff_detect;
 mod text_input;
+mod trace;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -46,8 +48,11 @@ fn main() -> ExitCode {
     }
     // 启动建会话目录; 退出清理会话 tmp (保留工程旁视频池缓存)
     page_cache::init_session();
+    trace::init();
+    crate::trace::log("main: 即将进入 GUI");
     let _guard = scopeguard_cleanup();
     gui::run_gui(args.paths);
+    crate::trace::log("main: GUI 已退出");
     ExitCode::SUCCESS
 }
 

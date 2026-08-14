@@ -17,6 +17,9 @@ pub const COLORS: &[&str] = &[
 
 pub const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"];
 
+pub const DEFAULT_MARGIN: i32 = 20;
+pub const DEFAULT_INK_THRESHOLD: i32 = 200;
+
 #[derive(Clone, Debug)]
 pub struct Region {
     pub id: String,
@@ -64,6 +67,20 @@ impl Page {
             .and_then(|s| s.to_str())
             .unwrap_or("page")
             .to_string()
+    }
+
+    /// 页签短标签用的原页码 (PDF `_p012`) 与「复制」标记.
+    pub fn tab_badge(&self, fallback_index1: usize) -> String {
+        let stem = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let src = source_page_no_from_stem(stem)
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| fallback_index1.to_string());
+        let copy = copy_mark_from_stem(stem);
+        format!("{src}{copy}")
     }
 
     pub fn height(&self) -> u32 {
@@ -130,6 +147,45 @@ pub fn is_open_path(path: &Path) -> bool {
     is_image_path(path) || is_pdf_path(path)
 }
 
+fn source_page_no_from_stem(stem: &str) -> Option<u32> {
+    let b = stem.as_bytes();
+    let mut i = 0;
+    let mut last = None;
+    while i + 2 < b.len() {
+        if b[i] == b'_' && b[i + 1] == b'p' && b[i + 2].is_ascii_digit() {
+            let start = i + 2;
+            let mut end = start;
+            while end < b.len() && b[end].is_ascii_digit() {
+                end += 1;
+            }
+            if let Ok(n) = stem[start..end].parse::<u32>() {
+                last = Some(n);
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    last
+}
+
+fn copy_mark_from_stem(stem: &str) -> String {
+    let Some(pos) = stem.rfind("_copy") else {
+        return String::new();
+    };
+    let rest = &stem[pos + 5..];
+    if rest.starts_with("_p") {
+        return String::new();
+    }
+    if rest.is_empty() {
+        "复制".into()
+    } else if rest.chars().all(|c| c.is_ascii_digit()) {
+        format!("复制{rest}")
+    } else {
+        "复制".into()
+    }
+}
+
 pub fn parse_color_hex(s: &str) -> u32 {
     let s = s.trim().trim_start_matches('#');
     u32::from_str_radix(s, 16).unwrap_or(0x3498db)
@@ -161,13 +217,15 @@ pub struct DocState {
     /// 视频面板时间轴的纯数据快照 (实际编辑态在 `score_video::ScoreVideoApp`
     /// 里, 这里只是保存/载入工程时的中转载体).
     pub video_state: TimelineSnapshot,
+    /// region_id → page index, 避免 find_region 每次扫全部页.
+    pub(crate) rid_page: HashMap<String, usize>,
 }
 
 impl DocState {
     pub fn new() -> Self {
         Self {
-            margin: 20,
-            ink_threshold: 200,
+            margin: DEFAULT_MARGIN,
+            ink_threshold: DEFAULT_INK_THRESHOLD,
             mask_prefs: MaskColorPrefs::default(),
             bg_aspect_w: 2560,
             bg_aspect_h: 1440,
@@ -207,6 +265,7 @@ impl DocState {
             bg_aspect_w: self.bg_aspect_w,
             bg_aspect_h: self.bg_aspect_h,
             video_state: self.video_state.clone(),
+            rid_page: HashMap::new(),
         }
     }
 
@@ -427,6 +486,11 @@ impl DocState {
     }
 
     pub fn find_region(&self, rid: &str) -> Option<(usize, &Region)> {
+        if let Some(&pi) = self.rid_page.get(rid) {
+            if let Some(r) = self.pages.get(pi).and_then(|p| p.regions.get(rid)) {
+                return Some((pi, r));
+            }
+        }
         for (pi, page) in self.pages.iter().enumerate() {
             if let Some(r) = page.regions.get(rid) {
                 return Some((pi, r));
@@ -440,12 +504,36 @@ impl DocState {
     }
 
     pub fn get_region_mut(&mut self, rid: &str) -> Option<&mut Region> {
+        let pi = self.rid_page.get(rid).copied().filter(|&pi| {
+            self.pages
+                .get(pi)
+                .map(|p| p.regions.contains_key(rid))
+                .unwrap_or(false)
+        });
+        if let Some(pi) = pi {
+            return self.pages.get_mut(pi).and_then(|p| p.regions.get_mut(rid));
+        }
         for page in &mut self.pages {
             if page.regions.contains_key(rid) {
                 return page.regions.get_mut(rid);
             }
         }
         None
+    }
+
+    pub fn rebuild_rid_index(&mut self) {
+        self.rid_page.clear();
+        self.rid_page.reserve(
+            self.pages
+                .iter()
+                .map(|p| p.regions.len())
+                .sum::<usize>(),
+        );
+        for (i, page) in self.pages.iter().enumerate() {
+            for rid in page.regions.keys() {
+                self.rid_page.insert(rid.clone(), i);
+            }
+        }
     }
 
     pub fn active_group(&self) -> Option<&Group> {
@@ -704,9 +792,15 @@ impl DocState {
             self.current_page_index = idx;
         }
         if run_detect {
+            crate::trace::log(&format!("doc: detect_page idx={idx} 开始"));
             self.detect_page(idx, true);
+            crate::trace::log(&format!("doc: detect_page idx={idx} 结束"));
+        } else if self.load_detect_sidecar(idx) {
+            self.upsert_page_groups(idx);
         }
-        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        if run_detect {
+            self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        }
         Ok(idx)
     }
 
@@ -750,6 +844,8 @@ impl DocState {
         if let Some(page) = self.pages.get_mut(page_idx) {
             page.regions = regions;
         }
+        self.rebuild_rid_index();
+        self.save_detect_sidecar(page_idx);
         if reset_groups {
             let page_regions: Vec<Region> = self.pages[page_idx]
                 .regions
@@ -793,14 +889,178 @@ impl DocState {
         }
     }
 
+    pub fn apply_detect_file(
+        &mut self,
+        page_idx: usize,
+        file: &crate::detect_cache::PageDetectFile,
+    ) {
+        let Some(page) = self.pages.get(page_idx) else {
+            return;
+        };
+        let page_id = page.id.clone();
+        let mut regions = HashMap::new();
+        for (i, r) in file.regions.iter().enumerate() {
+            regions.insert(
+                r.id.clone(),
+                Region {
+                    id: r.id.clone(),
+                    page_id: page_id.clone(),
+                    y0: r.y0,
+                    y1: r.y1,
+                    kind: r.kind.clone(),
+                    color: COLORS[i % COLORS.len()].to_string(),
+                },
+            );
+        }
+        if let Some(page) = self.pages.get_mut(page_idx) {
+            if file.img_w > 0 {
+                page.img_w = file.img_w;
+                page.img_h = file.img_h;
+            }
+            page.regions = regions;
+        }
+        self.rebuild_rid_index();
+    }
+
+    pub fn load_detect_sidecar(&mut self, page_idx: usize) -> bool {
+        let Some(path) = self.pages.get(page_idx).map(|p| p.disk_path.clone()) else {
+            return false;
+        };
+        let Some(file) = crate::detect_cache::load(&path) else {
+            return false;
+        };
+        self.apply_detect_file(page_idx, &file);
+        true
+    }
+
+    pub fn save_detect_sidecar(&self, page_idx: usize) {
+        let Some(page) = self.pages.get(page_idx) else {
+            return;
+        };
+        let mut regions: Vec<Region> = page.regions.values().cloned().collect();
+        regions.sort_by_key(|r| (r.y0, r.y1));
+        let file = crate::detect_cache::PageDetectFile {
+            img_w: page.img_w,
+            img_h: page.img_h,
+            ink_threshold: self.ink_threshold,
+            margin: self.margin,
+            regions: regions
+                .into_iter()
+                .map(|r| crate::detect_cache::CachedRegion {
+                    id: r.id,
+                    y0: r.y0,
+                    y1: r.y1,
+                    kind: r.kind,
+                })
+                .collect(),
+        };
+        let _ = crate::detect_cache::save(&page.disk_path, &file);
+    }
+
+    fn group_min_page_idx(&self, g: &Group) -> usize {
+        g.region_ids
+            .iter()
+            .filter_map(|rid| self.find_region(rid).map(|(pi, _)| pi))
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+
+    /// 按页序插入/替换本页 groups, 其它页的组块顺序不受影响.
+    pub fn upsert_page_groups(&mut self, page_idx: usize) {
+        let page_rids: HashSet<String> = self
+            .pages
+            .get(page_idx)
+            .map(|p| p.regions.keys().cloned().collect())
+            .unwrap_or_default();
+        if page_rids.is_empty() {
+            return;
+        }
+        let mut live: HashSet<String> = HashSet::new();
+        for p in &self.pages {
+            live.extend(p.regions.keys().cloned());
+        }
+        self.groups
+            .retain(|g| g.region_ids.iter().any(|id| live.contains(id)));
+        self.groups
+            .retain(|g| !g.region_ids.iter().any(|id| page_rids.contains(id)));
+        let mut ordered: Vec<Region> = self.pages[page_idx]
+            .regions
+            .values()
+            .cloned()
+            .collect();
+        ordered.sort_by_key(|r| (r.y0, r.y1));
+        let new_groups: Vec<Group> = ordered
+            .iter()
+            .map(|r| Group {
+                id: new_id(),
+                region_ids: vec![r.id.clone()],
+                name: String::new(),
+            })
+            .collect();
+        let insert_at = {
+            let mut at = self.groups.len();
+            for (i, g) in self.groups.iter().enumerate().rev() {
+                if self.group_min_page_idx(g) > page_idx {
+                    at = i;
+                } else {
+                    break;
+                }
+            }
+            at
+        };
+        for (i, g) in new_groups.into_iter().enumerate() {
+            self.groups.insert(insert_at + i, g);
+        }
+        self.ensure_active_group();
+    }
+
+    /// 当前页 ± radius 窗口内涉及到的组合下标 (用于列表按需渲染).
+    pub fn group_indices_in_page_window(&self, lo: usize, hi: usize) -> Vec<usize> {
+        let mut rids = HashSet::new();
+        let hi = hi.min(self.pages.len().saturating_sub(1));
+        for pi in lo..=hi {
+            if let Some(p) = self.pages.get(pi) {
+                rids.extend(p.regions.keys().cloned());
+            }
+        }
+        self.groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.region_ids.iter().any(|id| rids.contains(id)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 按页序从当前各页 regions 重建全部 groups. 全量识别结束时调用一次,
+    /// 避免 detect_page(reset_groups=true) 每页都拷贝已有 groups (O(n²)).
+    pub fn rebuild_all_groups(&mut self) {
+        let mut new_groups: Vec<Group> = Vec::new();
+        for page in &self.pages {
+            let mut ordered: Vec<Region> = page.regions.values().cloned().collect();
+            ordered.sort_by_key(|r| (r.y0, r.y1));
+            for r in ordered {
+                new_groups.push(Group {
+                    id: new_id(),
+                    region_ids: vec![r.id],
+                    name: String::new(),
+                });
+            }
+        }
+        self.groups = new_groups;
+        self.selected_region_ids.clear();
+        self.groups_manual_order = false;
+        self.sort_groups();
+        self.ensure_active_group();
+    }
+
     #[allow(dead_code)]
     pub fn detect_all(&mut self) {
         let n = self.pages.len();
         for i in 0..n {
-            self.detect_page(i, true);
-            // 逐页识别后立刻裁回窗口, 避免全部页图堆在内存
+            self.detect_page(i, false);
             self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
         }
+        self.rebuild_all_groups();
     }
 
     pub fn reset_current_page_groups(&mut self) {
@@ -1071,6 +1331,7 @@ impl DocState {
             return format!("P{page_no} y={y}: 无法在此位置分割 (已在块边).");
         }
         self.selected_region_ids = created.into_iter().collect();
+        self.rebuild_rid_index();
         format!("P{page_no} 已在 y={y} 切开 {n} 块.")
     }
 
@@ -1109,6 +1370,7 @@ impl DocState {
         });
         self.sort_groups();
         self.selected_region_ids = HashSet::from([rid]);
+        self.rebuild_rid_index();
         format!("P{page_no} 新建手动块 y={a}-{b} h={}.", b - a + 1)
     }
 
@@ -1212,6 +1474,7 @@ impl DocState {
             self.current_page_index -= 1;
         }
         self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.rebuild_rid_index();
         true
     }
 
@@ -1230,6 +1493,7 @@ impl DocState {
         }
         self.sort_groups();
         self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.rebuild_rid_index();
     }
 
     pub fn copy_page_at(&mut self, index: usize) -> Option<usize> {
@@ -1329,6 +1593,7 @@ impl DocState {
         }
         self.current_page_index = insert_at;
         self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.rebuild_rid_index();
         Some(insert_at)
     }
 

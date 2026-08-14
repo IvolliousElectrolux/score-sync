@@ -450,6 +450,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
                 .collect(),
             playhead: meta.video.playhead,
         },
+        rid_page: HashMap::new(),
     };
     if let Some(bg) = meta.bg {
         if bg.enabled {
@@ -482,5 +483,6 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
     doc.selected_region_ids
         .retain(|id| valid_regions.contains(id));
     doc.retain_window(doc.current_page_index, crate::page_cache::WINDOW_RADIUS);
+    doc.rebuild_rid_index();
     Ok(doc)
 }

@@ -102,14 +102,20 @@ fn bind_pdfium() -> Result<Pdfium, String> {
 }
 
 /// PDF 逐页渲染到临时 PNG; 每完成一页回调 `(index0, total, path)`.
+/// 渲染后立刻在本线程识别并写 sidecar, 不占用 UI.
 pub fn pdf_pages_to_tmp_images_streaming(
     pdf_path: &Path,
+    ink_threshold: i32,
+    margin: i32,
     mut on_page: impl FnMut(usize, usize, PathBuf),
 ) -> Result<usize, String> {
+    crate::trace::log(&format!("pdf: 开始打开 {}", pdf_path.display()));
     let pdfium = bind_pdfium()?;
+    crate::trace::log("pdf: pdfium 已加载");
     let document = pdfium
         .load_pdf_from_file(pdf_path, None)
         .map_err(|e| format!("打开 PDF 失败: {e}"))?;
+    crate::trace::log("pdf: 文档已打开");
 
     let tmp_dir = std::env::temp_dir().join(format!(
         "crop_sheet_pdf_{}",
@@ -125,11 +131,16 @@ pub fn pdf_pages_to_tmp_images_streaming(
         .and_then(|s| s.to_str())
         .unwrap_or("pdf");
     let n = document.pages().len() as usize;
+    crate::trace::log(&format!(
+        "pdf: 共 {n} 页, 渲染倍率 {PDF_RENDER_SCALE}, tmp={}",
+        tmp_dir.display()
+    ));
     if n == 0 {
         return Err(format!("{} 没有页面.", pdf_path.display()));
     }
 
     for i in 0..n {
+        crate::trace::log(&format!("pdf: 渲染 {}/{n} …", i + 1));
         let page = document
             .pages()
             .get(i as u16)
@@ -140,12 +151,22 @@ pub fn pdf_pages_to_tmp_images_streaming(
             .map_err(|e| format!("渲染第 {} 页失败: {e}", i + 1))?
             .as_image()
             .into_rgb8();
+        crate::trace::log(&format!(
+            "pdf: 渲染 {}/{n} 完成 {}×{}, 写 PNG …",
+            i + 1,
+            image.width(),
+            image.height()
+        ));
         let out_path = tmp_dir.join(format!("{stem}_p{:03}.png", i + 1));
         image
             .save(&out_path)
             .map_err(|e| format!("写临时 PNG 失败: {e}"))?;
+        crate::trace::log(&format!("pdf: 识别 {}/{n} …", i + 1));
+        crate::detect_cache::detect_and_save(&image, &out_path, ink_threshold, margin);
+        crate::trace::log(&format!("pdf: 已写+识别 {}/{n} → 回传 UI", i + 1));
         on_page(i, n, out_path);
     }
+    crate::trace::log(&format!("pdf: 全部 {n} 页渲染结束"));
     Ok(n)
 }
 
@@ -153,9 +174,14 @@ pub fn pdf_pages_to_tmp_images_streaming(
 #[allow(dead_code)]
 pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
-    pdf_pages_to_tmp_images_streaming(pdf_path, |_, _, p| {
-        out.push(p);
-    })?;
+    pdf_pages_to_tmp_images_streaming(
+        pdf_path,
+        crate::model::DEFAULT_INK_THRESHOLD,
+        crate::model::DEFAULT_MARGIN,
+        |_, _, p| {
+            out.push(p);
+        },
+    )?;
     Ok(out)
 }
 

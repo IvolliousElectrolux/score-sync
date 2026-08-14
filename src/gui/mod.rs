@@ -71,6 +71,9 @@ const SIDE_PANEL_MIN: f32 = 220.0;
 /// 拖拽排序: 超过此像素位移才进入拖拽态 (防点击抖动出虚影)
 const REORDER_DRAG_SLOP: f32 = 5.0;
 const SIDE_PANEL_MAX: f32 = 720.0;
+/// 页数超过此值时页签只显示页码, 并只渲染可视范围.
+const TAB_VIRTUAL_THRESHOLD: usize = 48;
+const TAB_SLOT_PX: f32 = 76.0;
 const HELP_TEXT: &str = "\
 【分块】快捷键:\n\
   Ctrl+O 打开图片/PDF | Ctrl+Shift+N 新建工程 | Ctrl+Shift+O 打开工程 | Ctrl+S 保存工程 | Ctrl+Shift+S 另存工程\n\
@@ -390,6 +393,8 @@ struct ScoreSyncApp {
     allow_close: bool,
     /// 保存中转圈动画相位 (0..1)
     save_spin_phase: f32,
+    /// 按下发生在标签栏「+」上; 仅空点松开时才打开文件.
+    tab_add_press: bool,
 }
 
 impl ScoreSyncApp {
@@ -474,6 +479,7 @@ impl ScoreSyncApp {
             video_pool_all_dirty: true,
             allow_close: false,
             save_spin_phase: 0.0,
+            tab_add_press: false,
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -705,7 +711,6 @@ impl ScoreSyncApp {
         self.user_zoomed = false;
         self.zoom = 1.0;
         self.pan = point(0.0, 0.0);
-        self.doc.sync_group_colors();
         self.sync_mask_image(cx);
         cx.notify();
     }
@@ -722,10 +727,19 @@ impl ScoreSyncApp {
         }
         let lo = center.saturating_sub(radius);
         let hi = (center + radius).min(n - 1);
-        let mut jobs: Vec<(usize, PathBuf)> = Vec::new();
+        let mut jobs: Vec<(usize, PathBuf, bool)> = Vec::new();
         for i in lo..=hi {
+            if self.doc.pages[i].regions.is_empty() {
+                if self.doc.load_detect_sidecar(i) {
+                    self.doc.upsert_page_groups(i);
+                }
+            }
             if self.doc.pages[i].image.is_none() {
-                jobs.push((i, self.doc.pages[i].disk_path.clone()));
+                jobs.push((
+                    i,
+                    self.doc.pages[i].disk_path.clone(),
+                    self.doc.pages[i].regions.is_empty(),
+                ));
             }
         }
         // 窗外立刻卸掉
@@ -743,18 +757,46 @@ impl ScoreSyncApp {
             }
             return;
         }
-        let (tx, rx) = async_channel::unbounded::<(usize, Result<image::RgbImage, String>)>();
+        let ink = self.doc.ink_threshold;
+        let margin = self.doc.margin;
+        let (tx, rx) = async_channel::unbounded::<(
+            usize,
+            Result<image::RgbImage, String>,
+            Option<crate::detect_cache::PageDetectFile>,
+        )>();
         std::thread::spawn(move || {
-            for (idx, path) in jobs {
+            for (idx, path, need_detect) in jobs {
                 let r = crate::page_cache::load_rgb(&path);
-                let _ = tx.send_blocking((idx, r));
+                let detect = if need_detect {
+                    match &r {
+                        Ok(img) => Some(crate::detect_cache::load_or_detect(
+                            img, &path, ink, margin,
+                        )),
+                        Err(_) => crate::detect_cache::load(&path),
+                    }
+                } else {
+                    None
+                };
+                let _ = tx.send_blocking((idx, r, detect));
             }
         });
         cx.spawn(async move |this, cx| {
-            while let Ok((idx, result)) = rx.recv().await {
+            while let Ok((idx, result, detect)) = rx.recv().await {
                 this.update(cx, |view, cx| {
                     if view.page_load_gen != gen {
                         return;
+                    }
+                    if let Some(file) = detect {
+                        if view
+                            .doc
+                            .pages
+                            .get(idx)
+                            .map(|p| p.regions.is_empty())
+                            .unwrap_or(false)
+                        {
+                            view.doc.apply_detect_file(idx, &file);
+                            view.doc.upsert_page_groups(idx);
+                        }
                     }
                     if let Ok(img) = result {
                         if let Some(page) = view.doc.pages.get_mut(idx) {
@@ -1151,7 +1193,11 @@ impl ScoreSyncApp {
         let Some(gid) = self.doc.active_group_id.as_ref() else {
             return;
         };
-        let Some(ix) = self.doc.groups.iter().position(|g| &g.id == gid) else {
+        let Some(ix) = self
+            .group_list_rows()
+            .iter()
+            .position(|r| &r.id == gid)
+        else {
             return;
         };
         self.group_scroll.scroll_to_item(ix);
@@ -1445,6 +1491,14 @@ impl ScoreSyncApp {
     }
 
     fn start_pdf_load(&mut self, pdfs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        crate::trace::log(&format!(
+            "ui: 开始导入 {} 个 PDF: {}",
+            pdfs.len(),
+            pdfs.iter()
+                .filter_map(|p| p.file_name()?.to_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         self.status = format!(
             "PDF 后台渲染中… ({})",
             pdfs.first()
@@ -1457,6 +1511,8 @@ impl ScoreSyncApp {
         cx.notify();
 
         let (tx, rx) = async_channel::unbounded::<PdfLoadMsg>();
+        let ink = self.doc.ink_threshold;
+        let margin = self.doc.margin;
         std::thread::spawn(move || {
             for pdf in pdfs {
                 let name = pdf
@@ -1464,14 +1520,15 @@ impl ScoreSyncApp {
                     .and_then(|s| s.to_str())
                     .unwrap_or("pdf")
                     .to_string();
-                let result = pdf::pdf_pages_to_tmp_images_streaming(&pdf, |i, total, path| {
-                    let _ = tx.send_blocking(PdfLoadMsg::Page {
-                        path,
-                        index: i,
-                        total,
-                        pdf_name: name.clone(),
+                let result =
+                    pdf::pdf_pages_to_tmp_images_streaming(&pdf, ink, margin, |i, total, path| {
+                        let _ = tx.send_blocking(PdfLoadMsg::Page {
+                            path,
+                            index: i,
+                            total,
+                            pdf_name: name.clone(),
+                        });
                     });
-                });
                 match result {
                     Ok(n) => {
                         let _ = tx.send_blocking(PdfLoadMsg::Done {
@@ -1491,8 +1548,10 @@ impl ScoreSyncApp {
         });
 
         cx.spawn(async move |this, cx| {
+            let mut pages_since_yield = 0u32;
             while let Ok(msg) = rx.recv().await {
                 let stop = matches!(msg, PdfLoadMsg::AllFinished);
+                let is_page = matches!(msg, PdfLoadMsg::Page { .. });
                 this.update(cx, |view, cx| {
                     match msg {
                         PdfLoadMsg::Page {
@@ -1506,31 +1565,42 @@ impl ScoreSyncApp {
                                 "{pdf_name}_p{:03}.png",
                                 index + 1
                             ));
-                            // PDF 渲染输出已是磁盘 PNG, 直接登记; 识别后 retain 窗口
-                            match view.doc.add_page_from_disk(display, path.clone(), was_empty, true)
-                            {
+                            // 导入只登记磁盘 PNG, 不在 UI 线程逐页识别 (几百页会卡死)
+                            crate::trace::log(&format!(
+                                "ui: 登记 PDF 页 {}/{total} (run_detect=false)",
+                                index + 1
+                            ));
+                            match view.doc.add_page_from_disk(
+                                display,
+                                path.clone(),
+                                was_empty,
+                                false,
+                            ) {
                                 Ok(_) => {
                                     view.mark_dirty();
-                                    view.mark_video_pool_dirty_all();
-                                    if was_empty {
-                                        view.refresh_render(cx);
+                                    let done = index + 1;
+                                    let refresh = was_empty || done == total || done % 8 == 0;
+                                    if refresh {
+                                        if was_empty {
+                                            view.refresh_render(cx);
+                                        }
+                                        view.status = format!(
+                                            "PDF {pdf_name}: 已载入 {done}/{total} 页 (共 {} 页)",
+                                            view.doc.pages.len()
+                                        )
+                                        .into();
+                                        view.hint = view.status.clone();
+                                        cx.notify();
                                     }
-                                    view.status = format!(
-                                        "PDF {pdf_name}: 已载入 {}/{total} 页 (共 {} 页)",
-                                        index + 1,
-                                        view.doc.pages.len()
-                                    )
-                                    .into();
-                                    view.hint = view.status.clone();
                                 }
                                 Err(e) => {
                                     view.dialog = Some(DialogKind::Info {
                                         title: "打开失败".into(),
                                         body: format!("{}: {e}", path.display()),
                                     });
+                                    cx.notify();
                                 }
                             }
-                            cx.notify();
                         }
                         PdfLoadMsg::Done { pdf_name, pages } => {
                             view.status =
@@ -1545,12 +1615,32 @@ impl ScoreSyncApp {
                             });
                             cx.notify();
                         }
-                        PdfLoadMsg::AllFinished => {}
+                        PdfLoadMsg::AllFinished => {
+                            crate::trace::log("ui: PDF 全部登记完成 (识别已写入 sidecar)");
+                            view.refresh_render(cx);
+                            view.request_page_window(cx);
+                            let n = view.doc.pages.len();
+                            view.status = format!(
+                                "已载入 {n} 页. 识别结果已缓存, 当前只处理前后 {} 页.",
+                                crate::page_cache::WINDOW_RADIUS * 2 + 1
+                            )
+                            .into();
+                            view.hint = view.status.clone();
+                            cx.notify();
+                        }
                     }
                 })
                 .ok();
                 if stop {
                     break;
+                }
+                if is_page {
+                    pages_since_yield += 1;
+                    if pages_since_yield % 8 == 0 {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(8))
+                            .await;
+                    }
                 }
             }
         })
@@ -1886,40 +1976,62 @@ impl ScoreSyncApp {
         }
         self.push_crop_undo_all_pages();
         let n = self.doc.pages.len();
-        let peak = self
+        let jobs: Vec<(usize, PathBuf)> = self
             .doc
             .pages
             .iter()
-            .map(|p| p.estimated_bytes())
-            .max()
-            .unwrap_or(64 * 1024 * 1024);
-        let conc = crate::page_cache::concurrency_for_peak(peak);
-        self.status = format!("正在识别全部 {n} 页…").into();
+            .enumerate()
+            .map(|(i, p)| (i, p.disk_path.clone()))
+            .collect();
+        let ink = self.doc.ink_threshold;
+        let margin = self.doc.margin;
+        self.status = format!("正在后台重新识别全部 {n} 页…").into();
         self.hint = self.status.clone();
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
-            for start in (0..n).step_by(conc) {
-                let end = (start + conc).min(n);
-                this.update(cx, |view, _| {
-                    for i in start..end {
-                        view.doc.detect_page(i, true);
+        let (tx, rx) = async_channel::unbounded::<(usize, crate::detect_cache::PageDetectFile)>();
+        std::thread::spawn(move || {
+            for (idx, path) in jobs {
+                match crate::page_cache::load_rgb(&path) {
+                    Ok(img) => {
+                        let file =
+                            crate::detect_cache::detect_and_save(&img, &path, ink, margin);
+                        let _ = tx.send_blocking((idx, file));
                     }
-                    view.doc.retain_window(
-                        view.doc.current_page_index,
-                        crate::page_cache::WINDOW_RADIUS,
-                    );
-                    view.status = format!("识别进度 {}/{n}…", end).into();
-                    view.hint = view.status.clone();
+                    Err(e) => {
+                        crate::trace::log(&format!("detect_all 读页 {} 失败: {e}", idx + 1));
+                    }
+                }
+            }
+        });
+
+        cx.spawn(async move |this, cx| {
+            let mut done = 0usize;
+            while let Ok((idx, file)) = rx.recv().await {
+                done += 1;
+                let d = done;
+                this.update(cx, |view, cx| {
+                    view.doc.apply_detect_file(idx, &file);
+                    view.doc.upsert_page_groups(idx);
+                    if d == n || d % 8 == 0 {
+                        view.status = format!("识别进度 {d}/{n}…").into();
+                        view.hint = view.status.clone();
+                        crate::trace::log(&format!("ui: detect_all 进度 {d}/{n}"));
+                        cx.notify();
+                    }
                 })
                 .ok();
-                cx.background_executor()
-                    .timer(Duration::from_millis(1))
-                    .await;
+                if d % 8 == 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(8))
+                        .await;
+                }
             }
             this.update(cx, |view, cx| {
-                view.mark_dirty();
-                view.mark_video_pool_dirty_all();
+                view.doc.retain_window(
+                    view.doc.current_page_index,
+                    crate::page_cache::WINDOW_RADIUS,
+                );
                 view.status = format!("已识别全部 {n} 页.").into();
                 view.hint = view.status.clone();
                 view.after_doc_change(cx);
@@ -2191,6 +2303,12 @@ impl ScoreSyncApp {
             return;
         }
         self.doc.current_page_index = index;
+        if self.doc.pages.len() > TAB_VIRTUAL_THRESHOLD {
+            let view_w = f32::from(self.tab_scroll.bounds().size.width).max(400.0);
+            let target = (index as f32 * TAB_SLOT_PX - view_w * 0.35).max(0.0);
+            self.tab_scroll
+                .set_offset(point(px(-target), px(0.)));
+        }
         if self.doc.pages[index].image.is_some() {
             self.request_page_window(cx);
             self.refresh_render(cx);
@@ -2249,39 +2367,69 @@ impl ScoreSyncApp {
                 color: parse_color_hex(&r.color),
                 label: r.label(Some(pno)).into(),
                 id: r.id,
+                src_index: 0,
             })
             .collect()
     }
 
     fn group_list_rows(&self) -> Vec<ListRow> {
-        self.doc
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(i, g)| {
+        let idxs = self.window_group_indices();
+        let mut by_page: HashMap<usize, Vec<(usize, i32, i32)>> = HashMap::new();
+        for &i in &idxs {
+            let Some(g) = self.doc.groups.get(i) else {
+                continue;
+            };
+            let k = self.doc.group_top_key(g);
+            by_page.entry(k.0).or_default().push((i, k.1, k.2));
+        }
+        for v in by_page.values_mut() {
+            v.sort_by_key(|&(_, y0, y1)| (y0, y1));
+        }
+        idxs.into_iter()
+            .filter_map(|i| {
+                let g = self.doc.groups.get(i)?;
                 let mut labels = Vec::new();
                 let mut pages_in = HashSet::new();
                 for rid in &g.region_ids {
-                    if let Some((_, r)) = self.doc.find_region(rid) {
-                        let pno = self.doc.page_no(&r.page_id);
+                    if let Some((pi, r)) = self.doc.find_region(rid) {
+                        let pno = pi + 1;
                         pages_in.insert(pno);
                         labels.push(format!("P{pno}:{}:{}-{}", r.kind, r.y0, r.y1));
                     }
                 }
                 let cross = if pages_in.len() > 1 { "跨页 " } else { "" };
+                let top = self.doc.group_top_key(g);
+                let c = by_page
+                    .get(&top.0)
+                    .and_then(|v| v.iter().position(|(gi, _, _)| *gi == i))
+                    .map(|x| x + 1)
+                    .unwrap_or(1);
+                let page_no = if top.0 == usize::MAX { 0 } else { top.0 + 1 };
                 let text = format!(
-                    "{cross}{} | [{}]",
-                    self.doc.group_crop_label(i),
+                    "{cross}{}. p{page_no}c{c} | [{}]",
+                    i + 1,
                     labels.join(", ")
                 );
-                ListRow {
+                Some(ListRow {
                     id: g.id.clone(),
                     label: text.into(),
                     color: 0x0f172a,
                     selected: self.doc.group_has_selected_region(g),
-                }
+                    src_index: i,
+                })
             })
             .collect()
+    }
+
+    fn window_group_indices(&self) -> Vec<usize> {
+        let n = self.doc.pages.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let c = self.doc.current_page_index;
+        let lo = c.saturating_sub(crate::page_cache::WINDOW_RADIUS);
+        let hi = (c + crate::page_cache::WINDOW_RADIUS).min(n - 1);
+        self.doc.group_indices_in_page_window(lo, hi)
     }
 
     fn member_list_rows(&self) -> Vec<ListRow> {
@@ -2297,29 +2445,57 @@ impl ScoreSyncApp {
                     label: r.label(Some(self.doc.page_no(&r.page_id))).into(),
                     color: parse_color_hex(&r.color),
                     selected: false,
+                    src_index: 0,
                 })
             })
             .collect()
     }
 
     fn tab_infos(&self) -> Vec<TabInfo> {
-        self.doc
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let has_sel = p
-                    .regions
-                    .keys()
-                    .any(|rid| self.doc.selected_region_ids.contains(rid));
-                let mark = if has_sel { "●" } else { "" };
-                TabInfo {
-                    index: i,
-                    label: format!("{mark}{}:{}", i + 1, p.title()).into(),
-                    active: i == self.doc.current_page_index,
-                }
+        let (start, end) = self.visible_tab_range();
+        (start..end)
+            .map(|i| TabInfo {
+                index: i,
+                label: self.page_tab_label(i),
+                active: i == self.doc.current_page_index,
             })
             .collect()
+    }
+
+    fn page_tab_label(&self, i: usize) -> SharedString {
+        let n = self.doc.pages.len();
+        let Some(p) = self.doc.pages.get(i) else {
+            return "?".into();
+        };
+        let has_sel = p
+            .regions
+            .keys()
+            .any(|rid| self.doc.selected_region_ids.contains(rid));
+        let mark = if has_sel { "●" } else { "" };
+        if n > TAB_VIRTUAL_THRESHOLD {
+            format!("{mark}{}", p.tab_badge(i + 1)).into()
+        } else {
+            format!("{mark}{}:{}", p.tab_badge(i + 1), p.title()).into()
+        }
+    }
+
+    fn visible_tab_range(&self) -> (usize, usize) {
+        let n = self.doc.pages.len();
+        if n == 0 {
+            return (0, 0);
+        }
+        if n <= TAB_VIRTUAL_THRESHOLD {
+            return (0, n);
+        }
+        let view_w = f32::from(self.tab_scroll.bounds().size.width);
+        let view_w = if view_w < 8.0 { 960.0 } else { view_w };
+        let off = (-f32::from(self.tab_scroll.offset().x)).max(0.0);
+        let start = ((off / TAB_SLOT_PX).floor() as usize).saturating_sub(8);
+        let end = (((off + view_w) / TAB_SLOT_PX).ceil() as usize)
+            .saturating_add(8)
+            .min(n);
+        let start = start.min(n);
+        (start, end.max(start))
     }
 
     fn current_regions_hitlist(&self) -> Vec<(String, i32, i32)> {
@@ -2489,6 +2665,13 @@ impl ScoreSyncApp {
             }
             other => {
                 self.drag = other;
+                if self.forward_capture_drags(
+                    f32::from(event.position.x),
+                    f32::from(event.position.y),
+                    cx,
+                ) {
+                    return;
+                }
             }
         }
 
@@ -2522,34 +2705,36 @@ impl ScoreSyncApp {
         if event.button != MouseButton::Left {
             return;
         }
-        if let Some(DragKind::AddBlock {
-            anchor_y,
-            role,
-            cur_y,
-        }) = self.drag.take()
-        {
-            match role {
-                None => {
-                    self.status = "已取消添加新块 (未确定上下边方向)".into();
-                    self.hint = self.status.clone();
-                }
-                Some(_) => {
-                    let (y0, y1) = Self::add_block_preview_ys(anchor_y, role, cur_y);
-                    if y1 < y0 {
-                        self.status = "块高度无效, 已取消.".into();
-                    } else {
-                        self.push_crop_undo_current();
-                        let msg = self.doc.add_manual_block(y0, y1);
-                        self.status = msg.into();
+        if matches!(self.drag, Some(DragKind::AddBlock { .. })) {
+            if let Some(DragKind::AddBlock {
+                anchor_y,
+                role,
+                cur_y,
+            }) = self.drag.take()
+            {
+                match role {
+                    None => {
+                        self.status = "已取消添加新块 (未确定上下边方向)".into();
                         self.hint = self.status.clone();
-                        self.canvas_tool = CanvasTool::Normal;
-                        self.after_doc_change(cx);
-                        return;
+                    }
+                    Some(_) => {
+                        let (y0, y1) = Self::add_block_preview_ys(anchor_y, role, cur_y);
+                        if y1 < y0 {
+                            self.status = "块高度无效, 已取消.".into();
+                        } else {
+                            self.push_crop_undo_current();
+                            let msg = self.doc.add_manual_block(y0, y1);
+                            self.status = msg.into();
+                            self.hint = self.status.clone();
+                            self.canvas_tool = CanvasTool::Normal;
+                            self.after_doc_change(cx);
+                            return;
+                        }
                     }
                 }
+                cx.notify();
+                return;
             }
-            cx.notify();
-            return;
         }
         if matches!(
             self.drag,
@@ -3035,7 +3220,11 @@ impl ScoreSyncApp {
             .border_1()
             .border_color(rgb(0xcbd5e1))
             .rounded_md();
-        for (i, g) in self.doc.groups.iter().enumerate() {
+        let window_idxs = self.window_group_indices();
+        for &i in &window_idxs {
+            let Some(g) = self.doc.groups.get(i) else {
+                continue;
+            };
             let gid = g.id.clone();
             let active = active_gid.as_ref() == Some(&gid);
             let label = self.doc.group_crop_label(i);
@@ -3467,7 +3656,11 @@ impl ScoreSyncApp {
             .overflow_x_scroll()
             .track_scroll(handle)
             .scrollbar_width(px(0.));
-        for (i, g) in self.doc.groups.iter().enumerate() {
+        let window_idxs = self.window_group_indices();
+        for &i in &window_idxs {
+            let Some(g) = self.doc.groups.get(i) else {
+                continue;
+            };
             let gid = g.id.clone();
             let active = active_gid.as_ref() == Some(&gid);
             let label = self.doc.group_crop_label(i);
@@ -3586,6 +3779,8 @@ impl ScoreSyncApp {
     }
 
     fn page_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let n = self.doc.pages.len();
+        let (start, end) = self.visible_tab_range();
         let tabs = self.tab_infos();
         let handle = &self.tab_scroll;
         let max_x = f32::from(handle.max_offset().width);
@@ -3619,6 +3814,14 @@ impl ScoreSyncApp {
             .overflow_x_scroll()
             .track_scroll(handle)
             .scrollbar_width(px(0.));
+        if n > TAB_VIRTUAL_THRESHOLD && start > 0 {
+            row = row.child(
+                div()
+                    .w(px(start as f32 * TAB_SLOT_PX))
+                    .h(px(1.))
+                    .flex_shrink_0(),
+            );
+        }
         for tab in tabs {
             let idx = tab.index;
             let active = tab.active;
@@ -3667,6 +3870,7 @@ impl ScoreSyncApp {
                                         mx,
                                         my,
                                     );
+                                    this.tab_add_press = false;
                                     this.drag = Some(DragKind::TabReorder {
                                         from: idx,
                                         to: idx,
@@ -3715,6 +3919,14 @@ impl ScoreSyncApp {
                     ),
             );
         }
+        if n > TAB_VIRTUAL_THRESHOLD && end < n {
+            row = row.child(
+                div()
+                    .w(px((n - end) as f32 * TAB_SLOT_PX))
+                    .h(px(1.))
+                    .flex_shrink_0(),
+            );
+        }
         row = row.child(
             div()
                 .id("tab-add")
@@ -3725,13 +3937,43 @@ impl ScoreSyncApp {
                 .cursor_pointer()
                 .flex_shrink_0()
                 .child("+")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.tab_add_press = this.drag.is_none();
+                        cx.stop_propagation();
+                    }),
+                )
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.open_file(window, cx)),
+                    cx.listener(|this, _, window, cx| {
+                        let press = this.tab_add_press;
+                        this.tab_add_press = false;
+                        if !press {
+                            return;
+                        }
+                        if matches!(
+                            this.drag,
+                            Some(DragKind::TabReorder { .. })
+                                | Some(DragKind::TabHScroll { .. })
+                                | Some(DragKind::Scrollbar { .. })
+                        ) {
+                            return;
+                        }
+                        this.open_file(window, cx);
+                    }),
                 ),
         );
         row = row
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                let x = f32::from(ev.position.x);
+                let y = f32::from(ev.position.y);
+                if this.forward_capture_drags(x, y, cx) {
+                    return;
+                }
+                if !matches!(this.drag, Some(DragKind::TabReorder { .. })) {
+                    return;
+                }
                 if let Some(DragKind::TabReorder {
                     from,
                     start_x,
@@ -3771,6 +4013,9 @@ impl ScoreSyncApp {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    if !matches!(this.drag, Some(DragKind::TabReorder { .. })) {
+                        return;
+                    }
                     if let Some(DragKind::TabReorder {
                         from, to, armed, ..
                     }) = this.drag.take()
@@ -3891,11 +4136,7 @@ impl ScoreSyncApp {
         else {
             return div().into_any_element();
         };
-        let label = self
-            .tab_infos()
-            .get(*from)
-            .map(|t| t.label.clone())
-            .unwrap_or_else(|| "...".into());
+        let label = self.page_tab_label(*from);
         let gx = *origin_x + (*x - *start_x);
         let gy = *origin_y + (*y - *start_y);
         div()
@@ -4679,7 +4920,7 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("输出组合 (排序号. p页c页内; 拖拽调序; 导出按此顺序)"),
+                    .child("输出组合 (当前页前后各4页; 排序号全局; 拖拽调序)"),
             );
 
         let mut glist = div()
@@ -4707,8 +4948,8 @@ impl ScoreSyncApp {
             }) => (*line_at, *line_after),
             _ => (None, false),
         };
-        for (i, row) in group_rows.iter().enumerate() {
-            let idx = i;
+        for row in group_rows.iter() {
+            let idx = row.src_index;
             let gid = row.id.clone();
             let dragging = group_moving.contains(&idx);
             let show_line = group_line_at == Some(idx);
@@ -4763,6 +5004,14 @@ impl ScoreSyncApp {
                         }),
                     )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                        let x = f32::from(ev.position.x);
+                        let y = f32::from(ev.position.y);
+                        if this.forward_capture_drags(x, y, cx) {
+                            return;
+                        }
+                        if !matches!(this.drag, Some(DragKind::GroupReorder { .. })) {
+                            return;
+                        }
                         if let Some(DragKind::GroupReorder {
                             from,
                             start_x,
@@ -4898,6 +5147,14 @@ impl ScoreSyncApp {
                         }),
                     )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                        let x = f32::from(ev.position.x);
+                        let y = f32::from(ev.position.y);
+                        if this.forward_capture_drags(x, y, cx) {
+                            return;
+                        }
+                        if !matches!(this.drag, Some(DragKind::MemberReorder { .. })) {
+                            return;
+                        }
                         if let Some(DragKind::MemberReorder {
                             from,
                             start_x,
@@ -5512,6 +5769,19 @@ impl ScoreSyncApp {
             _ => {}
         }
         self.finish_host_drag_at(x, y, cx);
+    }
+
+    /// 滚动条/分隔条拖拽时, 鼠标滑到列表或标签上仍继续, 不让那边的 take() 吃掉 drag.
+    fn forward_capture_drags(&mut self, x: f32, y: f32, cx: &mut Context<Self>) -> bool {
+        match self.drag {
+            Some(DragKind::Scrollbar { .. })
+            | Some(DragKind::TabHScroll { .. })
+            | Some(DragKind::SideResize { .. }) => {
+                self.apply_host_drag_at(x, y, cx);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn apply_host_drag_at(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {

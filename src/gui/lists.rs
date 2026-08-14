@@ -8,6 +8,8 @@ pub struct ListRow {
     pub label: SharedString,
     pub color: u32,
     pub selected: bool,
+    /// 在源列表中的下标 (输出组合为 `doc.groups` 下标).
+    pub src_index: usize,
 }
 
 #[derive(Clone)]
