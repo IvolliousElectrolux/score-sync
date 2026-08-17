@@ -113,6 +113,7 @@ const HELP_TEXT: &str = "\
 2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续; Ctrl+Shift+N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
+   识别先找五线谱表, 再按左侧括线/行首小节线是否连通收成谱行 (钢琴大谱表与合唱/交响同一套).\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
    新块按上边线 y 插入「输出组合」(本页自上而下), 不会丢到列表末尾.\n\
 6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
@@ -186,6 +187,7 @@ struct CropSnap {
     selected_region_ids: HashSet<String>,
     active_group_id: Option<String>,
     groups_manual_order: bool,
+    staff_grouping: crate::staff_detect::StaffGrouping,
 }
 
 #[derive(Clone, Default)]
@@ -411,6 +413,8 @@ struct ScoreSyncApp {
     tab_add_press: bool,
     /// 启动检查到的更新; 等当前对话框关掉后再弹出.
     pending_update: Option<crate::update::UpdateInfo>,
+    /// 页图未就绪, 等加载后再识别.
+    pending_redetect: bool,
 }
 
 impl ScoreSyncApp {
@@ -498,6 +502,7 @@ impl ScoreSyncApp {
             save_spin_phase: 0.0,
             tab_add_press: false,
             pending_update: None,
+            pending_redetect: false,
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -810,9 +815,14 @@ impl ScoreSyncApp {
         if jobs.is_empty() {
             // 当前页已在内存则刷新贴图
             if self.doc.pages.get(center).and_then(|p| p.image.as_ref()).is_some()
-                && self.render_image.is_none()
             {
-                self.refresh_render(cx);
+                if self.pending_redetect {
+                    self.flush_pending_redetect(cx);
+                    return;
+                }
+                if self.render_image.is_none() {
+                    self.refresh_render(cx);
+                }
             }
             return;
         }
@@ -865,7 +875,18 @@ impl ScoreSyncApp {
                         }
                     }
                     if idx == view.doc.current_page_index {
-                        view.refresh_render(cx);
+                        if view.pending_redetect
+                            && view
+                                .doc
+                                .pages
+                                .get(idx)
+                                .and_then(|p| p.image.as_ref())
+                                .is_some()
+                        {
+                            view.flush_pending_redetect(cx);
+                        } else {
+                            view.refresh_render(cx);
+                        }
                     } else {
                         cx.notify();
                     }
@@ -987,7 +1008,9 @@ impl ScoreSyncApp {
             for (idx, path) in jobs {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
-                        let file = crate::detect_cache::detect_and_save(&img, &path, ink, margin);
+                        let file = crate::detect_cache::detect_and_save(
+                            &img, &path, ink, margin,
+                        );
                         let _ = tx.send_blocking((idx, file));
                     }
                     Err(e) => {
@@ -1497,6 +1520,7 @@ impl ScoreSyncApp {
             selected_region_ids: self.doc.selected_region_ids.clone(),
             active_group_id: self.doc.active_group_id.clone(),
             groups_manual_order: self.doc.groups_manual_order,
+            staff_grouping: self.doc.staff_grouping,
         }
     }
 
@@ -1521,6 +1545,7 @@ impl ScoreSyncApp {
             selected_region_ids: self.doc.selected_region_ids.clone(),
             active_group_id: self.doc.active_group_id.clone(),
             groups_manual_order: self.doc.groups_manual_order,
+            staff_grouping: self.doc.staff_grouping,
         }
     }
 
@@ -1586,6 +1611,7 @@ impl ScoreSyncApp {
         self.doc.selected_region_ids = snap.selected_region_ids;
         self.doc.active_group_id = snap.active_group_id;
         self.doc.groups_manual_order = snap.groups_manual_order;
+        self.doc.staff_grouping = snap.staff_grouping;
         self.doc.ensure_active_group();
         self.mark_dirty();
         self.mark_video_pool_dirty_all();
@@ -1783,7 +1809,11 @@ impl ScoreSyncApp {
                     .unwrap_or("pdf")
                     .to_string();
                 let result =
-                    pdf::pdf_pages_to_tmp_images_streaming(&pdf, ink, margin, |i, total, path| {
+                    pdf::pdf_pages_to_tmp_images_streaming(
+                        &pdf,
+                        ink,
+                        margin,
+                        |i, total, path| {
                         let _ = tx.send_blocking(PdfLoadMsg::Page {
                             path,
                             index: i,
@@ -2261,6 +2291,15 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        if !self.current_page_pixels_ready() {
+            self.pending_redetect = true;
+            self.status = "页图加载中, 到齐后重新识别…".into();
+            self.hint = self.status.clone();
+            self.request_page_window(cx);
+            cx.notify();
+            return;
+        }
+        self.pending_redetect = false;
         self.push_crop_undo_current();
         let idx = self.doc.current_page_index;
         self.doc.detect_page(idx, true);
@@ -2273,6 +2312,25 @@ impl ScoreSyncApp {
         self.status = format!("本页识别到 {n} 块 (system={systems}).").into();
         self.hint = self.status.clone();
         self.after_doc_change(cx);
+    }
+
+    fn current_page_pixels_ready(&self) -> bool {
+        let idx = self.doc.current_page_index;
+        self.doc
+            .pages
+            .get(idx)
+            .and_then(|p| p.image.as_ref())
+            .is_some()
+    }
+
+    fn flush_pending_redetect(&mut self, cx: &mut Context<Self>) {
+        if !self.pending_redetect {
+            return;
+        }
+        if !self.current_page_pixels_ready() {
+            return;
+        }
+        self.run_detect(cx);
     }
 
     fn run_detect_all(&mut self, cx: &mut Context<Self>) {
@@ -2305,7 +2363,9 @@ impl ScoreSyncApp {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
                         let file =
-                            crate::detect_cache::detect_and_save(&img, &path, ink, margin);
+                            crate::detect_cache::detect_and_save(
+                                &img, &path, ink, margin,
+                            );
                         let _ = tx.send_blocking((idx, file));
                     }
                     Err(e) => {
@@ -2626,12 +2686,20 @@ impl ScoreSyncApp {
         self.doc.current_page_index = index;
         if self.doc.pages[index].image.is_some() {
             self.request_page_window(cx);
-            self.refresh_render(cx);
+            if self.pending_redetect {
+                self.flush_pending_redetect(cx);
+            } else {
+                self.refresh_render(cx);
+            }
         } else {
             self.render_image = None;
             self.img_w = self.doc.pages[index].width();
             self.img_h = self.doc.pages[index].height();
             self.request_page_window(cx);
+            if self.pending_redetect {
+                self.status = "页图加载中, 到齐后重新识别…".into();
+                self.hint = self.status.clone();
+            }
             cx.notify();
         }
     }
@@ -5645,12 +5713,17 @@ impl ScoreSyncApp {
         panel = panel.child(
             div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
+                .flex_col()
+                .gap_1()
                 .flex_shrink_0()
-                .text_sm()
-                .child("边距px")
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .child("边距px")
                 .child(
                     div()
                         .id("margin_dec")
@@ -5790,6 +5863,7 @@ impl ScoreSyncApp {
                             }),
                         ),
                 ),
+            ),
         );
         panel
     }

@@ -14,6 +14,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::model::{DocState, Group, Page, Region};
+use crate::staff_detect::StaffGrouping;
 
 pub const PROJECT_EXT: &str = "staffcrop";
 pub const PROJECT_VERSION: u32 = 1;
@@ -23,6 +24,8 @@ struct ProjectFile {
     version: u32,
     margin: i32,
     ink_threshold: i32,
+    #[serde(default)]
+    staff_grouping: StaffGrouping,
     mask_opacity: f32,
     #[serde(default)]
     mask_prefs: Option<mask_tool::color_prefs::MaskColorPrefs>,
@@ -256,6 +259,7 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         version: PROJECT_VERSION,
         margin: doc.margin,
         ink_threshold: doc.ink_threshold,
+        staff_grouping: doc.staff_grouping,
         mask_opacity: doc.mask_prefs.mask_opacity,
         mask_prefs: Some(doc.mask_prefs.clone()),
         current_page_index: doc.current_page_index.min(doc.pages.len().saturating_sub(1)),
@@ -414,6 +418,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         current_page_index: meta.current_page_index,
         margin: meta.margin,
         ink_threshold: meta.ink_threshold,
+        staff_grouping: meta.staff_grouping,
         group_masks: meta.group_masks,
         mask_prefs: meta
             .mask_prefs

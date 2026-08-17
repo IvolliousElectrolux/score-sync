@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use crate::staff_detect::{detect_bands, Band};
+use crate::staff_detect::{detect_bands, Band, StaffGrouping};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedRegion {
@@ -24,6 +24,8 @@ pub struct PageDetectFile {
     pub img_h: u32,
     pub ink_threshold: i32,
     pub margin: i32,
+    #[serde(default)]
+    pub staff_grouping: StaffGrouping,
     pub regions: Vec<CachedRegion>,
 }
 
@@ -72,6 +74,7 @@ pub fn detect_to_file(img: &RgbImage, ink_threshold: i32, margin: i32) -> PageDe
         img_h: img.height(),
         ink_threshold,
         margin,
+        staff_grouping: StaffGrouping::default(),
         regions,
     }
 }

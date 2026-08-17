@@ -1,6 +1,21 @@
-//! 钢琴谱 (大谱表) 行检测 — 移植自 staff_detect.py.
+//! 谱表行检测: 先认五线谱表, 再按左侧墨迹连通收成谱行.
+//!
+//! 钢琴大谱表、合唱、交响用同一套逻辑 — 质量够的谱子左侧括线/行首小节线
+//! 会自然把同一谱行连上, 行与行之间没有这种连通就不会粘.
+
+use std::collections::VecDeque;
 
 use image::{Rgb, RgbImage};
+use serde::{Deserialize, Serialize};
+
+/// 旧工程 / sidecar 字段, 识别已不再使用.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaffGrouping {
+    #[default]
+    GrandStaff,
+    MultiStaff,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Band {
@@ -120,132 +135,57 @@ fn find_staff_line_ys(ink: &[Vec<bool>]) -> Vec<i32> {
         .collect()
 }
 
+fn typical_line_gap(line_ys: &[i32]) -> i32 {
+    if line_ys.len() < 2 {
+        return 8;
+    }
+    let mut small: Vec<i32> = line_ys
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|&g| (4..=48).contains(&g))
+        .collect();
+    if small.is_empty() {
+        return 8;
+    }
+    small.sort();
+    small[small.len() / 2].max(4)
+}
+
 fn group_staves(line_ys: &[i32]) -> Vec<(i32, i32)> {
     let n_lines = 5;
+    let n = line_ys.len();
+    if n < n_lines {
+        return Vec::new();
+    }
+    let med_gap = typical_line_gap(line_ys);
+    let min_g = ((med_gap as f32 * 0.45).round() as i32).max(3);
+    let max_g = ((med_gap as f32 * 1.85).round() as i32).max(med_gap + 3);
+
     let mut staves = Vec::new();
     let mut i = 0;
-    let n = line_ys.len();
     while i < n {
-        if i + n_lines - 1 < n {
-            let chunk = &line_ys[i..i + n_lines];
-            let gaps: Vec<i32> = (0..n_lines - 1).map(|j| chunk[j + 1] - chunk[j]).collect();
-            let mut sorted = gaps.clone();
-            sorted.sort();
-            let med = sorted[sorted.len() / 2];
-            let max_gap = (med as f32 * 1.8).round() as i32 + 2;
-            let max_gap = max_gap.max(14);
-            let gap_spread = (med as f32 * 0.9).round() as i32 + 2;
-            let gap_spread = gap_spread.max(7);
-            let gmax = *gaps.iter().max().unwrap();
-            let gmin = *gaps.iter().min().unwrap();
-            if med >= 4 && gmax <= max_gap && gmax - gmin <= gap_spread {
-                staves.push((chunk[0], chunk[n_lines - 1]));
-                i += n_lines;
+        let mut picked = vec![line_ys[i]];
+        let mut j = i + 1;
+        while picked.len() < n_lines && j < n {
+            let gap = line_ys[j] - *picked.last().unwrap();
+            if gap < min_g {
+                j += 1;
                 continue;
             }
+            if gap > max_g {
+                break;
+            }
+            picked.push(line_ys[j]);
+            j += 1;
+        }
+        if picked.len() == n_lines {
+            staves.push((picked[0], picked[n_lines - 1]));
+            i = j;
+            continue;
         }
         i += 1;
     }
     staves
-}
-
-fn pair_grand_systems(staves: &[(i32, i32)], ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
-    if staves.is_empty() {
-        return Vec::new();
-    }
-    let heights: Vec<i32> = staves.iter().map(|(t, b)| b - t + 1).collect();
-    let mut sorted_h = heights.clone();
-    sorted_h.sort();
-    let med_h = sorted_h[sorted_h.len() / 2];
-    let min_gap = ((med_h as f32 * 0.35).round() as i32).max(6);
-    // 紧密版心内间距可能接近系统间距, 略收紧并用大括号裁决
-    let max_gap = ((med_h as f32 * 2.4).round() as i32).max(36);
-
-    let mut systems = Vec::new();
-    let mut used = vec![false; staves.len()];
-    for i in 0..staves.len() {
-        if used[i] {
-            continue;
-        }
-        let (t0, b0) = staves[i];
-        let mut brace_partner: Option<usize> = None;
-        let mut gap_partner: Option<usize> = None;
-        for j in (i + 1)..staves.len() {
-            if used[j] {
-                continue;
-            }
-            let gap = staves[j].0 - b0;
-            if gap < min_gap {
-                continue;
-            }
-            if gap > max_gap {
-                break;
-            }
-            if gap_partner.is_none() {
-                gap_partner = Some(j);
-            }
-            if has_brace(ink, t0, staves[j].1) {
-                brace_partner = Some(j);
-                break;
-            }
-        }
-        let partner = brace_partner.or(gap_partner);
-        if let Some(j) = partner {
-            used[i] = true;
-            used[j] = true;
-            systems.push((t0, staves[j].1));
-        } else {
-            used[i] = true;
-            systems.push((t0, b0));
-        }
-    }
-    systems
-}
-
-/// 左缘大括号: 在页面左侧窄条里找纵向连续墨迹 (钢琴大谱表前的花括号).
-fn find_brace_spans(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
-    let h = ink.len();
-    if h == 0 {
-        return Vec::new();
-    }
-    let w = ink[0].len();
-    let x_lo = ((w as f32 * 0.004).round() as usize).min(w.saturating_sub(1));
-    let x_hi = ((w as f32 * 0.09).round() as usize)
-        .max(x_lo + 3)
-        .min(w);
-    // 每行左侧是否有足够墨迹 (括号笔画)
-    let left_hit: Vec<bool> = (0..h)
-        .map(|y| {
-            let cnt = ink[y][x_lo..x_hi].iter().filter(|&&v| v).count();
-            cnt >= 2
-        })
-        .collect();
-    let mut runs = Vec::new();
-    let mut start: Option<i32> = None;
-    for y in 0..h {
-        if left_hit[y] {
-            if start.is_none() {
-                start = Some(y as i32);
-            }
-        } else if let Some(s) = start.take() {
-            runs.push((s, y as i32 - 1));
-        }
-    }
-    if let Some(s) = start {
-        runs.push((s, h as i32 - 1));
-    }
-    // 花括号中段可能镂空, 允许桥接细缝
-    let bridge = ((h as f32 / 350.0).round() as i32).clamp(3, 12);
-    let merged = merge_close_intervals(&runs, bridge);
-    let min_h = ((h as f32 * 0.032).round() as i32).max(36);
-    let max_h = ((h as f32 * 0.24).round() as i32).max(min_h + 10);
-    merged
-        .into_iter()
-        .filter(|&(a, b)| {
-            let hh = b - a + 1;
-            hh >= min_h && hh <= max_h
-        })
-        .collect()
 }
 
 fn has_brace(ink: &[Vec<bool>], y0: i32, y1: i32) -> bool {
@@ -341,57 +281,77 @@ fn looks_like_system(ink: &[Vec<bool>], y0: i32, y1: i32) -> bool {
     has_brace(ink, y0, y1) || count_barlines(ink, y0, y1) >= 2
 }
 
-/// 用五线核 + 大括号核合并出「谱表行」骨架; 绝不把多行粘成一行.
+/// 左侧条带里连续的谱行竖段 (行间缝会断开). 漏检五线时仍能抓住整块谱行.
+fn left_system_runs(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
+    let hit = left_band_hit_rows(ink);
+    let h = hit.len() as i32;
+    if h <= 0 {
+        return Vec::new();
+    }
+    let min_gap = (typical_line_gap(&find_staff_line_ys(ink)) * 2 + 4).clamp(12, 40);
+    let min_h = ((h as f32 * 0.12).round() as i32).max(72);
+
+    let mut runs = Vec::new();
+    let mut start: Option<i32> = None;
+    let mut last_ink = 0i32;
+    let mut blank = 0i32;
+    for y in 0..h {
+        if hit[y as usize] {
+            if start.is_none() {
+                start = Some(y);
+            }
+            last_ink = y;
+            blank = 0;
+        } else if start.is_some() {
+            blank += 1;
+            if blank >= min_gap {
+                let s = start.take().unwrap();
+                if last_ink - s + 1 >= min_h {
+                    runs.push((s, last_ink));
+                }
+            }
+        }
+    }
+    if let Some(s) = start {
+        if last_ink - s + 1 >= min_h {
+            runs.push((s, last_ink));
+        }
+    }
+    runs
+}
+
+/// 五线谱表为核; 左侧括线/行首小节线 8 连通的相邻谱表收成一行.
 fn collect_system_cores(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
     let line_ys = find_staff_line_ys(ink);
     let staves = group_staves(&line_ys);
-    let staff_systems = pair_grand_systems(&staves, ink);
-    let braces = find_brace_spans(ink);
+    let mut staff_cores = merge_staves_by_left_ink(ink, staves);
+    let runs = left_system_runs(ink);
 
-    let mut cores: Vec<(i32, i32)> = Vec::new();
-    if braces.len() >= 2 {
-        // 大括号优先: 每个括号对应一行大谱表, 用内部五线收紧上下
-        for &(b0, b1) in &braces {
-            let pad = ((b1 - b0 + 1) as f32 * 0.15).round() as i32;
-            let search0 = (b0 - pad).max(0);
-            let search1 = b1 + pad;
-            let mut inner: Vec<(i32, i32)> = staff_systems
-                .iter()
-                .copied()
-                .filter(|&(t, b)| t >= search0 - 4 && b <= search1 + 4 && overlaps(t, b, b0, b1))
-                .collect();
-            if inner.is_empty() {
-                // 括号范围内的单行谱表
-                let local_staves: Vec<(i32, i32)> = staves
-                    .iter()
-                    .copied()
-                    .filter(|&(t, b)| overlaps(t, b, search0, search1))
-                    .collect();
-                if local_staves.len() >= 2 {
-                    inner.push((local_staves[0].0, local_staves[local_staves.len() - 1].1));
-                } else if let Some(&(t, b)) = local_staves.first() {
-                    inner.push((t, b));
+    let mut cores = if runs.is_empty() {
+        staff_cores
+    } else {
+        let mut used = vec![false; staff_cores.len()];
+        let mut out = Vec::new();
+        for &(r0, r1) in &runs {
+            let mut t = r0;
+            let mut b = r1;
+            for (i, &(c0, c1)) in staff_cores.iter().enumerate() {
+                if overlaps(c0, c1, r0, r1) {
+                    t = t.min(c0);
+                    b = b.max(c1);
+                    used[i] = true;
                 }
             }
-            if let Some(&(t, b)) = inner.first() {
-                // 若括号内误收多块 staff_systems, 取与括号重叠最大的
-                let best = inner
-                    .iter()
-                    .copied()
-                    .max_by_key(|&(t, b)| {
-                        let lo = t.max(b0);
-                        let hi = b.min(b1);
-                        (hi - lo + 1).max(0)
-                    })
-                    .unwrap_or((t, b));
-                cores.push((best.0.min(b0), best.1.max(b1)));
-            } else {
-                cores.push((b0, b1));
+            out.push((t, b));
+        }
+        for (i, c) in staff_cores.drain(..).enumerate() {
+            if !used[i] {
+                out.push(c);
             }
         }
-    } else {
-        cores = staff_systems;
-    }
+        out
+    };
+    cores = split_by_left_disconnects(ink, cores);
 
     // 丢掉既无括号又几乎无小节线的假核
     if cores.len() > 1 {
@@ -406,7 +366,10 @@ fn collect_system_cores(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
     }
 
     cores.sort_by_key(|c| c.0);
-    // 核若几乎重合只留一个
+    dedup_overlapping_cores(cores)
+}
+
+fn dedup_overlapping_cores(cores: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     let mut dedup: Vec<(i32, i32)> = Vec::new();
     for (t, b) in cores {
         if let Some(last) = dedup.last_mut() {
@@ -425,6 +388,264 @@ fn collect_system_cores(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
     dedup
 }
 
+/// 只扫左侧括线 / 行首小节线. 太宽会把音符、力度记号当成桥; 右侧小节线常常不贯穿.
+fn left_probe_x_range(w: usize) -> (usize, usize) {
+    if w == 0 {
+        return (0, 0);
+    }
+    let x_lo = ((w as f32 * 0.003).round() as usize)
+        .max(1)
+        .min(w.saturating_sub(1));
+    let x_hi = ((w as f32 * 0.14).round() as usize)
+        .max(x_lo + 8)
+        .min(w);
+    (x_lo, x_hi)
+}
+
+/// 通页竖线 (装订线 / 页边框). 谱行竖线会在行间缝断开, 不能当成装订线拦掉.
+fn col_is_page_rule(ink: &[Vec<bool>], x: usize) -> bool {
+    if ink.is_empty() || x >= ink[0].len() {
+        return false;
+    }
+    let h = ink.len();
+    let hit = ink.iter().filter(|row| row[x]).count();
+    if (hit as f32) < h as f32 * 0.70 {
+        return false;
+    }
+    let margin = ((h as f32 * 0.08).round() as usize).max(16).min(h / 6);
+    let min_interior_blank = ((h as f32 * 0.012).round() as i32).clamp(16, 40);
+    let mut blank_run = 0i32;
+    for y in margin..h.saturating_sub(margin) {
+        if !ink[y][x] {
+            blank_run += 1;
+            if blank_run >= min_interior_blank {
+                return false;
+            }
+        } else {
+            blank_run = 0;
+        }
+    }
+    let top_band = ((h as f32 * 0.12).round() as usize).max(8).min(h / 4);
+    let bot_start = h.saturating_sub(top_band);
+    let has_top = (0..top_band).any(|y| ink[y][x]);
+    let has_bot = (bot_start..h).any(|y| ink[y][x]);
+    has_top && has_bot
+}
+
+/// 左侧条带里, 上核底边和下核顶边是否被同一块墨迹 8 连通连上.
+fn left_ink_connects(ink: &[Vec<bool>], y_upper: i32, y_lower: i32, pad: i32) -> bool {
+    if ink.is_empty() {
+        return false;
+    }
+    let h = ink.len() as i32;
+    let w = ink[0].len();
+    let (x_lo, x_hi) = left_probe_x_range(w);
+    if x_hi <= x_lo {
+        return false;
+    }
+    let y0 = (y_upper.min(y_lower) - pad).max(0);
+    let y1 = (y_upper.max(y_lower) + pad).min(h - 1);
+    if y1 <= y0 {
+        return false;
+    }
+    let bw = x_hi - x_lo;
+    let bh = (y1 - y0 + 1) as usize;
+    let mut blocked = vec![false; bw];
+    for (i, x) in (x_lo..x_hi).enumerate() {
+        blocked[i] = col_is_page_rule(ink, x);
+    }
+
+    let idx = |x: usize, y: i32| -> usize { (y - y0) as usize * bw + (x - x_lo) };
+    let mut seen = vec![false; bw * bh];
+    let mut q = VecDeque::new();
+    for y in y0..=y_upper.min(y1) {
+        for x in x_lo..x_hi {
+            if blocked[x - x_lo] || !ink[y as usize][x] {
+                continue;
+            }
+            let i = idx(x, y);
+            if seen[i] {
+                continue;
+            }
+            seen[i] = true;
+            if y >= y_lower {
+                return true;
+            }
+            q.push_back((x, y));
+        }
+    }
+    if q.is_empty() {
+        return false;
+    }
+    const D8: [(i32, i32); 8] = [
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
+    while let Some((x, y)) = q.pop_front() {
+        for (dx, dy) in D8 {
+            let nx = x as i32 + dx;
+            let ny = y + dy;
+            if nx < x_lo as i32 || nx >= x_hi as i32 || ny < y0 || ny > y1 {
+                continue;
+            }
+            let ux = nx as usize;
+            if blocked[ux - x_lo] || !ink[ny as usize][ux] {
+                continue;
+            }
+            let i = idx(ux, ny);
+            if seen[i] {
+                continue;
+            }
+            seen[i] = true;
+            if ny >= y_lower {
+                return true;
+            }
+            q.push_back((ux, ny));
+        }
+    }
+    false
+}
+
+/// 相邻谱表只要左侧墨迹连通 (括线 / 行首小节线), 就收成一行. 不按间距硬配.
+fn merge_staves_by_left_ink(ink: &[Vec<bool>], mut cores: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    if cores.len() < 2 {
+        return cores;
+    }
+    cores.sort_by_key(|c| c.0);
+    let mut heights: Vec<i32> = cores.iter().map(|(t, b)| b - t + 1).collect();
+    heights.sort();
+    let med_h = heights[heights.len() / 2].max(20);
+    let pad = (med_h / 6).clamp(4, 18);
+
+    let mut out = Vec::new();
+    let mut acc_t = cores[0].0;
+    let mut acc_b = cores[0].1;
+    for &(t, b) in &cores[1..] {
+        let linked = left_ink_connects(ink, acc_b, t, pad);
+        if linked {
+            acc_b = acc_b.max(b);
+        } else {
+            out.push((acc_t, acc_b));
+            acc_t = t;
+            acc_b = b;
+        }
+    }
+    out.push((acc_t, acc_b));
+    out
+}
+
+/// 左侧条带该行是否有墨 (通页装订线列不算).
+fn left_band_hit_rows(ink: &[Vec<bool>]) -> Vec<bool> {
+    if ink.is_empty() {
+        return Vec::new();
+    }
+    let w = ink[0].len();
+    let (x_lo, x_hi) = left_probe_x_range(w);
+    if x_hi <= x_lo {
+        return vec![false; ink.len()];
+    }
+    let mut blocked = vec![false; x_hi - x_lo];
+    for (i, x) in (x_lo..x_hi).enumerate() {
+        blocked[i] = col_is_page_rule(ink, x);
+    }
+    ink.iter()
+        .map(|row| {
+            (x_lo..x_hi).any(|x| !blocked[x - x_lo] && row[x])
+        })
+        .collect()
+}
+
+/// 块内检测: 左侧条带若出现一段真正的空白缝 (行与行的括线在此断开), 把块切开.
+fn split_by_left_disconnects(ink: &[Vec<bool>], intervals: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    if ink.is_empty() || intervals.is_empty() {
+        return intervals;
+    }
+    let left_hit = left_band_hit_rows(ink);
+    let line_ys = find_staff_line_ys(ink);
+    let min_gap = (typical_line_gap(&line_ys) * 2 + 4).clamp(12, 40);
+    let mut heights: Vec<i32> = intervals.iter().map(|(t, b)| b - t + 1).collect();
+    heights.sort();
+    let med = heights[heights.len() / 2].max(24);
+    let min_piece = (med / 5).clamp(20, 96);
+
+    let mut out = Vec::new();
+    for (y0, y1) in intervals {
+        out.extend(split_interval_at_left_gaps(
+            &left_hit, y0, y1, min_gap, min_piece,
+        ));
+    }
+    out.sort_by_key(|c| c.0);
+    out
+}
+
+fn split_interval_at_left_gaps(
+    left_hit: &[bool],
+    y0: i32,
+    y1: i32,
+    min_gap: i32,
+    min_piece: i32,
+) -> Vec<(i32, i32)> {
+    let h = left_hit.len() as i32;
+    let y0 = y0.max(0);
+    let y1 = y1.min(h - 1);
+    if y1 < y0 {
+        return Vec::new();
+    }
+    let mut runs = Vec::new();
+    let mut start: Option<i32> = None;
+    for y in y0..=y1 {
+        if !left_hit[y as usize] {
+            if start.is_none() {
+                start = Some(y);
+            }
+        } else if let Some(s) = start.take() {
+            runs.push((s, y - 1));
+        }
+    }
+    if let Some(s) = start {
+        runs.push((s, y1));
+    }
+
+    let mut cuts: Vec<i32> = Vec::new();
+    for (a, b) in runs {
+        if b - a + 1 < min_gap {
+            continue;
+        }
+        if a - y0 < min_piece || y1 - b < min_piece {
+            continue;
+        }
+        cuts.push(a - 1);
+    }
+    if cuts.is_empty() {
+        return vec![(y0, y1)];
+    }
+
+    let mut pieces = Vec::new();
+    let mut t = y0;
+    for cut in cuts {
+        if cut >= t {
+            pieces.push((t, cut));
+        }
+        t = (cut + 1).max(t);
+        while t <= y1 && !left_hit[t as usize] {
+            t += 1;
+        }
+    }
+    if t <= y1 {
+        pieces.push((t, y1));
+    }
+    pieces
+        .into_iter()
+        .filter(|&(a, b)| b - a + 1 >= min_piece)
+        .collect()
+}
+
 /// 从谱表核扩到内容边界.
 /// 宽松/紧密判定: 向邻行**五线核**方向搜时, 是否先遇到「整行完全无黑像素」.
 /// - 宽松 (五线之前能见到空白): 扩到分隔空白为止 (含踏板/指法; 细白缝可桥接)
@@ -439,6 +660,8 @@ fn system_extents(ink: &[Vec<bool>], cores: &[(i32, i32)], margin: i32) -> Vec<(
         .iter()
         .map(|row| !row.iter().any(|&x| x))
         .collect();
+    let left_blank: Vec<bool> = left_band_hit_rows(ink).into_iter().map(|hit| !hit).collect();
+    let left_sep = (typical_line_gap(&find_staff_line_ys(ink)) * 2 + 4).clamp(12, 40);
     // 谱表与 Ped. 之间细白缝不截断; 达到此长度才算行间分隔
     let sep_blank = 3i32;
 
@@ -463,6 +686,8 @@ fn system_extents(ink: &[Vec<bool>], cores: &[(i32, i32)], margin: i32) -> Vec<(
             let mid = (cb + cores[i + 1].0) / 2;
             mid.min(hard_bot).max(cb)
         };
+        let y1_left = expand_to_separator(&left_blank, cb, hard_bot, 1, left_sep);
+        y1 = y1.min(y1_left.max(cb));
 
         let mut y0 = if loose_up {
             expand_to_separator(&row_blank, ct, hard_top, -1, sep_blank)
@@ -470,6 +695,8 @@ fn system_extents(ink: &[Vec<bool>], cores: &[(i32, i32)], margin: i32) -> Vec<(
             let mid = (cores[i - 1].1 + ct) / 2;
             (mid + 1).max(hard_top).min(ct)
         };
+        let y0_left = expand_to_separator(&left_blank, ct, hard_top, -1, left_sep);
+        y0 = y0.max(y0_left.min(ct));
 
         let room_up = (y0 - hard_top).max(0);
         let room_down = (hard_bot - y1).max(0);
@@ -816,7 +1043,11 @@ fn pick_body_systems(systems: Vec<(i32, i32)>, page_h: i32) -> Vec<(i32, i32)> {
     }
 }
 
-pub fn detect_bands(image: &RgbImage, ink_threshold: i32, margin: i32) -> Vec<Band> {
+pub fn detect_bands(
+    image: &RgbImage,
+    ink_threshold: i32,
+    margin: i32,
+) -> Vec<Band> {
     let threshold = ink_threshold.clamp(1, 254) as u8;
     let ink = to_ink(image, threshold);
     let h = ink.len() as i32;
@@ -824,9 +1055,12 @@ pub fn detect_bands(image: &RgbImage, ink_threshold: i32, margin: i32) -> Vec<Ba
         return Vec::new();
     }
 
-    // 细碎核 (五线配对 + 大括号) → 再按宽松/紧密扩边界, 硬停在邻核
+    // 五线谱表 → 左侧连通收成谱行 → 扩边界后再按块内左侧断开切开
     let cores = collect_system_cores(&ink);
-    let systems_content = system_extents(&ink, &cores, margin);
+    let systems_content = split_by_left_disconnects(
+        &ink,
+        system_extents(&ink, &cores, margin),
+    );
     let mut systems = filter_short_systems(systems_content.clone());
     if systems.is_empty() && !systems_content.is_empty() {
         let mut fallback = systems_content;
@@ -1076,5 +1310,277 @@ mod tests {
             bands.iter().all(|b| b.kind != "footer"),
             "page number must not become footer, got {bands:?}"
         );
+    }
+
+    fn paint_staff(img: &mut RgbImage, top: u32) {
+        let h = img.height();
+        for i in 0..5u32 {
+            let y = top + i * 8;
+            for x in 24..380 {
+                img.put_pixel(x, y, Rgb([0, 0, 0]));
+                if y + 1 < h {
+                    img.put_pixel(x, y + 1, Rgb([0, 0, 0]));
+                }
+            }
+        }
+    }
+
+    fn paint_barline(img: &mut RgbImage, x: u32, y0: u32, y1: u32) {
+        let h = img.height();
+        for y in y0..=y1.min(h.saturating_sub(1)) {
+            img.put_pixel(x, y, Rgb([0, 0, 0]));
+            if x + 1 < img.width() {
+                img.put_pixel(x + 1, y, Rgb([0, 0, 0]));
+            }
+        }
+    }
+
+    fn system_count(img: &RgbImage) -> (usize, Vec<Band>) {
+        let bands = detect_bands(img, 200, 20);
+        let n = bands.iter().filter(|b| b.kind == "system").count();
+        (n, bands)
+    }
+
+    #[test]
+    fn connected_staves_merge_into_one_system() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        paint_barline(&mut img, 10, 80, 380);
+        let (n, bands) = system_count(&img);
+        assert_eq!(n, 1, "left connector should merge all four staves, got {bands:?}");
+    }
+
+    #[test]
+    fn unconnected_staves_stay_separate() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        let (n, bands) = system_count(&img);
+        assert!(
+            n >= 2,
+            "without a left connector, systems must stay separate, got {bands:?}"
+        );
+    }
+
+    #[test]
+    fn local_barlines_do_not_glue_two_systems() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        // 每行自己的行首竖线, 行间缝没有连通
+        paint_barline(&mut img, 10, 80, 173);
+        paint_barline(&mut img, 10, 280, 373);
+        let (n, bands) = system_count(&img);
+        assert_eq!(
+            n, 2,
+            "two systems with local barlines must stay two blocks, got {bands:?}"
+        );
+    }
+
+    #[test]
+    fn internal_left_gap_splits_a_merged_block() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        paint_barline(&mut img, 10, 80, 173);
+        paint_barline(&mut img, 10, 280, 373);
+        // 行间缝中央有墨, 整行空白检测会失败, 只能靠块内左侧断开切开
+        for y in 210..220 {
+            for x in 120..300 {
+                img.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        let ink = to_ink(&img, 200);
+        let split = split_by_left_disconnects(&ink, vec![(60, 400)]);
+        assert!(
+            split.len() >= 2,
+            "left-side gap inside a block must split it, got {split:?}"
+        );
+        let (n, bands) = system_count(&img);
+        assert_eq!(
+            n, 2,
+            "detect must also keep two systems, got {bands:?}"
+        );
+    }
+
+    /// 左侧竖线只要 8 连通穿过行间缝即可, 不要求单列覆盖率.
+    #[test]
+    fn jagged_one_pixel_connector_still_merges() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        let mut x = 52u32;
+        for y in 80..=380 {
+            img.put_pixel(x, y, Rgb([0, 0, 0]));
+            if y % 3 == 0 {
+                x = if x == 52 { 53 } else { 52 };
+            }
+        }
+        let (n, bands) = system_count(&img);
+        assert_eq!(n, 1, "jagged left connector should still merge, got {bands:?}");
+    }
+
+    #[test]
+    fn full_page_gutter_does_not_glue_systems() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        paint_barline(&mut img, 8, 0, 599);
+        let (n, bands) = system_count(&img);
+        assert!(
+            n >= 2,
+            "full-page gutter must not glue systems, got {bands:?}"
+        );
+    }
+
+    fn overlay_bands(img: &RgbImage, bands: &[Band]) -> RgbImage {
+        let mut out = img.clone();
+        let colors = [
+            [255u8, 80, 80],
+            [80, 180, 255],
+            [255, 200, 40],
+            [80, 220, 120],
+            [200, 80, 255],
+        ];
+        let mut si = 0usize;
+        for b in bands {
+            if b.kind != "system" {
+                continue;
+            }
+            let [r, g, bl] = colors[si % colors.len()];
+            si += 1;
+            let y0 = b.y0.max(0) as u32;
+            let y1 = b.y1.max(0) as u32;
+            for y in y0..=y1.min(out.height().saturating_sub(1)) {
+                for x in 0..out.width() {
+                    let p = out.get_pixel_mut(x, y);
+                    p.0[0] = ((p.0[0] as u16 + r as u16) / 2) as u8;
+                    p.0[1] = ((p.0[1] as u16 + g as u16) / 2) as u8;
+                    p.0[2] = ((p.0[2] as u16 + bl as u16) / 2) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    fn diagnose_page(img: &RgbImage, threshold: i32, tag: &str, out_dir: &std::path::Path) {
+        let ink = to_ink(img, threshold.clamp(1, 254) as u8);
+        let h = ink.len() as i32;
+        let w = if h > 0 { ink[0].len() } else { 0 };
+        let (x_lo, x_hi) = left_probe_x_range(w);
+        let line_ys = find_staff_line_ys(&ink);
+        let staves = group_staves(&line_ys);
+        let merged = merge_staves_by_left_ink(&ink, staves.clone());
+        let split = split_by_left_disconnects(&ink, merged.clone());
+        let bands = detect_bands(img, threshold, 20);
+        let systems: Vec<&Band> = bands.iter().filter(|b| b.kind == "system").collect();
+        println!(
+            "=== {tag} {w}x{h} thr={threshold} probe={x_lo}..{x_hi} lines={} staves={} merged={} split={} systems={} ===",
+            line_ys.len(),
+            staves.len(),
+            merged.len(),
+            split.len(),
+            systems.len()
+        );
+        for (i, &(t, b)) in staves.iter().enumerate() {
+            let nxt = staves.get(i + 1).copied();
+            let conn = nxt
+                .map(|(nt, _)| left_ink_connects(&ink, b, nt, 8))
+                .unwrap_or(false);
+            println!(
+                "  staff {i}: {t}-{b} h={} next_conn={conn}",
+                b - t + 1
+            );
+        }
+        println!("  merged: {merged:?}");
+        println!("  split:  {split:?}");
+        let left_hit = left_band_hit_rows(&ink);
+        let mut br = 0i32;
+        let mut bs: Option<i32> = None;
+        for y in 0..h {
+            if !left_hit[y as usize] {
+                if bs.is_none() {
+                    bs = Some(y);
+                }
+                br += 1;
+            } else if let Some(s) = bs.take() {
+                if br >= 12 {
+                    println!("  left-blank {s}-{} n={br}", y - 1);
+                }
+                br = 0;
+            }
+        }
+        if let Some(s) = bs {
+            if br >= 12 {
+                println!("  left-blank {s}-{} n={br}", h - 1);
+            }
+        }
+        for (i, b) in systems.iter().enumerate() {
+            println!("  system {i}: {}-{} h={}", b.y0, b.y1, b.y1 - b.y0 + 1);
+        }
+        let vis = overlay_bands(img, &bands);
+        let _ = vis.save(out_dir.join(format!("{tag}.png")));
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_nma_k537() {
+        let pdf = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("NMA K537.pdf");
+        if !pdf.is_file() {
+            eprintln!("skip: missing {}", pdf.display());
+            return;
+        }
+        let dll = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/pdfium.dll");
+        if !std::path::Path::new(dll).is_file() {
+            eprintln!("skip: missing pdfium");
+            return;
+        }
+        unsafe {
+            std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", dll);
+        }
+        let pdfium = crate::pdf::bind_pdfium().expect("pdfium");
+        let document = pdfium
+            .load_pdf_from_file(&pdf, None)
+            .expect("open K537");
+        let n = document.pages().len() as usize;
+        println!("K537 pages={n}");
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_k537_debug");
+        let _ = std::fs::create_dir_all(&out_dir);
+        // 跳过封面, 抽几页总谱
+        let pages: Vec<usize> = [2, 3, 4, 5, 8, 12]
+            .into_iter()
+            .filter(|&i| i < n)
+            .collect();
+        for i in pages {
+            let page = document.pages().get(i as u16).expect("page");
+            let cfg = pdfium_render::prelude::PdfRenderConfig::new()
+                .scale_page_by_factor(3.0);
+            let image = page
+                .render_with_config(&cfg)
+                .expect("render")
+                .as_image()
+                .into_rgb8();
+            diagnose_page(&image, 200, &format!("p{:02}_t200", i + 1), &out_dir);
+            diagnose_page(&image, 100, &format!("p{:02}_t100", i + 1), &out_dir);
+        }
     }
 }

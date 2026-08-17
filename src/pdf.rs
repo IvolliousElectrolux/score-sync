@@ -78,7 +78,7 @@ fn find_pdfium_path() -> Option<PathBuf> {
     find_in_path_env()
 }
 
-fn bind_pdfium() -> Result<Pdfium, String> {
+pub(crate) fn bind_pdfium() -> Result<Pdfium, String> {
     let path = find_pdfium_path().ok_or_else(|| {
         format!(
             "找不到 {} — 请把它放在程序同目录下, 或安装后加入系统 PATH, \

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use image::RgbImage;
 
-use crate::staff_detect::{detect_bands, Band};
+use crate::staff_detect::{detect_bands, Band, StaffGrouping};
 use mask_tool::color_prefs::MaskColorPrefs;
 use mask_tool::mask::MaskRect;
 use score_video::model::TimelineSnapshot;
@@ -201,6 +201,8 @@ pub struct DocState {
     pub current_page_index: usize,
     pub margin: i32,
     pub ink_threshold: i32,
+    /// 旧工程字段, 识别已不再使用.
+    pub staff_grouping: StaffGrouping,
     /// 组合蒙版: key = group_id, 坐标相对该组竖向拼合图
     pub group_masks: HashMap<String, Vec<MaskRect>>,
     /// 蒙版/画笔默认色、透明度与最近使用色
@@ -256,6 +258,7 @@ impl DocState {
             current_page_index: self.current_page_index,
             margin: self.margin,
             ink_threshold: self.ink_threshold,
+            staff_grouping: self.staff_grouping,
             group_masks: self.group_masks.clone(),
             mask_prefs: self.mask_prefs.clone(),
             groups_manual_order: self.groups_manual_order,
@@ -942,6 +945,7 @@ impl DocState {
             img_h: page.img_h,
             ink_threshold: self.ink_threshold,
             margin: self.margin,
+            staff_grouping: self.staff_grouping,
             regions: regions
                 .into_iter()
                 .map(|r| crate::detect_cache::CachedRegion {

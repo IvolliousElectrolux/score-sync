@@ -1,6 +1,6 @@
 //! 曲谱同步 / Score Sync (GPUI).
 //!
-//! 打开图片或 PDF, 自动识别大谱表行, 跨页组合、蒙版与加底色, 导出竖向拼接切片.
+//! 打开图片或 PDF, 自动识别谱表行, 跨页组合、蒙版与加底色, 导出竖向拼接切片.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
