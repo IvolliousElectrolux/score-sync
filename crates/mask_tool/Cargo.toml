@@ -1,6 +1,6 @@
 [package]
 name = "mask_tool"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 description = "半透明白色蒙版工具 (GPUI)"
 

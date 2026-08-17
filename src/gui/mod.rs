@@ -107,7 +107,8 @@ pub(crate) struct ScoreSyncApp {
     score_video: Entity<ScoreVideoApp>,
     /// 当前蒙版编辑目标: group_id (拼合图)
     mask_target: Option<String>,
-    /// 当前蒙版预览图相对拼合图的纵向偏移 (叠加工程底色补边时非零)
+    /// 当前蒙版预览图相对拼合图的横向/纵向偏移 (叠加工程底色补边时非零)
+    mask_preview_hoff: i64,
     mask_preview_voff: i64,
     dialog: Option<DialogKind>,
     /// 标签右键菜单
@@ -222,6 +223,7 @@ impl ScoreSyncApp {
             apply_bg,
             score_video,
             mask_target: None,
+            mask_preview_hoff: 0,
             mask_preview_voff: 0,
             dialog: None,
             tab_menu: None,

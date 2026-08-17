@@ -416,13 +416,14 @@ impl ScoreSyncApp {
             });
             return;
         }
-        let Some((rgb, voff)) = self.doc.compose_group_preview(&gid) else {
+        let Some((rgb, hoff, voff)) = self.doc.compose_group_preview(&gid) else {
             self.mask_tool.update(cx, |m, cx| {
                 m.set_embed_side_width(side_w);
                 m.clear_view("无法拼合该组合", cx);
             });
             return;
         };
+        self.mask_preview_hoff = hoff;
         self.mask_preview_voff = voff;
         let masks: Vec<MaskRect> = self
             .doc
@@ -430,7 +431,7 @@ impl ScoreSyncApp {
             .iter()
             .map(|m| {
                 let mut m = m.clone();
-                m.offset_y(voff as i32);
+                m.translate(hoff as i32, voff as i32);
                 m
             })
             .collect();
@@ -470,11 +471,11 @@ impl ScoreSyncApp {
         let (masks, prefs) = self
             .mask_tool
             .update(cx, |m, _| (m.masks_clone(), m.color_prefs()));
-        let voff = self.mask_preview_voff;
+        let (hoff, voff) = (self.mask_preview_hoff, self.mask_preview_voff);
         let masks: Vec<MaskRect> = masks
             .into_iter()
             .map(|mut m| {
-                m.offset_y(-(voff as i32));
+                m.translate(-(hoff as i32), -(voff as i32));
                 m
             })
             .collect();

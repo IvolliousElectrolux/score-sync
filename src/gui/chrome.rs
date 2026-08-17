@@ -652,7 +652,7 @@ impl ScoreSyncApp {
                                 self.dialog = Some(DialogKind::Info {
                                     title: "底色不适用".into(),
                                     body: format!(
-                                        "{e}\n已取消启用. 请换更大底色或检查谱面尺寸."
+                                        "{e}\n已取消启用. 请换更大底色 (总谱按高度定画布时左右也要盖住) 或检查谱面尺寸."
                                     ),
                                 });
                                 cx.notify();

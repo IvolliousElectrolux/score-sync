@@ -86,7 +86,7 @@ impl ApplyBgApp {
             progress_total: 0,
             running: false,
             hint: format!(
-                "裁切宽=谱面宽, 高=宽×比例高/比例宽. 路径记入 %APPDATA%\\apply_bg; 比例仅在修改或恢复默认后保存 (默认 {DEFAULT_ASPECT_W}:{DEFAULT_ASPECT_H})."
+                "谱面完整装进比例画布: 装得下则宽=谱面宽上下补边, 上下超了则高=谱面高左右补边. 路径记入 %APPDATA%\\apply_bg; 比例仅在修改或恢复默认后保存 (默认 {DEFAULT_ASPECT_W}:{DEFAULT_ASPECT_H})."
             )
             .into(),
         }

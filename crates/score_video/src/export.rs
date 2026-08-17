@@ -88,18 +88,19 @@ pub struct ExportOptions {
 }
 
 impl ExportOptions {
-    /// 分辨率不再让用户选: 加了底色后素材池里所有图片已经统一成同一个尺寸
-    /// (拼合图 + 底色补边后的画布大小), 直接取第一张的实际分辨率即可, 与
-    /// 项目里的图片完全一致. 素材池为空时给一个保守的默认值 (此时也导不出
-    /// 任何内容, 不会真正用到).
+    /// 分辨率不再让用户选: 加底色后各图比例相同, 但高矮谱面像素可能不同
+    /// (contain: 宽条上下补边、高图左右补边). 取池中面积最大的一张, 其余
+    /// dump 时 `fit_pad` 装进同一画布. 素材池为空时给一个保守的默认值
+    /// (此时也导不出任何内容, 不会真正用到).
     ///
     /// libx264 + `yuv420p` 要求宽高都是偶数, 奇数分辨率会在打开编码器时直接
     /// 报 `Error while opening encoder - maybe incorrect parameters such as
     /// bit_rate, rate, width or height`. 这里向上取偶, 再在 dump 时用黑边补齐.
     pub fn size_from_pool(pool: &[MaterialItem]) -> (u32, u32) {
         let (w, h) = pool
-            .first()
+            .iter()
             .map(|m| (m.width, m.height))
+            .max_by_key(|&(w, h)| (w as u64).saturating_mul(h as u64))
             .unwrap_or((1920, 1080));
         (even_dim(w), even_dim(h))
     }

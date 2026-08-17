@@ -436,20 +436,20 @@ impl DocState {
     }
 
     /// 拼合图预览 (供蒙版/视频面板显示): 若已启用工程底色, 叠加底色预览
-    /// (仅在需要补边时改变画布高度, 不烧入蒙版). 返回 (预览图, 谱面在预览图
-    /// 中的纵向偏移量, 供调用方换算蒙版坐标).
-    pub fn compose_group_preview(&self, group_id: &str) -> Option<(RgbImage, i64)> {
+    /// (contain: 上下或左右补边, 不烧入蒙版). 返回 (预览图, 谱面在预览图
+    /// 中的横向/纵向偏移, 供调用方换算蒙版坐标).
+    pub fn compose_group_preview(&self, group_id: &str) -> Option<(RgbImage, i64, i64)> {
         let sheet = self.compose_group(group_id)?;
         if !self.bg_enabled {
-            return Some((sheet, 0));
+            return Some((sheet, 0, 0));
         }
         let Some(bg) = self.bg_image.as_ref() else {
-            return Some((sheet, 0));
+            return Some((sheet, 0, 0));
         };
         match apply_bg::process::composite_preview(&sheet, bg, self.bg_aspect_w, self.bg_aspect_h)
         {
-            Ok((canvas, voff)) => Some((canvas, voff)),
-            Err(_) => Some((sheet, 0)),
+            Ok((canvas, hoff, voff)) => Some((canvas, hoff, voff)),
+            Err(_) => Some((sheet, 0, 0)),
         }
     }
 

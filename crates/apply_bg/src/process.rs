@@ -1,4 +1,4 @@
-//! 谱面加底色并按指定比例裁切 (宽=谱面宽) — 共享处理逻辑.
+//! 谱面加底色并按指定比例裁切 — 谱面完整装进画布 (contain).
 
 use std::fs;
 use std::io;
@@ -95,43 +95,28 @@ pub fn list_images(folder: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// 谱面居中叠在底色上, 再按宽=谱面宽、高=宽×aspect_h/aspect_w 居中裁切.
-/// 只构造裁切区域大小的画布, 不复制整幅底色.
-pub fn composite_and_crop(
-    sheet: &RgbImage,
-    bg: &RgbImage,
-    aspect_w: u32,
-    aspect_h: u32,
-) -> Result<RgbImage, String> {
-    if aspect_w == 0 || aspect_h == 0 {
-        return Err("比例宽高必须为正整数".into());
+/// 把谱面完整装进目标比例的画布.
+/// 谱面相对更宽 (装得下高度) → 宽=谱面宽, 上下补边;
+/// 谱面相对更高 (按宽会对上下裁切) → 高=谱面高, 左右补边.
+pub fn frame_size(sw: u32, sh: u32, aspect_w: u32, aspect_h: u32) -> (u32, u32) {
+    let sw = sw.max(1);
+    let sh = sh.max(1);
+    let h_from_w = ((sw as f64) * (aspect_h as f64) / (aspect_w as f64)).round() as u32;
+    if h_from_w >= sh {
+        (sw, h_from_w.max(1))
+    } else {
+        let w_from_h = ((sh as f64) * (aspect_w as f64) / (aspect_h as f64)).round() as u32;
+        (w_from_h.max(1), sh)
     }
-    let (sw, sh) = sheet.dimensions();
-    let (bw, bh) = bg.dimensions();
+}
 
-    if bw < sw || bh < sh {
-        return Err(format!("底色 ({bw}x{bh}) 无法完全盖住谱面 ({sw}x{sh})"));
-    }
-
-    let ox = ((bw - sw) / 2) as i64;
-    let oy = ((bh - sh) / 2) as i64;
-
-    let crop_w = sw;
-    let crop_h = ((sw as f64) * (aspect_h as f64) / (aspect_w as f64)).round() as u32;
-    if crop_h < 1 {
-        return Err("计算出的裁切高度无效".into());
-    }
-    if crop_h > bh || crop_w > bw {
-        return Err(format!("裁切区域 {crop_w}x{crop_h} 超出底色 {bw}x{bh}"));
-    }
-
+fn clamp_centered_rect(bw: u32, bh: u32, crop_w: u32, crop_h: u32) -> (i64, i64, i64, i64) {
     let cx = (bw / 2) as i64;
     let cy = (bh / 2) as i64;
     let mut left = cx - (crop_w / 2) as i64;
     let mut top = cy - (crop_h / 2) as i64;
     let mut right = left + crop_w as i64;
     let mut bottom = top + crop_h as i64;
-
     if left < 0 {
         right -= left;
         left = 0;
@@ -148,27 +133,51 @@ pub fn composite_and_crop(
         top -= bottom - bh as i64;
         bottom = bh as i64;
     }
+    (left, top, right, bottom)
+}
 
-    let left_u = left as u32;
-    let top_u = top as u32;
+/// 谱面居中叠在底色上, 再按目标比例取一块完整装得下谱面的画布 (contain).
+/// 只构造该区域大小, 不复制整幅底色.
+pub fn composite_and_crop(
+    sheet: &RgbImage,
+    bg: &RgbImage,
+    aspect_w: u32,
+    aspect_h: u32,
+) -> Result<RgbImage, String> {
+    if aspect_w == 0 || aspect_h == 0 {
+        return Err("比例宽高必须为正整数".into());
+    }
+    let (sw, sh) = sheet.dimensions();
+    let (bw, bh) = bg.dimensions();
+
+    if bw < sw || bh < sh {
+        return Err(format!("底色 ({bw}x{bh}) 无法完全盖住谱面 ({sw}x{sh})"));
+    }
+
+    let (crop_w, crop_h) = frame_size(sw, sh, aspect_w, aspect_h);
+    if crop_h > bh || crop_w > bw {
+        return Err(format!("裁切区域 {crop_w}x{crop_h} 超出底色 {bw}x{bh}"));
+    }
+
+    let ox = ((bw - sw) / 2) as i64;
+    let oy = ((bh - sh) / 2) as i64;
+    let (left, top, right, bottom) = clamp_centered_rect(bw, bh, crop_w, crop_h);
+
     let mut canvas =
-        imageops::crop_imm(bg, left_u, top_u, (right - left) as u32, (bottom - top) as u32)
+        imageops::crop_imm(bg, left as u32, top as u32, (right - left) as u32, (bottom - top) as u32)
             .to_image();
     imageops::overlay(&mut canvas, sheet, ox - left, oy - top);
     Ok(canvas)
 }
 
-/// 谱面居中叠底色的"预览"版本 (蒙版/视频面板用): 不做最终裁切, 只在目标比例
-/// 需要比谱面更高的画布时, 于上下补出底色, 让预览与最终导出的底色效果趋近一致;
-/// 若目标比例会裁边 (裁切高度 <= 谱面高度) 则直接返回原图, 不改变画布尺寸,
-/// 从而保证蒙版坐标系与 `compose_group` 输出保持一致 (宽度始终等于谱面宽度).
-/// 返回 (预览图, 谱面在预览图中的纵向偏移量).
+/// 谱面居中叠底色的预览 (蒙版用): 画布与终稿同一套 contain 比例,
+/// 上下或左右补出底色. 返回 (预览图, 谱面在预览图中的横向/纵向偏移).
 pub fn composite_preview(
     sheet: &RgbImage,
     bg: &RgbImage,
     aspect_w: u32,
     aspect_h: u32,
-) -> Result<(RgbImage, i64), String> {
+) -> Result<(RgbImage, i64, i64), String> {
     if aspect_w == 0 || aspect_h == 0 {
         return Err("比例宽高必须为正整数".into());
     }
@@ -178,27 +187,22 @@ pub fn composite_preview(
         return Err(format!("底色 ({bw}x{bh}) 无法完全盖住谱面 ({sw}x{sh})"));
     }
 
-    let crop_h = ((sw as f64) * (aspect_h as f64) / (aspect_w as f64)).round() as u32;
-    if crop_h <= sh || crop_h > bh {
-        // 会裁边 (或底色不够高无法补边预览): 预览不改变画布, 与拼合图一致.
-        return Ok((sheet.clone(), 0));
+    let (crop_w, crop_h) = frame_size(sw, sh, aspect_w, aspect_h);
+    if (crop_w == sw && crop_h == sh) || crop_w > bw || crop_h > bh {
+        return Ok((sheet.clone(), 0, 0));
     }
 
     let ox = ((bw - sw) / 2) as i64;
     let oy = ((bh - sh) / 2) as i64;
-    let cy = (bh / 2) as i64;
-    let mut top = cy - (crop_h / 2) as i64;
-    if top < 0 {
-        top = 0;
-    }
-    if top + crop_h as i64 > bh as i64 {
-        top = bh as i64 - crop_h as i64;
-    }
+    let (left, top, right, bottom) = clamp_centered_rect(bw, bh, crop_w, crop_h);
+    let hoff = ox - left;
     let voff = oy - top;
 
-    let mut canvas = imageops::crop_imm(bg, ox as u32, top as u32, sw, crop_h).to_image();
-    imageops::overlay(&mut canvas, sheet, 0, voff);
-    Ok((canvas, voff))
+    let mut canvas =
+        imageops::crop_imm(bg, left as u32, top as u32, (right - left) as u32, (bottom - top) as u32)
+            .to_image();
+    imageops::overlay(&mut canvas, sheet, hoff, voff);
+    Ok((canvas, hoff, voff))
 }
 
 fn process_one(
@@ -309,4 +313,50 @@ pub fn process_folder(
         elapsed_secs: t0.elapsed().as_secs_f64(),
         out_dir: out_dir.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgb;
+
+    fn solid(w: u32, h: u32, r: u8, g: u8, b: u8) -> RgbImage {
+        RgbImage::from_pixel(w, h, Rgb([r, g, b]))
+    }
+
+    #[test]
+    fn frame_size_wide_sheet_pads_vertically() {
+        assert_eq!(frame_size(2000, 400, 16, 9), (2000, 1125));
+        assert_eq!(frame_size(2000, 400, 2560, 1440), (2000, 1125));
+    }
+
+    #[test]
+    fn frame_size_tall_sheet_pads_horizontally() {
+        assert_eq!(frame_size(2000, 2500, 16, 9), (4444, 2500));
+        assert_eq!(frame_size(2000, 2500, 2560, 1440), (4444, 2500));
+    }
+
+    #[test]
+    fn frame_size_already_matching_stays() {
+        assert_eq!(frame_size(1920, 1080, 16, 9), (1920, 1080));
+    }
+
+    #[test]
+    fn composite_contain_matches_frame_size() {
+        let bg = solid(8000, 8000, 10, 20, 30);
+        let wide = solid(2000, 400, 200, 200, 200);
+        let tall = solid(2000, 2500, 200, 200, 200);
+        let out_w = composite_and_crop(&wide, &bg, 16, 9).unwrap();
+        let out_t = composite_and_crop(&tall, &bg, 16, 9).unwrap();
+        assert_eq!(out_w.dimensions(), (2000, 1125));
+        assert_eq!(out_t.dimensions(), (4444, 2500));
+        let (pw, hoff_w, voff_w) = composite_preview(&wide, &bg, 16, 9).unwrap();
+        let (pt, hoff_t, voff_t) = composite_preview(&tall, &bg, 16, 9).unwrap();
+        assert_eq!(pw.dimensions(), out_w.dimensions());
+        assert_eq!(pt.dimensions(), out_t.dimensions());
+        assert_eq!(hoff_w, 0);
+        assert!(voff_w > 0);
+        assert!(hoff_t > 0);
+        assert_eq!(voff_t, 0);
+    }
 }
