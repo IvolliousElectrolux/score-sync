@@ -4326,6 +4326,7 @@ impl ScoreSyncApp {
                     .text_color(fg)
                     .text_sm()
                     .cursor_pointer()
+                    .occlude()
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .when(dragging, |d| d.opacity(0.35))
@@ -4336,61 +4337,25 @@ impl ScoreSyncApp {
                         d.border_r_2().border_color(rgb(0xf59e0b))
                     })
                     .child(Self::measure_item_bounds(cx.entity(), idx, "tab"))
-                    .child(
-                        div()
-                            .child(tab.label.clone())
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                                    if ev.click_count >= 1 {
-                                        this.switch_page(idx, cx);
-                                    }
-                                    let mx = f32::from(ev.position.x);
-                                    let my = f32::from(ev.position.y);
-                                    let (ox, oy) = Self::item_origin(
-                                        this.tab_bounds.get(&idx),
-                                        mx,
-                                        my,
-                                    );
-                                    this.tab_add_press = false;
-                                    this.drag = Some(DragKind::TabReorder {
-                                        from: idx,
-                                        to: idx,
-                                        line_at: None,
-                                        line_after: false,
-                                        start_x: mx,
-                                        start_y: my,
-                                        origin_x: ox,
-                                        origin_y: oy,
-                                        x: mx,
-                                        y: my,
-                                        armed: false,
-                                    });
-                                    cx.notify();
-                                }),
-                            )
-                            .on_mouse_up(
-                                MouseButton::Right,
-                                cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
-                                    this.tab_menu = Some(TabContextMenu {
-                                        page_index: idx,
-                                        x: f32::from(ev.position.x),
-                                        y: f32::from(ev.position.y),
-                                    });
-                                    cx.notify();
-                                }),
-                            ),
-                    )
+                    .child(tab.label.clone())
                     .child(
                         div()
                             .id(SharedString::from(format!("tab-close-{idx}")))
                             .px_1()
                             .rounded_sm()
                             .hover(|s| s.bg(rgb(0x94a3b8)))
+                            .occlude()
                             .child("×")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                }),
+                            )
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     // 拖拽排序松手落在叉上时不关页
                                     if matches!(this.drag, Some(DragKind::TabReorder { .. })) {
                                         return;
@@ -4398,6 +4363,48 @@ impl ScoreSyncApp {
                                     this.close_page(idx, cx);
                                 }),
                             ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            if matches!(this.drag, Some(DragKind::TabHScroll { .. })) {
+                                return;
+                            }
+                            this.switch_page(idx, cx);
+                            let mx = f32::from(ev.position.x);
+                            let my = f32::from(ev.position.y);
+                            let (ox, oy) = Self::item_origin(
+                                this.tab_bounds.get(&idx),
+                                mx,
+                                my,
+                            );
+                            this.tab_add_press = false;
+                            this.drag = Some(DragKind::TabReorder {
+                                from: idx,
+                                to: idx,
+                                line_at: None,
+                                line_after: false,
+                                start_x: mx,
+                                start_y: my,
+                                origin_x: ox,
+                                origin_y: oy,
+                                x: mx,
+                                y: my,
+                                armed: false,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
+                            this.tab_menu = Some(TabContextMenu {
+                                page_index: idx,
+                                x: f32::from(ev.position.x),
+                                y: f32::from(ev.position.y),
+                            });
+                            cx.notify();
+                        }),
                     ),
             );
         }

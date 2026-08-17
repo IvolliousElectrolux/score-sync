@@ -70,6 +70,28 @@ fn longest_black_run(row: &[bool]) -> usize {
     best
 }
 
+fn longest_black_run_start(row: &[bool]) -> Option<usize> {
+    let mut best_len = 0usize;
+    let mut best_start = 0usize;
+    let mut cur = 0usize;
+    let mut cur_start = 0usize;
+    for (x, &v) in row.iter().enumerate() {
+        if v {
+            if cur == 0 {
+                cur_start = x;
+            }
+            cur += 1;
+            if cur > best_len {
+                best_len = cur;
+                best_start = cur_start;
+            }
+        } else {
+            cur = 0;
+        }
+    }
+    (best_len > 0).then_some(best_start)
+}
+
 fn n_transitions(row: &[bool]) -> usize {
     if row.len() < 2 {
         return 0;
@@ -388,17 +410,43 @@ fn dedup_overlapping_cores(cores: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     dedup
 }
 
-/// 只扫左侧括线 / 行首小节线. 太宽会把音符、力度记号当成桥; 右侧小节线常常不贯穿.
-fn left_probe_x_range(w: usize) -> (usize, usize) {
+/// 只扫左侧括线 / 行首小节线. 默认约 14%; 首页缩进时按最靠右的五线左缘最多扩到约 24%.
+fn left_probe_x_range(ink: &[Vec<bool>]) -> (usize, usize) {
+    if ink.is_empty() {
+        return (0, 0);
+    }
+    let w = ink[0].len();
     if w == 0 {
         return (0, 0);
     }
     let x_lo = ((w as f32 * 0.003).round() as usize)
         .max(1)
         .min(w.saturating_sub(1));
-    let x_hi = ((w as f32 * 0.14).round() as usize)
+    let mut x_hi = ((w as f32 * 0.14).round() as usize)
         .max(x_lo + 8)
         .min(w);
+    let cap = ((w as f32 * 0.24).round() as usize).max(x_hi).min(w);
+    let mut starts: Vec<usize> = ink
+        .iter()
+        .filter(|row| is_staff_line_row(row))
+        .filter_map(|row| longest_black_run_start(row))
+        .filter(|&x| x >= x_lo && x < cap)
+        .collect();
+    if !starts.is_empty() {
+        starts.sort_unstable();
+        // 同一缩进的五线会扎堆; 单根杂线不拉宽探测带.
+        let mut i = 0;
+        while i < starts.len() {
+            let mut j = i + 1;
+            while j < starts.len() && starts[j] - starts[i] <= 12 {
+                j += 1;
+            }
+            if j - i >= 3 {
+                x_hi = x_hi.max((starts[j - 1] + 8).min(cap));
+            }
+            i = j;
+        }
+    }
     (x_lo, x_hi)
 }
 
@@ -438,8 +486,7 @@ fn left_ink_connects(ink: &[Vec<bool>], y_upper: i32, y_lower: i32, pad: i32) ->
         return false;
     }
     let h = ink.len() as i32;
-    let w = ink[0].len();
-    let (x_lo, x_hi) = left_probe_x_range(w);
+    let (x_lo, x_hi) = left_probe_x_range(ink);
     if x_hi <= x_lo {
         return false;
     }
@@ -545,8 +592,7 @@ fn left_band_hit_rows(ink: &[Vec<bool>]) -> Vec<bool> {
     if ink.is_empty() {
         return Vec::new();
     }
-    let w = ink[0].len();
-    let (x_lo, x_hi) = left_probe_x_range(w);
+    let (x_lo, x_hi) = left_probe_x_range(ink);
     if x_hi <= x_lo {
         return vec![false; ink.len()];
     }
@@ -1341,6 +1387,52 @@ mod tests {
         (n, bands)
     }
 
+    fn paint_staff_from(img: &mut RgbImage, top: u32, x0: u32) {
+        let h = img.height();
+        let x1 = img.width().saturating_sub(20).max(x0 + 8);
+        for i in 0..5u32 {
+            let y = top + i * 8;
+            for x in x0..x1 {
+                img.put_pixel(x, y, Rgb([0, 0, 0]));
+                if y + 1 < h {
+                    img.put_pixel(x, y + 1, Rgb([0, 0, 0]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indented_left_barline_still_merges() {
+        // 首页缩进: 五线从约 20% 处开始, 默认 14% 探测带够不到行首竖线.
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff_from(&mut img, 80, 80);
+        paint_staff_from(&mut img, 140, 80);
+        paint_staff_from(&mut img, 200, 80);
+        paint_staff_from(&mut img, 260, 80);
+        paint_barline(&mut img, 78, 80, 293);
+        let (n, bands) = system_count(&img);
+        assert_eq!(
+            n, 1,
+            "indented system barline must still merge, got {bands:?}"
+        );
+    }
+
+    #[test]
+    fn indented_local_barlines_stay_two_systems() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff_from(&mut img, 80, 80);
+        paint_staff_from(&mut img, 140, 80);
+        paint_staff_from(&mut img, 280, 80);
+        paint_staff_from(&mut img, 340, 80);
+        paint_barline(&mut img, 78, 80, 173);
+        paint_barline(&mut img, 78, 280, 373);
+        let (n, bands) = system_count(&img);
+        assert_eq!(
+            n, 2,
+            "indented local barlines must not glue two systems, got {bands:?}"
+        );
+    }
+
     #[test]
     fn connected_staves_merge_into_one_system() {
         let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
@@ -1480,7 +1572,7 @@ mod tests {
         let ink = to_ink(img, threshold.clamp(1, 254) as u8);
         let h = ink.len() as i32;
         let w = if h > 0 { ink[0].len() } else { 0 };
-        let (x_lo, x_hi) = left_probe_x_range(w);
+        let (x_lo, x_hi) = left_probe_x_range(&ink);
         let line_ys = find_staff_line_ys(&ink);
         let staves = group_staves(&line_ys);
         let merged = merge_staves_by_left_ink(&ink, staves.clone());
@@ -1507,6 +1599,7 @@ mod tests {
         }
         println!("  merged: {merged:?}");
         println!("  split:  {split:?}");
+        println!("  left_runs: {:?}", left_system_runs(&ink));
         let left_hit = left_band_hit_rows(&ink);
         let mut br = 0i32;
         let mut bs: Option<i32> = None;
@@ -1581,6 +1674,70 @@ mod tests {
                 .into_rgb8();
             diagnose_page(&image, 200, &format!("p{:02}_t200", i + 1), &out_dir);
             diagnose_page(&image, 100, &format!("p{:02}_t100", i + 1), &out_dir);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_henle_rach3_p8() {
+        let pdf = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("[亨乐]拉赫玛尼诺夫 第三钢琴协奏曲 双钢琴.pdf");
+        if !pdf.is_file() {
+            eprintln!("skip: missing {}", pdf.display());
+            return;
+        }
+        let dll = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/pdfium.dll");
+        if !std::path::Path::new(dll).is_file() {
+            eprintln!("skip: missing pdfium");
+            return;
+        }
+        unsafe {
+            std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", dll);
+        }
+        let pdfium = crate::pdf::bind_pdfium().expect("pdfium");
+        let document = pdfium.load_pdf_from_file(&pdf, None).expect("open henle");
+        let n = document.pages().len() as usize;
+        println!("henle pages={n}");
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_k537_debug");
+        let _ = std::fs::create_dir_all(&out_dir);
+        for i in [7usize, 8, 9] {
+            if i >= n {
+                continue;
+            }
+            let page = document.pages().get(i as u16).expect("page");
+            let cfg = pdfium_render::prelude::PdfRenderConfig::new()
+                .scale_page_by_factor(3.0);
+            let image = page
+                .render_with_config(&cfg)
+                .expect("render")
+                .as_image()
+                .into_rgb8();
+            diagnose_page(&image, 200, &format!("rach_p{:02}_t200", i + 1), &out_dir);
+            if i == 7 {
+                let ink = to_ink(&image, 200);
+                let h = ink.len();
+                let w = ink[0].len();
+                let y0 = 350usize.min(h);
+                let y1 = 780usize.min(h);
+                let mut cols: Vec<(usize, usize)> = (0..(w * 28 / 100))
+                    .map(|x| {
+                        let d = (y0..y1).filter(|&y| ink[y][x]).count();
+                        (d, x)
+                    })
+                    .collect();
+                cols.sort_by(|a, b| b.0.cmp(&a.0));
+                println!(
+                    "  p8 first-system dark x: {:?}",
+                    cols.iter().take(15).collect::<Vec<_>>()
+                );
+                let (x_lo, x_hi) = left_probe_x_range(&ink);
+                println!("  probe {x_lo}..{x_hi} of w={w}");
+            }
         }
     }
 }
