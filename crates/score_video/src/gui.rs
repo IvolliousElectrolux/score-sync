@@ -158,8 +158,8 @@ enum VideoDrag {
 /// 再按当前片段的屏幕宽度 (随缩放实时变化) 重新降采样/插值一次, 分辨率因此
 /// 会跟着缩放丝滑变化, 而不是固定一批点被硬拉伸/压缩.
 fn compute_waveform_peaks(path: &std::path::Path) -> Option<Vec<f32>> {
-    let file = std::fs::File::open(path).ok()?;
-    let dec = rodio::Decoder::new(std::io::BufReader::new(file)).ok()?;
+    let _ = crate::audio::ensure_preview_wav(path)?;
+    let dec = crate::audio::open_decoder(path)?;
     let channels = (dec.channels() as usize).max(1);
     let sample_rate = dec.sample_rate().max(1) as f64;
     let samples: Vec<i16> = dec.collect();
@@ -644,7 +644,11 @@ impl ScoreVideoApp {
             cx,
             || {
                 rfd::FileDialog::new()
-                    .add_filter("音频", &["wav", "mp3", "flac", "ogg", "m4a", "aac"])
+                    .add_filter(
+                        "音频",
+                        &["wav", "mp3", "flac", "ogg", "m4a", "aac", "m4b"],
+                    )
+                    .add_filter("M4A / AAC", &["m4a", "aac", "m4b"])
                     .pick_files()
             },
             |this, paths, cx| {
@@ -684,8 +688,59 @@ impl ScoreVideoApp {
         if added > 0 {
             self.timeline.fit_after_audio_change();
             self.audio.set_clips(self.timeline.audio_clips.clone());
+            self.start_audio_preview_prep(cx);
         }
         cx.notify();
+    }
+
+    /// m4a 等不能走 rodio 的格式, 后台转成临时 WAV 供预览/波形; 导入本身只读时长不解码.
+    fn start_audio_preview_prep(&mut self, cx: &mut Context<Self>) {
+        let jobs: Vec<PathBuf> = self
+            .timeline
+            .audio_clips
+            .iter()
+            .map(|c| c.path.clone())
+            .filter(|p| crate::audio::needs_ffmpeg_preview(p) && !crate::audio::preview_wav_ready(p))
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        let n = jobs.len();
+        self.status = format!("正在准备音频预览 ({n})…").into();
+        let (tx, rx) = async_channel::unbounded::<(PathBuf, bool)>();
+        std::thread::spawn(move || {
+            for p in jobs {
+                let ok = crate::audio::ensure_preview_wav(&p).is_some();
+                let _ = tx.send_blocking((p, ok));
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let mut done = 0usize;
+            let mut ok_n = 0usize;
+            while let Ok((path, ok)) = rx.recv().await {
+                done += 1;
+                if ok {
+                    ok_n += 1;
+                }
+                let d = done;
+                let o = ok_n;
+                this.update(cx, |view, cx| {
+                    view.waveform_cache.remove(&path);
+                    view.waveform_pending.remove(&path);
+                    view.audio.set_clips(view.timeline.audio_clips.clone());
+                    if d == n {
+                        view.status = if o == n {
+                            "音频预览已就绪.".into()
+                        } else {
+                            format!("音频已导入; 预览就绪 {o}/{n} (导出仍用原文件).").into()
+                        };
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// 「分割音频」按钮: 再次点击可取消待命; 否则进入待命, 等下一次鼠标

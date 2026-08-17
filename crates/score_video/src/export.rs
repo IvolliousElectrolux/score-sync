@@ -18,7 +18,7 @@ use crate::model::{AudioClip, FadeKind, MaterialItem, Timeline};
 /// ffmpeg 可执行文件路径: 优先找程序自身同目录下的 `ffmpeg(.exe)` (发行包
 /// 自带, 用户不用单独装 ffmpeg), 找不到再退回 PATH 里的 `ffmpeg` (方便开发
 /// 环境直接用系统装的那份).
-fn ffmpeg_path() -> PathBuf {
+pub(crate) fn ffmpeg_path() -> PathBuf {
     let name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
