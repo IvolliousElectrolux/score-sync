@@ -114,6 +114,7 @@ const HELP_TEXT: &str = "\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
+   新块按上边线 y 插入「输出组合」(本页自上而下), 不会丢到列表末尾.\n\
 6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
 7. Ctrl 多选可跨页, 「合并组合」; 脚注可用「共享脚注」让同一块出现在多组导出中.\n\
 8. 「输出组合」可 Ctrl 多选并以整块拖拽调序 (导出按列表顺序); 标签为「排序号. p页c页内」\n\
@@ -1201,7 +1202,8 @@ impl ScoreSyncApp {
         self.mark_video_pool_dirty_group(&gid);
     }
 
-    fn set_mask_target(&mut self, group_id: String, cx: &mut Context<Self>) {
+    /// `scroll_other`: 点顶部页签时滚侧栏列表定位; 点侧栏自身则两边都不滚.
+    fn set_mask_target(&mut self, group_id: String, scroll_other: bool, cx: &mut Context<Self>) {
         if self.mask_target.as_ref() == Some(&group_id) {
             return;
         }
@@ -1210,7 +1212,9 @@ impl ScoreSyncApp {
         self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
         self.mask_target = None;
         self.sync_mask_image(cx);
-        self.scroll_mask_lists_to_active();
+        if scroll_other {
+            self.scroll_mask_picker_to_active();
+        }
         cx.notify();
     }
 
@@ -1441,26 +1445,40 @@ impl ScoreSyncApp {
         self.group_scroll.set_offset(point(px(0.), px(-target)));
     }
 
-    /// 将蒙版侧「编辑目标」列表与顶部组合标签滚到 active_group.
-    fn scroll_mask_lists_to_active(&self) {
-        let Some(gid) = self
+    fn mask_active_group_index(&self) -> Option<usize> {
+        let gid = self
             .mask_target
             .as_ref()
-            .or(self.doc.active_group_id.as_ref())
-        else {
-            return;
-        };
-        let Some(ix) = self.doc.groups.iter().position(|g| &g.id == gid) else {
+            .or(self.doc.active_group_id.as_ref())?;
+        self.doc.groups.iter().position(|g| &g.id == gid)
+    }
+
+    /// 将蒙版侧「编辑目标」列表滚到当前组合.
+    fn scroll_mask_picker_to_active(&self) {
+        let Some(ix) = self.mask_active_group_index() else {
             return;
         };
         let picker_h = f32::from(self.mask_group_scroll.bounds().size.height).max(80.0);
         let picker_target = (ix as f32 * MASK_PICKER_ROW_PX - picker_h * 0.35).max(0.0);
         self.mask_group_scroll
             .set_offset(point(px(0.), px(-picker_target)));
+    }
+
+    /// 将顶部组合页签滚到当前组合. 仅在切入蒙版面板时用, 点选页签本身不要滚.
+    fn scroll_mask_tabs_to_active(&self) {
+        let Some(ix) = self.mask_active_group_index() else {
+            return;
+        };
         let view_w = f32::from(self.tab_scroll.bounds().size.width).max(400.0);
         let tab_target = (ix as f32 * MASK_TAB_SLOT_PX - view_w * 0.35).max(0.0);
         self.tab_scroll
             .set_offset(point(px(-tab_target), px(0.)));
+    }
+
+    /// 切入蒙版面板时, 侧栏与页签栏都定位到当前组合.
+    fn scroll_mask_lists_to_active(&self) {
+        self.scroll_mask_picker_to_active();
+        self.scroll_mask_tabs_to_active();
     }
 
     fn capture_crop_snap(&self, page_ids: &[String]) -> CropSnap {
@@ -2606,12 +2624,6 @@ impl ScoreSyncApp {
             return;
         }
         self.doc.current_page_index = index;
-        if self.doc.pages.len() > TAB_VIRTUAL_THRESHOLD {
-            let view_w = f32::from(self.tab_scroll.bounds().size.width).max(400.0);
-            let target = (index as f32 * TAB_SLOT_PX - view_w * 0.35).max(0.0);
-            self.tab_scroll
-                .set_offset(point(px(-target), px(0.)));
-        }
         if self.doc.pages[index].image.is_some() {
             self.request_page_window(cx);
             self.refresh_render(cx);
@@ -3612,7 +3624,7 @@ impl ScoreSyncApp {
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            this.set_mask_target(gid.clone(), cx);
+                            this.set_mask_target(gid.clone(), false, cx);
                         }),
                     ),
             );
@@ -4069,10 +4081,14 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .child(label)
-                    .on_mouse_up(
+                    .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            this.set_mask_target(gid.clone(), cx);
+                            // 拖标签栏滚动条时松手落在页签上, 不能当成点击跳转.
+                            if matches!(this.drag, Some(DragKind::TabHScroll { .. })) {
+                                return;
+                            }
+                            this.set_mask_target(gid.clone(), true, cx);
                         }),
                     ),
             );
@@ -6468,7 +6484,6 @@ impl ScoreSyncApp {
                     }
                 } else if let Some(gid) = self.doc.groups.get(from).map(|g| g.id.clone()) {
                     self.doc.click_group(&gid, ctrl);
-                    self.scroll_group_list_to_active();
                     self.refresh_render(cx);
                 } else {
                     cx.notify();

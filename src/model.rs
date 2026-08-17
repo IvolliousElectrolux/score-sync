@@ -1412,15 +1412,54 @@ impl DocState {
                 color: COLORS[n_regions % COLORS.len()].to_string(),
             },
         );
-        self.groups.push(Group {
+        self.rebuild_rid_index();
+        self.insert_group_by_top_y(Group {
             id: new_id(),
             region_ids: vec![rid.clone()],
             name: String::new(),
         });
-        self.sort_groups();
+        if !self.groups_manual_order {
+            self.sort_groups();
+        }
         self.selected_region_ids = HashSet::from([rid]);
-        self.rebuild_rid_index();
         format!("P{page_no} 新建手动块 y={a}-{b} h={}.", b - a + 1)
+    }
+
+    /// 按最上块 (页序, y0, y1) 把新组合插进输出列表, 而不是追加到末尾.
+    /// 已手动调序时也不全量重排: 插到本页里「上边线紧挨在下方」的那个组合前面.
+    fn insert_group_by_top_y(&mut self, group: Group) {
+        let key = self.group_top_key(&group);
+        let page_idx = key.0;
+        let mut successor: Option<(usize, (usize, i32, i32))> = None;
+        let mut last_geo: Option<(usize, (usize, i32, i32))> = None;
+        for (i, g) in self.groups.iter().enumerate() {
+            let k = self.group_top_key(g);
+            if k.0 != page_idx {
+                continue;
+            }
+            if last_geo.is_none_or(|(_, lk)| k >= lk) {
+                last_geo = Some((i, k));
+            }
+            if k > key && successor.is_none_or(|(_, sk)| k < sk) {
+                successor = Some((i, k));
+            }
+        }
+        let at = if let Some((i, _)) = successor {
+            i
+        } else if let Some((i, _)) = last_geo {
+            i + 1
+        } else {
+            let mut at = self.groups.len();
+            for (i, g) in self.groups.iter().enumerate().rev() {
+                if self.group_min_page_idx(g) > page_idx {
+                    at = i;
+                } else {
+                    break;
+                }
+            }
+            at
+        };
+        self.groups.insert(at, group);
     }
 
     fn split_one_region(
@@ -1775,5 +1814,103 @@ impl DocState {
         if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
             g.region_ids = final_ids;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stub_page(h: u32) -> Page {
+        Page {
+            id: new_id(),
+            path: PathBuf::from("p.png"),
+            disk_path: PathBuf::from("p.png"),
+            image: None,
+            img_w: 80,
+            img_h: h,
+            regions: HashMap::new(),
+        }
+    }
+
+    fn seed_bands(doc: &mut DocState, page_idx: usize, bands: &[(i32, i32)]) {
+        let page_id = doc.pages[page_idx].id.clone();
+        for (i, &(y0, y1)) in bands.iter().enumerate() {
+            let rid = format!("r{page_idx}-{i}");
+            doc.pages[page_idx].regions.insert(
+                rid.clone(),
+                Region {
+                    id: rid.clone(),
+                    page_id: page_id.clone(),
+                    y0,
+                    y1,
+                    kind: "staff".into(),
+                    color: COLORS[i % COLORS.len()].to_string(),
+                },
+            );
+            doc.groups.push(Group {
+                id: format!("g{page_idx}-{i}"),
+                region_ids: vec![rid],
+                name: String::new(),
+            });
+        }
+        doc.rebuild_rid_index();
+    }
+
+    fn group_y0s(doc: &DocState) -> Vec<(usize, i32)> {
+        doc.groups
+            .iter()
+            .map(|g| {
+                let k = doc.group_top_key(g);
+                (k.0, k.1)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn add_manual_block_inserts_by_top_y_when_manual_order() {
+        let mut doc = DocState::new();
+        doc.pages.push(stub_page(400));
+        seed_bands(&mut doc, 0, &[(10, 20), (40, 50), (70, 80)]);
+        doc.groups_manual_order = true;
+
+        doc.add_manual_block(25, 30);
+        assert_eq!(group_y0s(&doc), vec![(0, 10), (0, 25), (0, 40), (0, 70)]);
+
+        doc.add_manual_block(1, 5);
+        assert_eq!(
+            group_y0s(&doc),
+            vec![(0, 1), (0, 10), (0, 25), (0, 40), (0, 70)]
+        );
+
+        doc.add_manual_block(90, 95);
+        assert_eq!(
+            group_y0s(&doc),
+            vec![(0, 1), (0, 10), (0, 25), (0, 40), (0, 70), (0, 90)]
+        );
+    }
+
+    #[test]
+    fn add_manual_block_stays_on_its_page_between_neighbors() {
+        let mut doc = DocState::new();
+        doc.pages.push(stub_page(400));
+        doc.pages.push(stub_page(400));
+        seed_bands(&mut doc, 0, &[(10, 20), (40, 50), (70, 80)]);
+        seed_bands(&mut doc, 1, &[(10, 20), (40, 50)]);
+        doc.groups_manual_order = true;
+        doc.current_page_index = 0;
+
+        doc.add_manual_block(55, 60);
+        assert_eq!(
+            group_y0s(&doc),
+            vec![
+                (0, 10),
+                (0, 40),
+                (0, 55),
+                (0, 70),
+                (1, 10),
+                (1, 40)
+            ]
+        );
     }
 }
