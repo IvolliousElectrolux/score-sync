@@ -74,6 +74,11 @@ const SIDE_PANEL_MAX: f32 = 720.0;
 /// 页数超过此值时页签只显示页码, 并只渲染可视范围.
 const TAB_VIRTUAL_THRESHOLD: usize = 48;
 const TAB_SLOT_PX: f32 = 76.0;
+/// 输出组合 / 蒙版组合超过此值时只渲染可视范围 (数据仍是全部).
+const GROUP_LIST_VIRTUAL_THRESHOLD: usize = 80;
+const GROUP_ROW_PX: f32 = 30.0;
+const MASK_TAB_SLOT_PX: f32 = 96.0;
+const MASK_PICKER_ROW_PX: f32 = 28.0;
 const HELP_TEXT: &str = "\
 【分块】快捷键:\n\
   Ctrl+O 打开图片/PDF | Ctrl+Shift+N 新建工程 | Ctrl+Shift+O 打开工程 | Ctrl+S 保存工程 | Ctrl+Shift+S 另存工程\n\
@@ -104,7 +109,7 @@ const HELP_TEXT: &str = "\
   底部横条可整体拖动平移, 拖两端圆点改变缩放.\n\
 \n\
 操作步骤:\n\
-1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留当前页±4.\n\
+1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留当前页±4 (输出组合/蒙版页签仍列出全部).\n\
 2. Ctrl+S 保存为单个 .staffcrop 工程包 (zip), 下次可用 Ctrl+Shift+O 继续; Ctrl+Shift+N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
@@ -391,6 +396,8 @@ struct ScoreSyncApp {
     dirty: bool,
     /// 切页异步加载代数, 防止连切时旧结果覆盖
     page_load_gen: u64,
+    /// 全量灌入识别 sidecar 的代数, 防止重叠 hydrate 互相覆盖
+    hydrate_gen: u64,
     /// 视频池组合脏标记 (分块/蒙版/底色变更后需重算缓存)
     video_pool_dirty: HashSet<String>,
     /// 全部视频池视为脏 (底色整体变更等)
@@ -483,6 +490,7 @@ impl ScoreSyncApp {
             page_struct_history: CropHistory::default(),
             dirty: false,
             page_load_gen: 0,
+            hydrate_gen: 0,
             video_pool_dirty: HashSet::new(),
             video_pool_all_dirty: true,
             allow_close: false,
@@ -781,7 +789,7 @@ impl ScoreSyncApp {
         for i in lo..=hi {
             if self.doc.pages[i].regions.is_empty() {
                 if self.doc.load_detect_sidecar(i) {
-                    self.doc.upsert_page_groups(i);
+                    self.doc.ensure_page_groups(i);
                 }
             }
             if self.doc.pages[i].image.is_none() {
@@ -845,7 +853,7 @@ impl ScoreSyncApp {
                             .unwrap_or(false)
                         {
                             view.doc.apply_detect_file(idx, &file);
-                            view.doc.upsert_page_groups(idx);
+                            view.doc.ensure_page_groups(idx);
                         }
                     }
                     if let Ok(img) = result {
@@ -863,6 +871,178 @@ impl ScoreSyncApp {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// 后台把各页 sidecar 灌进 regions, 再补齐全部输出组合.
+    /// 页图像素仍只留当前 ±4; 列表/蒙版页签用的是组合数据, 不解码整本图.
+    /// `detect_missing`: PDF 导入后若某页没有 sidecar, 再后台识别该页.
+    fn start_hydrate_all(&mut self, detect_missing: bool, cx: &mut Context<Self>) {
+        self.hydrate_gen = self.hydrate_gen.wrapping_add(1);
+        let gen = self.hydrate_gen;
+        let jobs: Vec<(usize, PathBuf)> = self
+            .doc
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.regions.is_empty())
+            .map(|(i, p)| (i, p.disk_path.clone()))
+            .collect();
+        if jobs.is_empty() {
+            self.doc.ensure_all_page_groups();
+            self.request_page_window(cx);
+            cx.notify();
+            return;
+        }
+        let n_jobs = jobs.len();
+        self.status = format!("正在载入全部分块结果 ({n_jobs} 页)…").into();
+        self.hint = self.status.clone();
+        cx.notify();
+        let (tx, rx) =
+            async_channel::unbounded::<(usize, Option<crate::detect_cache::PageDetectFile>)>();
+        std::thread::spawn(move || {
+            for (idx, path) in jobs {
+                let file = crate::detect_cache::load(&path);
+                let _ = tx.send_blocking((idx, file));
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let mut done = 0usize;
+            while let Ok((idx, file)) = rx.recv().await {
+                done += 1;
+                let d = done;
+                this.update(cx, |view, cx| {
+                    if view.hydrate_gen != gen {
+                        return;
+                    }
+                    if let Some(file) = file {
+                        if view
+                            .doc
+                            .pages
+                            .get(idx)
+                            .map(|p| p.regions.is_empty())
+                            .unwrap_or(false)
+                        {
+                            view.doc.apply_detect_file(idx, &file);
+                            view.doc.ensure_page_groups(idx);
+                        }
+                    }
+                    if d == n_jobs || d % 16 == 0 {
+                        view.status = format!("正在载入全部分块结果 {d}/{n_jobs}…").into();
+                        view.hint = view.status.clone();
+                        cx.notify();
+                    }
+                })
+                .ok();
+                if d % 16 == 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(4))
+                        .await;
+                }
+            }
+            this.update(cx, |view, cx| {
+                if view.hydrate_gen != gen {
+                    return;
+                }
+                view.doc.ensure_all_page_groups();
+                let n = view.doc.pages.len();
+                let g = view.doc.groups.len();
+                view.status = format!("已载入 {n} 页, {g} 个输出组合.").into();
+                view.hint = view.status.clone();
+                view.request_page_window(cx);
+                if detect_missing {
+                    view.start_detect_missing_pages(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 仍无 regions 的页在后台识别 (只补组合, 不重置已有合并/调序).
+    fn start_detect_missing_pages(&mut self, cx: &mut Context<Self>) {
+        let jobs: Vec<(usize, PathBuf)> = self
+            .doc
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.regions.is_empty())
+            .map(|(i, p)| (i, p.disk_path.clone()))
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        let n = jobs.len();
+        let ink = self.doc.ink_threshold;
+        let margin = self.doc.margin;
+        let gen = self.hydrate_gen;
+        self.status = format!("部分页无缓存, 正在后台识别 ({n} 页)…").into();
+        self.hint = self.status.clone();
+        cx.notify();
+        let (tx, rx) = async_channel::unbounded::<(usize, crate::detect_cache::PageDetectFile)>();
+        std::thread::spawn(move || {
+            for (idx, path) in jobs {
+                match crate::page_cache::load_rgb(&path) {
+                    Ok(img) => {
+                        let file = crate::detect_cache::detect_and_save(&img, &path, ink, margin);
+                        let _ = tx.send_blocking((idx, file));
+                    }
+                    Err(e) => {
+                        crate::trace::log(&format!("hydrate 读页 {} 失败: {e}", idx + 1));
+                    }
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let mut done = 0usize;
+            while let Ok((idx, file)) = rx.recv().await {
+                done += 1;
+                let d = done;
+                this.update(cx, |view, cx| {
+                    if view.hydrate_gen != gen {
+                        return;
+                    }
+                    if view
+                        .doc
+                        .pages
+                        .get(idx)
+                        .map(|p| p.regions.is_empty())
+                        .unwrap_or(false)
+                    {
+                        view.doc.apply_detect_file(idx, &file);
+                        view.doc.ensure_page_groups(idx);
+                    }
+                    if d == n || d % 8 == 0 {
+                        view.status = format!("后台识别进度 {d}/{n}…").into();
+                        view.hint = view.status.clone();
+                        cx.notify();
+                    }
+                })
+                .ok();
+                if d % 8 == 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(8))
+                        .await;
+                }
+            }
+            this.update(cx, |view, cx| {
+                if view.hydrate_gen != gen {
+                    return;
+                }
+                view.doc.ensure_all_page_groups();
+                view.doc.retain_window(
+                    view.doc.current_page_index,
+                    crate::page_cache::WINDOW_RADIUS,
+                );
+                let n_pages = view.doc.pages.len();
+                let g = view.doc.groups.len();
+                view.status = format!("已载入 {n_pages} 页, {g} 个输出组合.").into();
+                view.hint = view.status.clone();
+                view.after_doc_change(cx);
+            })
+            .ok();
         })
         .detach();
     }
@@ -1253,14 +1433,12 @@ impl ScoreSyncApp {
         let Some(gid) = self.doc.active_group_id.as_ref() else {
             return;
         };
-        let Some(ix) = self
-            .group_list_rows()
-            .iter()
-            .position(|r| &r.id == gid)
-        else {
+        let Some(ix) = self.doc.groups.iter().position(|g| &g.id == gid) else {
             return;
         };
-        self.group_scroll.scroll_to_item(ix);
+        let view_h = f32::from(self.group_scroll.bounds().size.height).max(120.0);
+        let target = (ix as f32 * GROUP_ROW_PX - view_h * 0.35).max(0.0);
+        self.group_scroll.set_offset(point(px(0.), px(-target)));
     }
 
     /// 将蒙版侧「编辑目标」列表与顶部组合标签滚到 active_group.
@@ -1275,8 +1453,14 @@ impl ScoreSyncApp {
         let Some(ix) = self.doc.groups.iter().position(|g| &g.id == gid) else {
             return;
         };
-        self.mask_group_scroll.scroll_to_item(ix);
-        self.tab_scroll.scroll_to_item(ix);
+        let picker_h = f32::from(self.mask_group_scroll.bounds().size.height).max(80.0);
+        let picker_target = (ix as f32 * MASK_PICKER_ROW_PX - picker_h * 0.35).max(0.0);
+        self.mask_group_scroll
+            .set_offset(point(px(0.), px(-picker_target)));
+        let view_w = f32::from(self.tab_scroll.bounds().size.width).max(400.0);
+        let tab_target = (ix as f32 * MASK_TAB_SLOT_PX - view_w * 0.35).max(0.0);
+        self.tab_scroll
+            .set_offset(point(px(-tab_target), px(0.)));
     }
 
     fn capture_crop_snap(&self, page_ids: &[String]) -> CropSnap {
@@ -1678,15 +1862,7 @@ impl ScoreSyncApp {
                         PdfLoadMsg::AllFinished => {
                             crate::trace::log("ui: PDF 全部登记完成 (识别已写入 sidecar)");
                             view.refresh_render(cx);
-                            view.request_page_window(cx);
-                            let n = view.doc.pages.len();
-                            view.status = format!(
-                                "已载入 {n} 页. 识别结果已缓存, 当前只处理前后 {} 页.",
-                                crate::page_cache::WINDOW_RADIUS * 2 + 1
-                            )
-                            .into();
-                            view.hint = view.status.clone();
-                            cx.notify();
+                            view.start_hydrate_all(true, cx);
                         }
                     }
                 })
@@ -1822,6 +1998,7 @@ impl ScoreSyncApp {
                             m.apply_color_prefs(mask_prefs);
                         });
                         view.refresh_render(cx);
+                        view.start_hydrate_all(false, cx);
                         view.status = format!(
                             "已打开工程: {} ({} 页, {} 组)",
                             path.file_name()
@@ -1983,6 +2160,11 @@ impl ScoreSyncApp {
         }
         self.flush_mask_to_doc(cx);
         self.doc.video_state = self.score_video.read(cx).timeline_snapshot();
+        // 把尚未灌入内存的 sidecar 写进 regions, 避免工程包只带上窗口内几页的分块
+        let hydrated = self.doc.hydrate_detect_sidecars();
+        if hydrated > 0 {
+            self.doc.ensure_all_page_groups();
+        }
         self.saving = true;
         self.save_spin_phase = 0.0;
         self.status = "正在保存工程…".into();
@@ -2493,20 +2675,19 @@ impl ScoreSyncApp {
             .collect()
     }
 
-    fn group_list_rows(&self) -> Vec<ListRow> {
-        let idxs = self.window_group_indices();
+    fn group_list_rows_in(&self, start: usize, end: usize) -> Vec<ListRow> {
+        let n = self.doc.groups.len();
+        let start = start.min(n);
+        let end = end.min(n);
         let mut by_page: HashMap<usize, Vec<(usize, i32, i32)>> = HashMap::new();
-        for &i in &idxs {
-            let Some(g) = self.doc.groups.get(i) else {
-                continue;
-            };
+        for (i, g) in self.doc.groups.iter().enumerate() {
             let k = self.doc.group_top_key(g);
             by_page.entry(k.0).or_default().push((i, k.1, k.2));
         }
         for v in by_page.values_mut() {
             v.sort_by_key(|&(_, y0, y1)| (y0, y1));
         }
-        idxs.into_iter()
+        (start..end)
             .filter_map(|i| {
                 let g = self.doc.groups.get(i)?;
                 let mut labels = Vec::new();
@@ -2542,15 +2723,61 @@ impl ScoreSyncApp {
             .collect()
     }
 
-    fn window_group_indices(&self) -> Vec<usize> {
-        let n = self.doc.pages.len();
+    fn visible_group_range(&self) -> (usize, usize) {
+        let n = self.doc.groups.len();
         if n == 0 {
-            return Vec::new();
+            return (0, 0);
         }
-        let c = self.doc.current_page_index;
-        let lo = c.saturating_sub(crate::page_cache::WINDOW_RADIUS);
-        let hi = (c + crate::page_cache::WINDOW_RADIUS).min(n - 1);
-        self.doc.group_indices_in_page_window(lo, hi)
+        if n <= GROUP_LIST_VIRTUAL_THRESHOLD {
+            return (0, n);
+        }
+        let view_h = f32::from(self.group_scroll.bounds().size.height);
+        let view_h = if view_h < 8.0 { 400.0 } else { view_h };
+        let off = (-f32::from(self.group_scroll.offset().y)).max(0.0);
+        let start = ((off / GROUP_ROW_PX).floor() as usize).saturating_sub(8);
+        let end = (((off + view_h) / GROUP_ROW_PX).ceil() as usize)
+            .saturating_add(8)
+            .min(n);
+        let start = start.min(n);
+        (start, end.max(start))
+    }
+
+    fn visible_mask_tab_range(&self) -> (usize, usize) {
+        let n = self.doc.groups.len();
+        if n == 0 {
+            return (0, 0);
+        }
+        if n <= TAB_VIRTUAL_THRESHOLD {
+            return (0, n);
+        }
+        let view_w = f32::from(self.tab_scroll.bounds().size.width);
+        let view_w = if view_w < 8.0 { 960.0 } else { view_w };
+        let off = (-f32::from(self.tab_scroll.offset().x)).max(0.0);
+        let start = ((off / MASK_TAB_SLOT_PX).floor() as usize).saturating_sub(8);
+        let end = (((off + view_w) / MASK_TAB_SLOT_PX).ceil() as usize)
+            .saturating_add(8)
+            .min(n);
+        let start = start.min(n);
+        (start, end.max(start))
+    }
+
+    fn visible_mask_picker_range(&self) -> (usize, usize) {
+        let n = self.doc.groups.len();
+        if n == 0 {
+            return (0, 0);
+        }
+        if n <= GROUP_LIST_VIRTUAL_THRESHOLD {
+            return (0, n);
+        }
+        let view_h = f32::from(self.mask_group_scroll.bounds().size.height);
+        let view_h = if view_h < 8.0 { 168.0 } else { view_h };
+        let off = (-f32::from(self.mask_group_scroll.offset().y)).max(0.0);
+        let start = ((off / MASK_PICKER_ROW_PX).floor() as usize).saturating_sub(8);
+        let end = (((off + view_h) / MASK_PICKER_ROW_PX).ceil() as usize)
+            .saturating_add(8)
+            .min(n);
+        let start = start.min(n);
+        (start, end.max(start))
     }
 
     fn member_list_rows(&self) -> Vec<ListRow> {
@@ -3330,19 +3557,30 @@ impl ScoreSyncApp {
 
     fn mask_target_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_gid = self.mask_target.clone().or_else(|| self.doc.active_group_id.clone());
+        let n = self.doc.groups.len();
+        let virtualize = n > GROUP_LIST_VIRTUAL_THRESHOLD;
+        let (start, end) = self.visible_mask_picker_range();
         let mut list = div()
             .id("mask_group_list")
             .flex()
-            .flex_row()
-            .flex_wrap()
+            .when(virtualize, |d| d.flex_col())
+            .when(!virtualize, |d| d.flex_row().flex_wrap())
             .gap_1()
             .p_1()
             .bg(rgb(0xffffff))
             .border_1()
             .border_color(rgb(0xcbd5e1))
-            .rounded_md();
-        let window_idxs = self.window_group_indices();
-        for &i in &window_idxs {
+            .rounded_md()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
+        if virtualize && start > 0 {
+            list = list.child(
+                div()
+                    .h(px(start as f32 * MASK_PICKER_ROW_PX))
+                    .w_full()
+                    .flex_shrink_0(),
+            );
+        }
+        for i in start..end {
             let Some(g) = self.doc.groups.get(i) else {
                 continue;
             };
@@ -3377,6 +3615,14 @@ impl ScoreSyncApp {
                             this.set_mask_target(gid.clone(), cx);
                         }),
                     ),
+            );
+        }
+        if virtualize && end < n {
+            list = list.child(
+                div()
+                    .h(px((n - end) as f32 * MASK_PICKER_ROW_PX))
+                    .w_full()
+                    .flex_shrink_0(),
             );
         }
 
@@ -3789,9 +4035,19 @@ impl ScoreSyncApp {
             .py_1()
             .overflow_x_scroll()
             .track_scroll(handle)
-            .scrollbar_width(px(0.));
-        let window_idxs = self.window_group_indices();
-        for &i in &window_idxs {
+            .scrollbar_width(px(0.))
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
+        let n = self.doc.groups.len();
+        let (start, end) = self.visible_mask_tab_range();
+        if n > TAB_VIRTUAL_THRESHOLD && start > 0 {
+            row = row.child(
+                div()
+                    .w(px(start as f32 * MASK_TAB_SLOT_PX))
+                    .h(px(1.))
+                    .flex_shrink_0(),
+            );
+        }
+        for i in start..end {
             let Some(g) = self.doc.groups.get(i) else {
                 continue;
             };
@@ -3819,6 +4075,14 @@ impl ScoreSyncApp {
                             this.set_mask_target(gid.clone(), cx);
                         }),
                     ),
+            );
+        }
+        if n > TAB_VIRTUAL_THRESHOLD && end < n {
+            row = row.child(
+                div()
+                    .w(px((n - end) as f32 * MASK_TAB_SLOT_PX))
+                    .h(px(1.))
+                    .flex_shrink_0(),
             );
         }
 
@@ -4348,9 +4612,9 @@ impl ScoreSyncApp {
         else {
             return div().into_any_element();
         };
-        let rows = self.group_list_rows();
+        let rows = self.group_list_rows_in(*from, *from + 1);
         let label = rows
-            .get(*from)
+            .first()
             .map(|r| r.label.clone())
             .unwrap_or_else(|| "...".into());
         let gx = *origin_x + (*x - *start_x);
@@ -4871,7 +5135,9 @@ impl ScoreSyncApp {
 
     fn side_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let region_rows = self.region_list_rows();
-        let group_rows = self.group_list_rows();
+        let (g_start, g_end) = self.visible_group_range();
+        let group_n = self.doc.groups.len();
+        let group_rows = self.group_list_rows_in(g_start, g_end);
         let member_rows = self.member_list_rows();
         let region_open = self.region_panel_open;
         let margin = self.doc.margin;
@@ -5054,7 +5320,7 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("输出组合 (当前页前后各4页; 排序号全局; 拖拽调序)"),
+                    .child("输出组合 (全部; 排序号全局; 拖拽调序)"),
             );
 
         let mut glist = div()
@@ -5066,7 +5332,8 @@ impl ScoreSyncApp {
             .border_color(rgb(0xcbd5e1))
             .rounded_md()
             .p_1()
-            .bg(rgb(0xffffff));
+            .bg(rgb(0xffffff))
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
         let group_moving: HashSet<usize> = match &self.drag {
             Some(DragKind::GroupReorder {
                 from, armed: true, ..
@@ -5082,6 +5349,14 @@ impl ScoreSyncApp {
             }) => (*line_at, *line_after),
             _ => (None, false),
         };
+        if group_n > GROUP_LIST_VIRTUAL_THRESHOLD && g_start > 0 {
+            glist = glist.child(
+                div()
+                    .h(px(g_start as f32 * GROUP_ROW_PX))
+                    .w_full()
+                    .flex_shrink_0(),
+            );
+        }
         for row in group_rows.iter() {
             let idx = row.src_index;
             let gid = row.id.clone();
@@ -5183,6 +5458,14 @@ impl ScoreSyncApp {
                             cx.notify();
                         }
                     })),
+            );
+        }
+        if group_n > GROUP_LIST_VIRTUAL_THRESHOLD && g_end < group_n {
+            glist = glist.child(
+                div()
+                    .h(px((group_n - g_end) as f32 * GROUP_ROW_PX))
+                    .w_full()
+                    .flex_shrink_0(),
             );
         }
         panel = panel

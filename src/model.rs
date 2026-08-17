@@ -795,8 +795,6 @@ impl DocState {
             crate::trace::log(&format!("doc: detect_page idx={idx} 开始"));
             self.detect_page(idx, true);
             crate::trace::log(&format!("doc: detect_page idx={idx} 结束"));
-        } else if self.load_detect_sidecar(idx) {
-            self.upsert_page_groups(idx);
         }
         if run_detect {
             self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
@@ -965,7 +963,81 @@ impl DocState {
             .unwrap_or(usize::MAX)
     }
 
+    /// 本页已有识别结果但还没有对应输出组合时, 按页序补上 1:1 组合.
+    /// 不改已有合并/调序, 也不删其它页的组 (其它页 regions 可能尚未灌入).
+    pub fn ensure_page_groups(&mut self, page_idx: usize) {
+        let page_rids: HashSet<String> = self
+            .pages
+            .get(page_idx)
+            .map(|p| p.regions.keys().cloned().collect())
+            .unwrap_or_default();
+        if page_rids.is_empty() {
+            return;
+        }
+        let covered: HashSet<String> = self
+            .groups
+            .iter()
+            .flat_map(|g| g.region_ids.iter().cloned())
+            .collect();
+        if page_rids.iter().all(|id| covered.contains(id)) {
+            return;
+        }
+        let mut ordered: Vec<Region> = self.pages[page_idx]
+            .regions
+            .values()
+            .filter(|r| !covered.contains(&r.id))
+            .cloned()
+            .collect();
+        ordered.sort_by_key(|r| (r.y0, r.y1));
+        let new_groups: Vec<Group> = ordered
+            .iter()
+            .map(|r| Group {
+                id: new_id(),
+                region_ids: vec![r.id.clone()],
+                name: String::new(),
+            })
+            .collect();
+        let insert_at = {
+            let mut at = self.groups.len();
+            for (i, g) in self.groups.iter().enumerate().rev() {
+                if self.group_min_page_idx(g) > page_idx {
+                    at = i;
+                } else {
+                    break;
+                }
+            }
+            at
+        };
+        for (i, g) in new_groups.into_iter().enumerate() {
+            self.groups.insert(insert_at + i, g);
+        }
+        self.ensure_active_group();
+    }
+
+    pub fn ensure_all_page_groups(&mut self) {
+        for i in 0..self.pages.len() {
+            self.ensure_page_groups(i);
+        }
+        self.ensure_active_group();
+    }
+
+    /// 把磁盘 sidecar 灌进尚未有 regions 的页. 返回灌入页数. 不改 groups.
+    pub fn hydrate_detect_sidecars(&mut self) -> usize {
+        let n = self.pages.len();
+        let mut loaded = 0usize;
+        for i in 0..n {
+            if self.pages[i].regions.is_empty() && self.load_detect_sidecar(i) {
+                loaded += 1;
+            }
+        }
+        if loaded > 0 {
+            self.rebuild_rid_index();
+        }
+        loaded
+    }
+
     /// 按页序插入/替换本页 groups, 其它页的组块顺序不受影响.
+    /// 只动本页涉及到的组合, 不因其它页尚未灌入 regions 而误删它们的组.
     pub fn upsert_page_groups(&mut self, page_idx: usize) {
         let page_rids: HashSet<String> = self
             .pages
@@ -975,12 +1047,6 @@ impl DocState {
         if page_rids.is_empty() {
             return;
         }
-        let mut live: HashSet<String> = HashSet::new();
-        for p in &self.pages {
-            live.extend(p.regions.keys().cloned());
-        }
-        self.groups
-            .retain(|g| g.region_ids.iter().any(|id| live.contains(id)));
         self.groups
             .retain(|g| !g.region_ids.iter().any(|id| page_rids.contains(id)));
         let mut ordered: Vec<Region> = self.pages[page_idx]
@@ -1012,23 +1078,6 @@ impl DocState {
             self.groups.insert(insert_at + i, g);
         }
         self.ensure_active_group();
-    }
-
-    /// 当前页 ± radius 窗口内涉及到的组合下标 (用于列表按需渲染).
-    pub fn group_indices_in_page_window(&self, lo: usize, hi: usize) -> Vec<usize> {
-        let mut rids = HashSet::new();
-        let hi = hi.min(self.pages.len().saturating_sub(1));
-        for pi in lo..=hi {
-            if let Some(p) = self.pages.get(pi) {
-                rids.extend(p.regions.keys().cloned());
-            }
-        }
-        self.groups
-            .iter()
-            .enumerate()
-            .filter(|(_, g)| g.region_ids.iter().any(|id| rids.contains(id)))
-            .map(|(i, _)| i)
-            .collect()
     }
 
     /// 按页序从当前各页 regions 重建全部 groups. 全量识别结束时调用一次,
