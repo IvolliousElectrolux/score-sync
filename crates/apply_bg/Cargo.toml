@@ -1,6 +1,6 @@
 [package]
 name = "apply_bg"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2021"
 description = "谱面加底色并按比例完整装进画布 (rayon + GPUI)"
 

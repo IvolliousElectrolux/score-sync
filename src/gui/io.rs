@@ -30,10 +30,12 @@ impl ScoreSyncApp {
         let Some(info) = self.pending_update.take() else {
             return;
         };
+        self.update_scroll.set_offset(point(px(0.), px(0.)));
         self.dialog = Some(DialogKind::UpdateAvailable {
             current: info.current,
             latest: info.latest,
             url: info.url,
+            changes: info.changes,
         });
         cx.notify();
     }

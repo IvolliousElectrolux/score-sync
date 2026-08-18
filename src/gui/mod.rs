@@ -127,6 +127,7 @@ pub(crate) struct ScoreSyncApp {
     member_scroll: ScrollHandle,
     mask_group_scroll: ScrollHandle,
     help_scroll: ScrollHandle,
+    update_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
     /// 标签页条目屏幕 bounds (供拖拽虚影锚点)
     tab_bounds: HashMap<usize, Bounds<Pixels>>,
@@ -237,6 +238,7 @@ impl ScoreSyncApp {
             member_scroll: ScrollHandle::new(),
             mask_group_scroll: ScrollHandle::new(),
             help_scroll: ScrollHandle::new(),
+            update_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             tab_bounds: HashMap::new(),
             member_bounds: HashMap::new(),

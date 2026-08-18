@@ -415,6 +415,7 @@ impl ScoreSyncApp {
             ScrollList::Member => &self.member_scroll,
             ScrollList::MaskGroup => &self.mask_group_scroll,
             ScrollList::Help => &self.help_scroll,
+            ScrollList::Update => &self.update_scroll,
         }
     }
 

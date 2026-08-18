@@ -1025,15 +1025,56 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn update_available_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (current, latest, url) = match &self.dialog {
+        let (current, latest, url, changes) = match &self.dialog {
             Some(DialogKind::UpdateAvailable {
                 current,
                 latest,
                 url,
-            }) => (current.clone(), latest.clone(), url.clone()),
+                changes,
+            }) => (
+                current.clone(),
+                latest.clone(),
+                url.clone(),
+                changes.clone(),
+            ),
             _ => return div().into_any_element(),
         };
         let url_open = url.clone();
+        let mut notes = div()
+            .id("update_notes")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .text_sm()
+            .text_color(rgb(0x334155));
+        if changes.is_empty() {
+            notes = notes.child("可前往发布页查看版本说明.");
+        } else {
+            for (ver, bullets) in &changes {
+                let mut block = div().flex().flex_col().gap_1().child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x0f172a))
+                        .child(ver.clone()),
+                );
+                if bullets.is_empty() {
+                    block = block.child(
+                        div()
+                            .text_color(rgb(0x64748b))
+                            .child("见发布页说明."),
+                    );
+                } else {
+                    for b in bullets {
+                        block = block.child(
+                            div()
+                                .whitespace_normal()
+                                .child(format!("· {b}")),
+                        );
+                    }
+                }
+                notes = notes.child(block);
+            }
+        }
         div()
             .id("dialog_backdrop_update")
             .absolute()
@@ -1043,14 +1084,49 @@ impl ScoreSyncApp {
             .justify_center()
             .bg(gpui::rgba(0x00000080))
             .occlude()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                    this.apply_scrollbar_drag(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                }
+                cx.stop_propagation();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                        this.drag = None;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
             )
             .child(
                 div()
                     .id("dialog_card_update")
-                    .w(px(420.))
+                    .w(px(480.))
+                    .h(px(440.))
+                    .max_h(px(440.))
                     .p_4()
                     .rounded_lg()
                     .bg(rgb(0xffffff))
@@ -1059,22 +1135,40 @@ impl ScoreSyncApp {
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .overflow_hidden()
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child("发现新版本"),
                     )
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_sm()
                             .text_color(rgb(0x334155))
                             .child(format!(
-                                "当前 {current}, GitHub 最新 {latest}.\n可前往发布页下载安装包."
+                                "当前 {current}, GitHub 最新 {latest}."
                             )),
                     )
                     .child(
+                        self.attach_scrollbars(
+                            "update_scroll_wrap".into(),
+                            ScrollList::Update,
+                            &self.update_scroll,
+                            notes,
+                            cx,
+                        )
+                        .flex_1()
+                        .min_h(px(0.)),
+                    )
+                    .child(
                         div()
+                            .flex_shrink_0()
                             .flex()
                             .flex_row()
                             .gap_2()

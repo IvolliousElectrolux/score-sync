@@ -83,6 +83,7 @@ pub(crate) const HELP_TEXT: &str = "\
   右侧顶栏可切换「分块 / 蒙版 / 工程 / 视频」四个面板.\n\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
   「工程」面板可「清除视频缓存」删除旁路 `.staffcrop.cache`.\n\
+  启动时若已联网会检查 GitHub 更新, 有新版本则弹出当前到最新之间的版本摘要.\n\
   PDF 导入依赖 pdfium、视频导出依赖 ffmpeg, 需把对应文件放在程序所在目录 (或系统 PATH) 下.";
 
 /// 画布编辑工具 (互斥)
@@ -224,6 +225,8 @@ pub(crate) enum ScrollList {
     MaskGroup,
     /// 操作说明对话框正文
     Help,
+    /// 更新提示里的版本摘要
+    Update,
 }
 
 #[derive(Clone)]
@@ -242,6 +245,8 @@ pub(crate) enum DialogKind {
         current: String,
         latest: String,
         url: String,
+        /// 比当前新的各正式版 (新的在前): (版本号, 条目)
+        changes: Vec<(String, Vec<String>)>,
     },
 }
 
