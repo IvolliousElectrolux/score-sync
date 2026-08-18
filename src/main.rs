@@ -13,7 +13,6 @@ mod page_cache;
 mod pdf;
 mod project;
 mod staff_detect;
-mod text_input;
 mod trace;
 mod update;
 

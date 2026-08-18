@@ -11,7 +11,8 @@ use gpui::{
 };
 use unicode_segmentation::*;
 
-// 与 staff_crop 的 text_input action 命名空间隔离, 避免嵌入时 GPUI 重复注册 panic.
+// 宿主 score_sync 与 mask_tool / score_video 共用这一份; 独立 action 命名空间,
+// 避免嵌入时 GPUI 重复注册 panic.
 actions!(
     apply_bg_text_input,
     [
@@ -108,6 +109,12 @@ impl TextInput {
         self.marked_range = None;
         // 下次布局时按光标 (末尾) 重新对齐滚动
         self.scroll_offset = px(0.);
+        cx.notify();
+    }
+
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
         cx.notify();
     }
 

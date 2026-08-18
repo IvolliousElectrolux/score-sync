@@ -76,7 +76,7 @@ pub(crate) use crate::model::{
 };
 pub(crate) use crate::pdf;
 pub(crate) use crate::project::{self, is_project_path};
-pub(crate) use crate::text_input::{self, TextInput};
+pub(crate) use apply_bg::text_input::TextInput;
 pub(crate) use apply_bg::gui::ApplyBgApp;
 pub(crate) use mask_tool::gui::MaskToolApp;
 pub(crate) use mask_tool::mask::MaskRect;
@@ -670,7 +670,6 @@ impl Render for ScoreSyncApp {
 
 pub fn run_gui(initial: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
-        text_input::bind_keys(cx);
         apply_bg::text_input::bind_keys(cx);
         score_video::gui::bind_keys(cx);
         cx.bind_keys([

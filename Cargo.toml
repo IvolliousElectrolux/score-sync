@@ -1,9 +1,18 @@
-[package]
-name = "score_sync"
+[workspace]
+resolver = "2"
+members = [".", "crates/apply_bg", "crates/mask_tool", "crates/score_video"]
+
+[workspace.package]
 version = "1.3.3"
 edition = "2021"
-description = "方便曲谱同步一条龙制作的 Rust GPUI 工具"
 license = "MIT"
+
+[package]
+name = "score_sync"
+version.workspace = true
+edition.workspace = true
+description = "方便曲谱同步一条龙制作的 Rust GPUI 工具"
+license.workspace = true
 
 [dependencies]
 async-channel = "2"
@@ -18,7 +27,6 @@ score_video = { path = "crates/score_video" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
-unicode-segmentation = "1"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ureq = "2"

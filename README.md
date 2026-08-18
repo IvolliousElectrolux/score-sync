@@ -65,14 +65,14 @@ cargo run -r -- path\to\project.staffcrop
 ## 仓库结构
 
 ```
-score_sync/           # 主程序 (本仓库根)
+score_sync/           # 主程序 (本仓库根, Cargo workspace)
   src/                # 分块 / 工程 / 检测 / GUI
   assets/             # 图标
   vendor/             # ffmpeg.exe / pdfium.dll (不提交, 见上"环境")
   crates/
-    mask_tool/        # 蒙版库 (可嵌入)
-    apply_bg/         # 谱面加底色库 (可嵌入)
-    score_video/      # 视频栏库 (可嵌入)
+    mask_tool/        # 蒙版库 (可嵌入, 可独立运行)
+    apply_bg/         # 谱面加底色库 (可嵌入, 可独立批处理)
+    score_video/      # 视频栏库 (可嵌入, 可独立调试)
 ```
 
 ## 常用快捷键

@@ -1,7 +1,7 @@
 [package]
 name = "mask_tool"
-version = "1.3.3"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "半透明白色蒙版工具 (GPUI)"
 
 [dependencies]
@@ -17,14 +17,3 @@ apply_bg = { path = "../apply_bg" }
 
 [build-dependencies]
 embed-resource = "3"
-
-[profile.release]
-lto = false
-codegen-units = 16
-opt-level = 3
-strip = true
-
-[profile.release-max]
-inherits = "release"
-lto = true
-codegen-units = 1
