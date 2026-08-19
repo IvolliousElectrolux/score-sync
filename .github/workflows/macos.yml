@@ -1,0 +1,96 @@
+# macOS 发行包: 在 GitHub 的 Mac runner 上编译 (维护者没有本地 Mac).
+# 触发: 推送 v* 标签, 或 Actions 页手动 workflow_dispatch.
+# 产物挂到对应 Release (标签) 或作为 workflow artifact (手动跑).
+
+name: macOS
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            asset: macos-arm64
+            pdfium: mac-arm64
+            ffmpeg: darwin-arm64
+          - os: macos-13
+            asset: macos-x64
+            pdfium: mac-x64
+            ffmpeg: darwin-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-${{ matrix.asset }}
+
+      - name: Build score_sync
+        run: cargo build -r -p score_sync
+
+      - name: Bundle ffmpeg, pdfium
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          STAGE="score_sync-${VER}-${{ matrix.asset }}"
+          mkdir -p "$STAGE"
+          cp target/release/score_sync "$STAGE/"
+          chmod +x "$STAGE/score_sync"
+
+          echo "download pdfium ${{ matrix.pdfium }} (chromium/6406, matches pdfium-render)"
+          curl -fsSL -o pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F6406/pdfium-${{ matrix.pdfium }}.tgz"
+          mkdir -p pdfium-extract
+          tar -xzf pdfium.tgz -C pdfium-extract
+          DYLIB=$(find pdfium-extract -name 'libpdfium.dylib' | head -n 1)
+          test -n "$DYLIB"
+          cp "$DYLIB" "$STAGE/libpdfium.dylib"
+
+          echo "download ffmpeg ${{ matrix.ffmpeg }}"
+          curl -fsSL -o ffmpeg.gz \
+            "https://github.com/eugeneware/ffmpeg-static/releases/latest/download/ffmpeg-${{ matrix.ffmpeg }}.gz"
+          gunzip -c ffmpeg.gz > "$STAGE/ffmpeg"
+          chmod +x "$STAGE/ffmpeg"
+
+          ditto -c -k --sequesterRsrc --keepParent "$STAGE" "${STAGE}.zip"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          ls -lh "${STAGE}.zip" "$STAGE"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+
+      - name: Attach zip to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          for i in $(seq 1 20); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              break
+            fi
+            echo "waiting for release $TAG ($i)"
+            sleep 15
+          done
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "Score Sync ${TAG}"
+          fi
+          gh release upload "$TAG" "${STAGE}.zip" --clobber

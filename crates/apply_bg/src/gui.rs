@@ -643,7 +643,7 @@ impl Render for ApplyBgApp {
             .size_full()
             .bg(rgb(0xf8fafc))
             .text_color(rgb(0x0f172a))
-            .font_family("Microsoft YaHei UI")
+            .font_family(crate::ui_font())
             .child(self.panel(cx))
     }
 }

@@ -19,12 +19,12 @@
 
 ## 环境
 
-- Windows (当前以 Windows + GPUI 为主)
+- Windows / macOS (macOS 包由 GitHub Actions 编译; 本地无 Mac 也可发版)
 - Rust stable (`cargo` / `rustc`)
-- 运行时依赖 `pdfium.dll` (PDF 打开) 与 `ffmpeg.exe` (视频导出), 二者都不
-  随源码提交: 优先找程序自身同目录下的那份, 找不到再退回系统 PATH. 本地
-  开发把两者放进 `vendor/` (已 gitignore) 再拷到 `target/debug(或release)/`
-  即可; 打包发行版时随 exe 一起放进同一目录/压缩包.
+- 运行时依赖 pdfium (`pdfium.dll` / `libpdfium.dylib`) 与 ffmpeg
+  (`ffmpeg.exe` / `ffmpeg`), 二者都不随源码提交: 优先找程序自身同目录下的那份,
+  找不到再退回系统 PATH. 本地开发把它们放进 `vendor/` (已 gitignore) 再拷到
+  `target/debug(或release)/` 即可; 打包发行版时随可执行文件一起放进同一目录/压缩包.
 
 ## 构建与运行
 
@@ -46,7 +46,10 @@ cargo run -r -- path\to\page.png path\to\score.pdf
 cargo run -r -- path\to\project.staffcrop
 ```
 
-发布构建产物: `target/release/score_sync.exe` 或 `target/release-max/score_sync.exe`.
+发布构建产物: `target/release/score_sync.exe` (Windows) 或 `target/release/score_sync` (macOS).
+GitHub Actions 工作流 `.github/workflows/macos.yml` 在打 `v*` 标签或手动
+`workflow_dispatch` 时于 macOS runner 上编译, 并上传
+`score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`.
 
 ## 工程格式
 
@@ -59,8 +62,8 @@ cargo run -r -- path\to\project.staffcrop
   不重新打包进工程, 需保持原路径有效才能继续回放/导出
 - 快捷键: `Ctrl+S` 保存, `Ctrl+Shift+S` 另存, `Ctrl+Shift+O` 打开, `Ctrl+Shift+N` 新建工程 (各面板通用)
 - 打开/保存工程都是异步执行, 不会卡住界面; 有未保存改动时关窗会确认; 标题栏 `*` / 保存中转圈
-- 启动时若未指定命令行参数, 会自动重新打开上次保存/打开过的工程 (记在
-  `%APPDATA%` 里, 与底色路径记忆同一套机制)
+-   启动时若未指定命令行参数, 会自动重新打开上次保存/打开过的工程 (记在
+  用户配置目录, Windows 为 `%APPDATA%\score_sync`, 与底色路径记忆同一套机制)
 
 ## 仓库结构
 

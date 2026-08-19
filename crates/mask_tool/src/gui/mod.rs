@@ -332,7 +332,7 @@ impl Render for MaskToolApp {
             .size_full()
             .bg(rgb(0xf8fafc))
             .text_color(rgb(0x0f172a))
-            .font_family("Microsoft YaHei UI")
+            .font_family(apply_bg::ui_font())
             .child(
                 div()
                     .px_3()

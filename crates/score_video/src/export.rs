@@ -312,8 +312,9 @@ fn run_ffmpeg(
     }
     let mut child = cmd.spawn().map_err(|e| {
         format!(
-            "启动 ffmpeg 失败 ({step}): {e} — 请确认程序同目录下有 ffmpeg.exe, \
-             或系统已安装 ffmpeg 并加入 PATH"
+            "启动 ffmpeg 失败 ({step}): {e} — 请确认程序同目录下有 ffmpeg{}, \
+             或系统已安装 ffmpeg 并加入 PATH",
+            std::env::consts::EXE_SUFFIX
         )
     })?;
 

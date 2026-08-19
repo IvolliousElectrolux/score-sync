@@ -17,7 +17,7 @@ license.workspace = true
 [dependencies]
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
-gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest", "font-kit"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
 mask_tool = { path = "crates/mask_tool" }
 apply_bg = { path = "crates/apply_bg" }
@@ -31,7 +31,7 @@ uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ureq = "2"
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 
 # 日常 `cargo run -r`: 够快, 链接不再拖到数分钟.

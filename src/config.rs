@@ -1,4 +1,4 @@
-//! 上次打开工程路径 + 蒙版选色偏好: 存于 %APPDATA%/score_sync.
+//! 上次打开工程路径 + 蒙版选色偏好: 存于用户配置目录 (Windows: %APPDATA%/score_sync).
 //!
 //! `config.json` 为新格式; 若仅有旧版 `config.txt` 则读取 `last_project=` 并迁移.
 
@@ -28,9 +28,32 @@ impl Default for Config {
 }
 
 pub fn config_dir() -> PathBuf {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        if !appdata.is_empty() {
-            return PathBuf::from(appdata).join("score_sync");
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            if !appdata.is_empty() {
+                return PathBuf::from(appdata).join("score_sync");
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("score_sync");
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            if !xdg.is_empty() {
+                return PathBuf::from(xdg).join("score_sync");
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(".config").join("score_sync");
         }
     }
     std::env::temp_dir().join("score_sync")

@@ -7,11 +7,11 @@ description = "谱面加底色并按比例完整装进画布 (rayon + GPUI)"
 [dependencies]
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
-gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest", "font-kit"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
 rayon = "1.10"
 rfd = "0.15"
 unicode-segmentation = "1"
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

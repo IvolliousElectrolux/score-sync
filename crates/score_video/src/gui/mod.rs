@@ -259,7 +259,7 @@ impl Render for ScoreVideoApp {
             .flex()
             .flex_row()
             .size_full()
-            .font_family("Microsoft YaHei UI")
+            .font_family(apply_bg::ui_font())
             .child(
                 div()
                     .flex_1()

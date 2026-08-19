@@ -7,7 +7,7 @@ description = "半透明白色蒙版工具 (GPUI)"
 [dependencies]
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
-gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest", "font-kit"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
@@ -15,5 +15,5 @@ serde_json = "1"
 smallvec = "1"
 apply_bg = { path = "../apply_bg" }
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
