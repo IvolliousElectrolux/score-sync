@@ -91,6 +91,8 @@ pub struct ScoreVideoApp {
     aspect_h: u32,
     tracks_bounds: Bounds<Pixels>,
     preview_bounds: Bounds<Pixels>,
+    /// 左侧工作区屏幕 bounds, 供淡入淡出右键菜单定位.
+    left_bounds: Bounds<Pixels>,
     /// 音频片段屏幕 bounds (按当前顺序下标), 供排序拖拽判定落点/幽灵原点.
     audio_clip_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 底部横向缩放/滚动条自身的屏幕 bounds.
@@ -111,6 +113,9 @@ pub struct ScoreVideoApp {
     waveform_pending: std::collections::HashSet<PathBuf>,
     drag: Option<VideoDrag>,
     status: SharedString,
+    fade_menu: Option<FadeContextMenu>,
+    /// 淡向底色时用的 RGB (宿主从工程底色图采样).
+    fade_bg_rgb: [u8; 3],
     /// 「分割音频」按钮按下后进入待命: 下一次鼠标按下时若落在音频轨道内就
     /// 从该处切开对应片段, 否则 (点在别处) 直接取消, 不作任何改动.
     split_audio_armed: bool,
@@ -151,6 +156,7 @@ impl ScoreVideoApp {
             aspect_h: 9,
             tracks_bounds: Bounds::default(),
             preview_bounds: Bounds::default(),
+            left_bounds: Bounds::default(),
             audio_clip_bounds: HashMap::new(),
             track_bar_bounds: Bounds::default(),
             px_per_sec: 20.0,
@@ -162,6 +168,8 @@ impl ScoreVideoApp {
             waveform_pending: std::collections::HashSet::new(),
             drag: None,
             status: "就绪. N 插入下一张组合, 空格播放/暂停, I/O 标记淡入淡出.".into(),
+            fade_menu: None,
+            fade_bg_rgb: DEFAULT_FADE_BG_RGB,
             split_audio_armed: false,
             export_open: false,
             export_container: Container::Mp4,
@@ -187,6 +195,11 @@ impl ScoreVideoApp {
     pub fn set_aspect(&mut self, w: u32, h: u32) {
         self.aspect_w = w.max(1);
         self.aspect_h = h.max(1);
+    }
+
+    /// 工程底色的代表色, 供「保持背景为底色」的淡入淡出叠色/导出.
+    pub fn set_fade_bg_rgb(&mut self, rgb: [u8; 3]) {
+        self.fade_bg_rgb = rgb;
     }
 
     /// 供宿主保存工程时读取当前时间轴 (纯数据快照, 不含选中态), 一并写入工程文件.

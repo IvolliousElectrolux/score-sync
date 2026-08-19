@@ -562,7 +562,11 @@ impl ScoreSyncApp {
         let gen = self.video_sync_gen;
         let group_ids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
         let (aw, ah) = (self.doc.bg_aspect_w, self.doc.bg_aspect_h);
-        self.score_video.update(cx, |v, _| v.set_aspect(aw, ah));
+        let fade_bg = sample_paper_rgb(self.doc.bg_image.as_ref());
+        self.score_video.update(cx, |v, _| {
+            v.set_aspect(aw, ah);
+            v.set_fade_bg_rgb(fade_bg);
+        });
         if group_ids.is_empty() {
             self.score_video.update(cx, |v, cx| v.set_pool(Vec::new(), cx));
             return;
@@ -715,4 +719,34 @@ impl ScoreSyncApp {
         }
         cx.notify();
     }
+}
+
+fn sample_paper_rgb(img: Option<&image::RgbImage>) -> [u8; 3] {
+    let Some(img) = img else {
+        return [0xE8, 0xD4, 0xB0];
+    };
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return [0xE8, 0xD4, 0xB0];
+    };
+    let mut rs = 0u64;
+    let mut gs = 0u64;
+    let mut bs = 0u64;
+    let mut n = 0u64;
+    for yi in 0..8u32 {
+        for xi in 0..8u32 {
+            let x = (w - 1) * xi / 7;
+            let y = (h - 1) * yi / 7;
+            let p = img.get_pixel(x, y);
+            rs += p[0] as u64;
+            gs += p[1] as u64;
+            bs += p[2] as u64;
+            n += 1;
+        }
+    }
+    [
+        (rs / n) as u8,
+        (gs / n) as u8,
+        (bs / n) as u8,
+    ]
 }

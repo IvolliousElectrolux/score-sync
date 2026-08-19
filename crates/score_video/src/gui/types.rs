@@ -144,6 +144,15 @@ pub(crate) enum SnapExclude {
     Fade(Uuid),
     Video(Uuid),
 }
+
+pub(crate) struct FadeContextMenu {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// 无工程底色时预览/导出淡向此米色 (近似谱纸).
+pub(crate) const DEFAULT_FADE_BG_RGB: [u8; 3] = [0xE8, 0xD4, 0xB0];
+
 pub(crate) fn fmt_time(t: f64) -> String {
     let t = t.max(0.0);
     let m = (t / 60.0).floor() as u64;

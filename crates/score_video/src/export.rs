@@ -85,6 +85,8 @@ pub struct ExportOptions {
     pub fps: u32,
     pub crf: u32,
     pub out_path: PathBuf,
+    /// 「保持背景为底色」时 ffmpeg fade 的目标色.
+    pub fade_bg_rgb: [u8; 3],
 }
 
 impl ExportOptions {
@@ -120,7 +122,7 @@ pub enum ExportMsg {
 struct Section {
     t0: f64,
     t1: f64,
-    fade: Option<FadeKind>,
+    fade: Option<(FadeKind, bool)>,
 }
 
 fn plan_sections(timeline: &Timeline) -> Vec<Section> {
@@ -144,7 +146,7 @@ fn plan_sections(timeline: &Timeline) -> Vec<Section> {
             .fades
             .iter()
             .find(|f| (f.start - t0).abs() < 1e-6 && (f.end - t1).abs() < 1e-6)
-            .map(|f| f.kind);
+            .map(|f| (f.kind, f.keep_bg));
         sections.push(Section { t0, t1, fade });
     }
     sections
@@ -387,7 +389,7 @@ fn encode_section(
     list_path: &Path,
     out_path: &Path,
     duration: f64,
-    fade: Option<(FadeKind, f64)>,
+    fade: Option<(FadeKind, f64, bool)>,
     opts: &ExportOptions,
     tx: &async_channel::Sender<ExportMsg>,
 ) -> Result<(), String> {
@@ -396,12 +398,19 @@ fn encode_section(
     // 需要转帧率和转 yuv420p. 额外显式传 `-pix_fmt yuv420p`, 避免个别
     // ffmpeg 构建在 format 滤镜协商时漂移.
     let mut vf = format!("fps={fps},format=yuv420p", fps = opts.fps);
-    if let Some((kind, d)) = fade {
+    if let Some((kind, d, keep_bg)) = fade {
         let t = match kind {
             FadeKind::In => "in",
             FadeKind::Out => "out",
         };
-        vf.push_str(&format!(",fade=t={t}:st=0:d={d:.6}"));
+        if keep_bg {
+            let [r, g, b] = opts.fade_bg_rgb;
+            vf.push_str(&format!(
+                ",fade=t={t}:st=0:d={d:.6}:c=0x{r:02X}{g:02X}{b:02X}"
+            ));
+        } else {
+            vf.push_str(&format!(",fade=t={t}:st=0:d={d:.6}"));
+        }
     }
     let args = vec![
         os("-y"),
@@ -592,7 +601,7 @@ fn run_export(
         }
         let list_path = build_concat_list(work.path(), &format!("sec{i}"), &images, &segs)?;
         let out_mp4 = work.path().join(format!("sec{i}.mp4"));
-        let fade = sec.fade.map(|k| (k, sec.t1 - sec.t0));
+        let fade = sec.fade.map(|(k, keep)| (k, sec.t1 - sec.t0, keep));
         encode_section(&list_path, &out_mp4, sec.t1 - sec.t0, fade, opts, tx)?;
         section_files.push(out_mp4);
     }

@@ -62,7 +62,6 @@ impl ScoreVideoApp {
     pub(super) fn fade_track_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let pps = self.px_per_sec;
         let scroll = self.track_scroll;
-        let selected = self.timeline.selected_fade;
         let sel_range = self.timeline.fade_selection;
         let mut row = div()
             .id("sv_fade_row")
@@ -80,7 +79,8 @@ impl ScoreVideoApp {
                     // 通过 `stop_propagation` 拦截, 这里只处理空白区域拖选新建.
                     let x = f32::from(ev.position.x);
                     let t = this.snap_time(this.x_to_time(x), SnapExclude::None);
-                    this.timeline.selected_fade = None;
+                    this.timeline.clear_fade_selection();
+                    this.fade_menu = None;
                     this.timeline.fade_selection = Some((t, t));
                     this.drag = Some(VideoDrag::FadeSelect { anchor: t });
                     cx.notify();
@@ -89,14 +89,32 @@ impl ScoreVideoApp {
         for f in self.timeline.fades.clone() {
             let x = ((f.start - scroll) as f32) * pps;
             let w = ((f.end - f.start) as f32 * pps).max(2.0);
-            let is_sel = selected == Some(f.id);
-            let label = match f.kind {
-                FadeKind::In => "淡入",
-                FadeKind::Out => "淡出",
+            let is_sel = self.timeline.fade_is_selected(f.id);
+            let keep_bg = f.keep_bg;
+            let label: SharedString = match (f.kind, keep_bg) {
+                (FadeKind::In, false) => "淡入".into(),
+                (FadeKind::Out, false) => "淡出".into(),
+                (FadeKind::In, true) => "淡入·底".into(),
+                (FadeKind::Out, true) => "淡出·底".into(),
             };
-            let base_color = match f.kind {
-                FadeKind::In => rgb(0x0d9488),
-                FadeKind::Out => rgb(0xb45309),
+            // 保持底色: 更浅的填充 + 米色描边, 和淡到黑的块一眼能分开.
+            let base_color = match (f.kind, keep_bg) {
+                (FadeKind::In, false) => rgb(0x0d9488),
+                (FadeKind::Out, false) => rgb(0xb45309),
+                (FadeKind::In, true) => rgb(0x5eead4),
+                (FadeKind::Out, true) => rgb(0xfbbf24),
+            };
+            let border = if is_sel {
+                rgb(0xf8fafc)
+            } else if keep_bg {
+                rgb(0xfef3c7)
+            } else {
+                rgb(0x0f172a)
+            };
+            let text_color = if keep_bg {
+                rgb(0x1e293b)
+            } else {
+                rgb(0xf1f5f9)
             };
             let id = f.id;
             row = row.child(
@@ -109,14 +127,10 @@ impl ScoreVideoApp {
                     .w(px(w))
                     .bg(base_color)
                     .border_1()
-                    .border_color(if is_sel {
-                        rgb(0xf8fafc)
-                    } else {
-                        rgb(0x0f172a)
-                    })
+                    .border_color(border)
                     .rounded_sm()
                     .text_xs()
-                    .text_color(rgb(0xf1f5f9))
+                    .text_color(text_color)
                     .px_1()
                     .overflow_hidden()
                     .cursor_pointer()
@@ -125,8 +139,21 @@ impl ScoreVideoApp {
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
+                            this.fade_menu = None;
                             let x = f32::from(ev.position.x);
-                            this.begin_fade_drag(id, x, cx);
+                            this.begin_fade_drag(id, x, ev.modifiers.control, cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_fade_menu(
+                                id,
+                                f32::from(ev.position.x),
+                                f32::from(ev.position.y),
+                                cx,
+                            );
                         }),
                     ),
             );
@@ -164,7 +191,8 @@ impl ScoreVideoApp {
                                 this.drag = Some(VideoDrag::FadeSelectTrimRight);
                             } else {
                                 let t = this.snap_time(this.x_to_time(mx), SnapExclude::None);
-                                this.timeline.selected_fade = None;
+                                this.timeline.clear_fade_selection();
+                                this.fade_menu = None;
                                 this.timeline.fade_selection = Some((t, t));
                                 this.drag = Some(VideoDrag::FadeSelect { anchor: t });
                             }
@@ -174,6 +202,97 @@ impl ScoreVideoApp {
             );
         }
         row
+    }
+
+    pub(super) fn open_fade_menu(&mut self, id: Uuid, x: f32, y: f32, cx: &mut Context<Self>) {
+        if !self.timeline.fade_is_selected(id) {
+            self.timeline.select_fade(id, false);
+        }
+        let ox = f32::from(self.left_bounds.origin.x);
+        let oy = f32::from(self.left_bounds.origin.y);
+        self.fade_menu = Some(FadeContextMenu {
+            x: x - ox,
+            y: y - oy,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn fade_context_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(ref menu) = self.fade_menu else {
+            return div().into_any_element();
+        };
+        let x = menu.x;
+        let y = menu.y;
+        let checked = self.timeline.selected_keep_bg();
+        let label: SharedString = if checked {
+            "✓  保持背景为底色".into()
+        } else {
+            "    保持背景为底色".into()
+        };
+        div()
+            .id("sv-fade-ctx-backdrop")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.fade_menu = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.fade_menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("sv-fade-ctx-menu")
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .min_w(px(180.))
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x1e293b))
+                    .border_1()
+                    .border_color(rgb(0x64748b))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("sv-fade-keep-bg")
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(0xf1f5f9))
+                            .hover(|s| s.bg(rgb(0x334155)))
+                            .child(label)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.push_undo();
+                                    let keep = this.timeline.toggle_keep_bg_on_selected();
+                                    this.fade_menu = None;
+                                    this.status = if keep {
+                                        "已对选中淡入淡出保持底色 (只淡乐谱, 不淡到黑).".into()
+                                    } else {
+                                        "已恢复为淡到黑.".into()
+                                    };
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     pub(super) fn audio_track_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

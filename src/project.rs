@@ -73,6 +73,9 @@ struct ProjectFadeSpan {
     end: f64,
     /// true = 淡入, false = 淡出
     fade_in: bool,
+    /// 淡向工程底色而不是纯黑; 旧工程没有该字段, 视为 false.
+    #[serde(default)]
+    keep_bg: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -235,10 +238,11 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
             .video_state
             .fades
             .iter()
-            .map(|(start, end, fade_in)| ProjectFadeSpan {
+            .map(|(start, end, fade_in, keep_bg)| ProjectFadeSpan {
                 start: *start,
                 end: *end,
                 fade_in: *fade_in,
+                keep_bg: *keep_bg,
             })
             .collect(),
         audio_clips: doc
@@ -445,7 +449,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
                 .video
                 .fades
                 .into_iter()
-                .map(|f| (f.start, f.end, f.fade_in))
+                .map(|f| (f.start, f.end, f.fade_in, f.keep_bg))
                 .collect(),
             audio_clips: meta
                 .video

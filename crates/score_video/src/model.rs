@@ -7,6 +7,7 @@
 //!
 //! 时间轴总长取当前非空音/视频轨的较短末端; 删短一轨时会把较长轨裁齐.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gpui::SharedString;
@@ -54,6 +55,8 @@ pub struct FadeSpan {
     pub start: f64,
     pub end: f64,
     pub kind: FadeKind,
+    /// true: 淡向工程底色 (只淡乐谱内容); false: 淡向纯黑.
+    pub keep_bg: bool,
 }
 
 /// 音频轨道上的一段.
@@ -83,6 +86,8 @@ pub struct Timeline {
     pub playhead: f64,
     pub selected_clip: Option<Uuid>,
     pub selected_fade: Option<Uuid>,
+    /// Ctrl 多选的淡入淡出; 与 `selected_fade` 同步 (主选中必在集合内).
+    pub selected_fades: HashSet<Uuid>,
     pub selected_audio: Option<Uuid>,
     /// 按键标记淡入淡出起点后, 等待第二次按键给出终点.
     pub pending_fade_anchor: Option<f64>,
@@ -429,6 +434,7 @@ impl Timeline {
             start,
             end,
             kind,
+            keep_bg: false,
         });
         self.fades
             .sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
@@ -452,8 +458,10 @@ impl Timeline {
                 }
             }
         }
-        if let Some(id) = self.selected_fade.take() {
-            self.fades.retain(|f| f.id != id);
+        let fade_ids = self.selected_fade_ids();
+        if !fade_ids.is_empty() {
+            self.fades.retain(|f| !fade_ids.contains(&f.id));
+            self.clear_fade_selection();
         }
         if let Some(id) = self.selected_audio.take() {
             self.audio_clips.retain(|c| c.id != id);
@@ -464,14 +472,86 @@ impl Timeline {
 
     pub fn select_clip_at(&mut self, t: f64) {
         self.selected_clip = self.covering_clip(t).map(|c| c.id);
-        self.selected_fade = None;
+        self.clear_fade_selection();
         self.selected_audio = None;
     }
 
     pub fn select_fade_at(&mut self, t: f64) {
-        self.selected_fade = self.covering_fade(t).map(|f| f.id);
         self.selected_clip = None;
         self.selected_audio = None;
+        match self.covering_fade(t).map(|f| f.id) {
+            Some(id) => self.select_fade(id, false),
+            None => self.clear_fade_selection(),
+        }
+    }
+
+    pub fn fade_is_selected(&self, id: Uuid) -> bool {
+        self.selected_fades.contains(&id)
+    }
+
+    pub fn clear_fade_selection(&mut self) {
+        self.selected_fade = None;
+        self.selected_fades.clear();
+    }
+
+    /// `additive` 为 Ctrl 多选: 已在集合里则去掉, 否则加入.
+    pub fn select_fade(&mut self, id: Uuid, additive: bool) {
+        self.selected_clip = None;
+        self.selected_audio = None;
+        self.fade_selection = None;
+        if additive {
+            if self.selected_fades.contains(&id) {
+                self.selected_fades.remove(&id);
+                if self.selected_fade == Some(id) {
+                    self.selected_fade = self.selected_fades.iter().copied().next();
+                }
+            } else {
+                self.selected_fades.insert(id);
+                self.selected_fade = Some(id);
+            }
+        } else {
+            self.selected_fades.clear();
+            self.selected_fades.insert(id);
+            self.selected_fade = Some(id);
+        }
+    }
+
+    pub fn selected_fade_ids(&self) -> HashSet<Uuid> {
+        let mut ids = self.selected_fades.clone();
+        if let Some(id) = self.selected_fade {
+            ids.insert(id);
+        }
+        ids
+    }
+
+    /// 选中项全部已开则关, 否则全开 (含混合状态).
+    pub fn toggle_keep_bg_on_selected(&mut self) -> bool {
+        let ids = self.selected_fade_ids();
+        if ids.is_empty() {
+            return false;
+        }
+        let all_on = self
+            .fades
+            .iter()
+            .filter(|f| ids.contains(&f.id))
+            .all(|f| f.keep_bg);
+        let keep = !all_on;
+        for f in &mut self.fades {
+            if ids.contains(&f.id) {
+                f.keep_bg = keep;
+            }
+        }
+        keep
+    }
+
+    pub fn selected_keep_bg(&self) -> bool {
+        let ids = self.selected_fade_ids();
+        !ids.is_empty()
+            && self
+                .fades
+                .iter()
+                .filter(|f| ids.contains(&f.id))
+                .all(|f| f.keep_bg)
     }
 
     pub fn remove_audio(&mut self, id: Uuid) {
@@ -589,7 +669,7 @@ impl Timeline {
             fades: self
                 .fades
                 .iter()
-                .map(|f| (f.start, f.end, f.kind == FadeKind::In))
+                .map(|f| (f.start, f.end, f.kind == FadeKind::In, f.keep_bg))
                 .collect(),
             audio_clips: self
                 .audio_clips
@@ -615,11 +695,12 @@ impl Timeline {
         self.fades = snap
             .fades
             .into_iter()
-            .map(|(start, end, is_in)| FadeSpan {
+            .map(|(start, end, is_in, keep_bg)| FadeSpan {
                 id: Uuid::new_v4(),
                 start,
                 end,
                 kind: if is_in { FadeKind::In } else { FadeKind::Out },
+                keep_bg,
             })
             .collect();
         self.audio_clips = snap
@@ -635,7 +716,7 @@ impl Timeline {
             .collect();
         self.playhead = snap.playhead;
         self.selected_clip = None;
-        self.selected_fade = None;
+        self.clear_fade_selection();
         self.selected_audio = None;
         self.pending_fade_anchor = None;
         self.fade_selection = None;
@@ -648,8 +729,8 @@ impl Timeline {
 pub struct TimelineSnapshot {
     /// (group_id, start, end)
     pub video_clips: Vec<(String, f64, f64)>,
-    /// (start, end, 是否为淡入)
-    pub fades: Vec<(f64, f64, bool)>,
+    /// (start, end, 是否为淡入, 是否保持底色)
+    pub fades: Vec<(f64, f64, bool, bool)>,
     /// (音频文件路径, 显示名, 时长秒, 在源文件里的起始偏移秒)
     pub audio_clips: Vec<(PathBuf, String, f64, f64)>,
     pub playhead: f64,
@@ -867,6 +948,7 @@ mod tests {
         assert_eq!(tl2.video_clips.len(), 2);
         assert_eq!(tl2.video_clips[0].group_id, "a");
         assert_eq!(tl2.fades.len(), 1);
+        assert!(!tl2.fades[0].keep_bg);
         assert_eq!(tl2.audio_clips[0].label.to_string(), "第一乐章");
         assert_eq!(tl2.audio_clips[0].path, PathBuf::from("a.wav"));
         assert_eq!(tl2.playhead, 4.0);
@@ -925,5 +1007,36 @@ mod tests {
         assert!((tl.audio_total() - 30.0).abs() < 1e-9);
         assert!((tl.video_end() - 30.0).abs() < 1e-9);
         assert!((tl.timeline_end() - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn keep_bg_toggles_all_selected_fades() {
+        let mut tl = Timeline::new();
+        tl.push_fade_span(0.0, 1.0, FadeKind::Out);
+        tl.push_fade_span(2.0, 3.0, FadeKind::In);
+        tl.push_fade_span(4.0, 5.0, FadeKind::Out);
+        let a = tl.fades[0].id;
+        let b = tl.fades[1].id;
+        tl.select_fade(a, false);
+        tl.select_fade(b, true);
+        assert!(tl.toggle_keep_bg_on_selected());
+        assert!(tl.fades[0].keep_bg);
+        assert!(tl.fades[1].keep_bg);
+        assert!(!tl.fades[2].keep_bg);
+        assert!(!tl.toggle_keep_bg_on_selected());
+        assert!(!tl.fades[0].keep_bg);
+        assert!(!tl.fades[1].keep_bg);
+
+        let snap = tl.snapshot();
+        tl.fades[0].keep_bg = true;
+        tl.load_snapshot(snap.clone());
+        assert!(!tl.fades[0].keep_bg);
+
+        tl.fades[0].keep_bg = true;
+        let snap2 = tl.snapshot();
+        assert!(snap2.fades[0].3);
+        let mut tl3 = Timeline::new();
+        tl3.load_snapshot(snap2);
+        assert!(tl3.fades[0].keep_bg);
     }
 }

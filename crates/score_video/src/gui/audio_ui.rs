@@ -181,7 +181,7 @@ impl ScoreVideoApp {
             return;
         }
         self.timeline.selected_clip = Some(id);
-        self.timeline.selected_fade = None;
+        self.timeline.clear_fade_selection();
         self.timeline.selected_audio = None;
         self.drag_undo_pushed = false;
         if let Some(c) = self.timeline.video_clips.iter().find(|c| c.id == id) {
@@ -203,14 +203,23 @@ impl ScoreVideoApp {
     }
 
     /// 淡入淡出条目上按下: 边缘裁剪或整体拖动 (与 `begin_clip_drag` 逻辑一致).
-    pub(super) fn begin_fade_drag(&mut self, id: Uuid, mouse_x: f32, cx: &mut Context<Self>) {
+    /// Ctrl 按下时只切换多选, 不开始拖动.
+    pub(super) fn begin_fade_drag(
+        &mut self,
+        id: Uuid,
+        mouse_x: f32,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.cancel_split_audio_if_armed(cx) {
             return;
         }
-        self.timeline.selected_fade = Some(id);
-        self.timeline.selected_clip = None;
-        self.timeline.selected_audio = None;
+        self.timeline.select_fade(id, additive);
         self.drag_undo_pushed = false;
+        if additive {
+            cx.notify();
+            return;
+        }
         if let Some(f) = self.timeline.fades.iter().find(|f| f.id == id) {
             let origin_x = f32::from(self.tracks_bounds.origin.x) - (self.track_scroll as f32) * self.px_per_sec;
             let start_x = origin_x + (f.start as f32) * self.px_per_sec;
@@ -239,7 +248,7 @@ impl ScoreVideoApp {
         };
         self.timeline.selected_audio = Some(id);
         self.timeline.selected_clip = None;
-        self.timeline.selected_fade = None;
+        self.timeline.clear_fade_selection();
         self.drag_undo_pushed = false;
         let label = self.timeline.audio_clips[from].label.clone();
         let (origin_x, origin_y) = self

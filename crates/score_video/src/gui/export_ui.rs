@@ -53,6 +53,7 @@ impl ScoreVideoApp {
             fps: self.export_fps(cx),
             crf: self.export_crf,
             out_path: out_path.clone(),
+            fade_bg_rgb: self.fade_bg_rgb,
         };
         self.export_out_path = Some(out_path);
         self.exporting = true;

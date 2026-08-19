@@ -135,9 +135,8 @@ impl ScoreVideoApp {
         let t = self.timeline.playhead;
         let cur_group = self.timeline.covering_clip(t).map(|c| c.group_id.clone());
         let img = cur_group.as_deref().and_then(|g| self.image_for(g));
-        let fade_alpha = self
-            .timeline
-            .covering_fade(t)
+        let fade = self.timeline.covering_fade(t);
+        let fade_alpha = fade
             .map(|f| {
                 let span = (f.end - f.start).max(1e-6);
                 let p = ((t - f.start) / span).clamp(0.0, 1.0);
@@ -147,6 +146,8 @@ impl ScoreVideoApp {
                 }
             })
             .unwrap_or(0.0) as f32;
+        let fade_keep_bg = fade.map(|f| f.keep_bg).unwrap_or(false);
+        let fade_bg = self.fade_bg_rgb;
         let aspect_w = self.aspect_w as f32;
         let aspect_h = self.aspect_h.max(1) as f32;
         // 与下方轨道的播放头竖线共用同一套缩放/滚动映射, 让这条进度条填充位置
@@ -192,7 +193,15 @@ impl ScoreVideoApp {
                             window.paint_quad(gpui::fill(img_bounds, rgb(0x111827)));
                         }
                         if fade_alpha > 0.004 {
-                            let mut faded = rgba(0x000000ff);
+                            let hex = if fade_keep_bg {
+                                ((fade_bg[0] as u32) << 24)
+                                    | ((fade_bg[1] as u32) << 16)
+                                    | ((fade_bg[2] as u32) << 8)
+                                    | 0xff
+                            } else {
+                                0x000000ff
+                            };
+                            let mut faded = rgba(hex);
                             faded.a = fade_alpha;
                             window.paint_quad(gpui::fill(img_bounds, faded));
                         }
@@ -234,6 +243,7 @@ impl ScoreVideoApp {
         self.update_track_view();
         div()
             .id("sv_left")
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -259,6 +269,21 @@ impl ScoreVideoApp {
                     }
                 }),
             )
+            .child(
+                canvas(
+                    {
+                        let entity = cx.entity().clone();
+                        move |bounds, _, cx| {
+                            entity.update(cx, |this, _| {
+                                this.left_bounds = bounds;
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(self.transport_bar(cx))
             .child(self.preview(cx))
             .child(self.tracks(cx))
@@ -273,6 +298,7 @@ impl ScoreVideoApp {
                     .bg(rgb(0x0f172a))
                     .child(self.status.clone()),
             )
+            .child(self.fade_context_menu_overlay(cx))
     }
 
 }
