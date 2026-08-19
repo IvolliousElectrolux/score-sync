@@ -207,6 +207,29 @@ impl ScoreSyncApp {
         }
     }
 
+    pub(super) fn pair_ungrouped(&mut self, cx: &mut Context<Self>) {
+        self.push_crop_undo_all_pages();
+        match self.doc.pair_ungrouped() {
+            Ok(n) => {
+                self.status = format!("已顺序配对合并 {n} 组.").into();
+                self.hint = self.status.clone();
+                self.after_doc_change(cx);
+            }
+            Err(e) => {
+                if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
+                    if let Some(h) = self.crop_histories.get_mut(&cur) {
+                        h.undo.pop();
+                    }
+                }
+                self.dialog = Some(DialogKind::Info {
+                    title: "提示".into(),
+                    body: e.into(),
+                });
+                cx.notify();
+            }
+        }
+    }
+
     pub(super) fn share_into_group(&mut self, cx: &mut Context<Self>) {
         self.push_crop_undo_all_pages();
         match self.doc.share_selected_into_active() {

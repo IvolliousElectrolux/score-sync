@@ -1260,6 +1260,62 @@ impl DocState {
         Ok(ids.len())
     }
 
+    fn region_is_uncombined(&self, rid: &str) -> bool {
+        !self
+            .groups
+            .iter()
+            .any(|g| g.region_ids.len() > 1 && g.region_ids.iter().any(|x| x == rid))
+    }
+
+    fn ungrouped_rids_on_page(&self, page_idx: usize) -> Vec<String> {
+        let Some(page) = self.pages.get(page_idx) else {
+            return Vec::new();
+        };
+        let mut rids: Vec<String> = page
+            .regions
+            .keys()
+            .filter(|rid| self.region_is_uncombined(rid))
+            .cloned()
+            .collect();
+        rids.sort_by_key(|rid| self.region_sort_key(rid));
+        rids
+    }
+
+    fn first_ungrouped_after(&self, page_idx: usize) -> Option<String> {
+        for pi in (page_idx + 1)..self.pages.len() {
+            let rids = self.ungrouped_rids_on_page(pi);
+            if let Some(rid) = rids.into_iter().next() {
+                return Some(rid);
+            }
+        }
+        None
+    }
+
+    /// 当前页未组合块按顺序两两合并; 奇数剩一块则与后续页第一块未组合块配对.
+    pub fn pair_ungrouped(&mut self) -> Result<usize, &'static str> {
+        let page = self.current_page_index;
+        let rids = self.ungrouped_rids_on_page(page);
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut i = 0;
+        while i + 1 < rids.len() {
+            pairs.push((rids[i].clone(), rids[i + 1].clone()));
+            i += 2;
+        }
+        if i < rids.len() {
+            if let Some(next) = self.first_ungrouped_after(page) {
+                pairs.push((rids[i].clone(), next));
+            }
+        }
+        if pairs.is_empty() {
+            return Err("本页没有足够的未组合块可配对.");
+        }
+        for (a, b) in &pairs {
+            self.selected_region_ids = HashSet::from([a.clone(), b.clone()]);
+            self.merge_selected()?;
+        }
+        Ok(pairs.len())
+    }
+
     pub fn share_selected_into_active(&mut self) -> Result<usize, &'static str> {
         if self.active_group().is_none() {
             return Err("请先在「输出组合」里选一个目标组.");
@@ -1914,6 +1970,64 @@ mod tests {
                 (0, 70),
                 (1, 10),
                 (1, 40)
+            ]
+        );
+    }
+
+    fn group_rids(doc: &DocState) -> Vec<Vec<String>> {
+        let mut gs: Vec<( (usize, i32, i32), Vec<String> )> = doc
+            .groups
+            .iter()
+            .map(|g| {
+                let mut rids = g.region_ids.clone();
+                rids.sort_by_key(|rid| doc.region_sort_key(rid));
+                (doc.group_top_key(g), rids)
+            })
+            .collect();
+        gs.sort_by_key(|(k, _)| *k);
+        gs.into_iter().map(|(_, r)| r).collect()
+    }
+
+    #[test]
+    fn pair_ungrouped_pairs_current_page_and_spills_odd_to_next() {
+        let mut doc = DocState::new();
+        doc.pages.push(stub_page(400));
+        doc.pages.push(stub_page(400));
+        seed_bands(
+            &mut doc,
+            0,
+            &[(10, 20), (30, 40), (50, 60), (70, 80), (90, 100)],
+        );
+        seed_bands(
+            &mut doc,
+            1,
+            &[(10, 20), (30, 40), (50, 60), (70, 80), (90, 100)],
+        );
+        doc.current_page_index = 0;
+        assert_eq!(doc.pair_ungrouped().unwrap(), 3);
+        assert_eq!(
+            group_rids(&doc),
+            vec![
+                vec!["r0-0".to_string(), "r0-1".to_string()],
+                vec!["r0-2".to_string(), "r0-3".to_string()],
+                vec!["r0-4".to_string(), "r1-0".to_string()],
+                vec!["r1-1".to_string()],
+                vec!["r1-2".to_string()],
+                vec!["r1-3".to_string()],
+                vec!["r1-4".to_string()],
+            ]
+        );
+
+        doc.current_page_index = 1;
+        assert_eq!(doc.pair_ungrouped().unwrap(), 2);
+        assert_eq!(
+            group_rids(&doc),
+            vec![
+                vec!["r0-0".to_string(), "r0-1".to_string()],
+                vec!["r0-2".to_string(), "r0-3".to_string()],
+                vec!["r0-4".to_string(), "r1-0".to_string()],
+                vec!["r1-1".to_string(), "r1-2".to_string()],
+                vec!["r1-3".to_string(), "r1-4".to_string()],
             ]
         );
     }

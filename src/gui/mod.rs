@@ -46,6 +46,7 @@ actions!(
         ToggleAddBlock,
         ToggleSplitBlock,
         MergeSelected,
+        PairUngrouped,
         DeleteSelected,
         ExportGroups,
         ResetGroups,
@@ -431,6 +432,7 @@ impl Render for ScoreSyncApp {
                 this.toggle_split_block(cx)
             }))
             .on_action(cx.listener(|this, _: &MergeSelected, _, cx| this.merge_selected(cx)))
+            .on_action(cx.listener(|this, _: &PairUngrouped, _, cx| this.pair_ungrouped(cx)))
             .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
                 this.delete_selected(cx)
             }))
@@ -692,6 +694,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("n", ToggleAddBlock, Some("ScoreSync")),
             KeyBinding::new("s", ToggleSplitBlock, Some("ScoreSync")),
             KeyBinding::new("m", MergeSelected, Some("ScoreSync")),
+            KeyBinding::new("ctrl-m", PairUngrouped, Some("ScoreSync")),
             KeyBinding::new("u", UngroupActive, Some("ScoreSync")),
             KeyBinding::new("g", ShareIntoGroup, Some("ScoreSync")),
             KeyBinding::new("e", ExportGroups, Some("ScoreSync")),
