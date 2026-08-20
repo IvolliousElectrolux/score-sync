@@ -25,8 +25,10 @@
   (`ffmpeg.exe` / `ffmpeg`), 二者都不随源码提交: 优先找程序自身同目录下的那份,
   找不到再退回系统 PATH. 本地开发把它们放进 `vendor/` (已 gitignore) 再拷到
   `target/debug(或release)/` 即可; 打包发行版时随可执行文件一起放进同一目录/压缩包.
-  工程面板用的 `底色.png` 从 1.3.6 起不再打进各平台包, 需要时从
-  [v1.0.0](https://github.com/IvolliousElectrolux/score-sync/releases/tag/v1.0.0) 下载.
+  工程面板用的底色图, 以及备用的 ffmpeg / pdfium, 见
+  [sidecars](https://github.com/IvolliousElectrolux/score-sync/releases/tag/sidecars)
+  (GitHub 附件名不能用中文, 底色文件为 `background.png`, 可改名为 `底色.png`).
+  各平台安装包已带对应的 ffmpeg 与 pdfium, 一般不用再下.
 
 ## 构建与运行
 
@@ -96,7 +98,7 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 ### 1.3.6
 - 图标: 手绘扭曲法式 F 谱号嵌进白色圆角方块
 - macOS: 保存/撤销/多选等主快捷键改为 ⌘ (Control 仍可用); 提供 Apple Silicon 安装包
-- 底色: `底色.png` 改为独立资源, 见 [v1.0.0](https://github.com/IvolliousElectrolux/score-sync/releases/tag/v1.0.0), 各平台包不再重复打包
+- 底色: 默认底色图改为独立资源, 与备用 ffmpeg / pdfium 见 [sidecars](https://github.com/IvolliousElectrolux/score-sync/releases/tag/sidecars)
 
 ### 1.3.5
 - 视频: 淡入淡出可 Ctrl 多选; 右键「保持背景为底色」只淡乐谱内容、不淡到黑

@@ -55,6 +55,10 @@ pub fn check_latest() -> Option<UpdateInfo> {
             continue;
         }
         let ver = normalize_tag(&rel.tag_name);
+        // 跳过运行时资源包等非 x.y.z 标签, 避免把 `sidecars` 当成新版本.
+        if parse_semver(&ver).is_none() {
+            continue;
+        }
         if !is_newer(&ver, &current) {
             continue;
         }
@@ -103,16 +107,10 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     let mut parts = s.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
-    let patch = parts
-        .next()
-        .and_then(|p| {
-            p.chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-        .unwrap_or(0);
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some((major, minor, patch))
 }
 
@@ -124,7 +122,10 @@ fn cmp_semver(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
-    cmp_semver(latest, current) == std::cmp::Ordering::Greater
+    match (parse_semver(latest), parse_semver(current)) {
+        (Some(a), Some(b)) => a > b,
+        _ => false,
+    }
 }
 
 /// 从 GitHub Release body 抽出「主要变化」条目, 去掉安装说明.
@@ -267,5 +268,13 @@ mod tests {
         assert!(is_newer("v1.4.0", "1.3.9"));
         assert!(!is_newer("1.3.1", "1.3.1"));
         assert!(!is_newer("1.2.9", "1.3.0"));
+    }
+
+    #[test]
+    fn sidecar_tags_are_not_app_updates() {
+        assert!(!is_newer("sidecars", "1.3.6"));
+        assert!(!is_newer("v0.0.0-sidecars", "1.3.6"));
+        assert!(parse_semver("sidecars").is_none());
+        assert!(parse_semver("1.3.6").is_some());
     }
 }
