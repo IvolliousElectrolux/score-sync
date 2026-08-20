@@ -25,11 +25,11 @@ fn export_stem(doc: &DocState) -> String {
 
 /// 同步导出全部组合 (供测试/脚本; GUI 走分块异步流水线).
 #[allow(dead_code)]
-pub fn export_groups(doc: &mut DocState, out_dir: &Path) -> Result<(usize, PathBuf), String> {
+pub fn export_groups(doc: &mut DocState, out_dir: &Path) -> Result<(usize, PathBuf), crate::error::Error> {
     if doc.groups.is_empty() {
-        return Err("没有可导出的内容.".into());
+        return Err(crate::error::Error::export("没有可导出的内容."));
     }
-    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(out_dir).map_err(|e| crate::error::Error::export(e.to_string()))?;
     let ids: Vec<String> = doc.groups.iter().map(|g| g.id.clone()).collect();
     let saved = export_groups_chunk(doc, out_dir, &ids, 0)?;
     Ok((saved, out_dir.to_path_buf()))
@@ -42,23 +42,27 @@ pub fn export_groups_chunk(
     out_dir: &Path,
     group_ids: &[String],
     start_index: usize,
-) -> Result<usize, String> {
+) -> Result<usize, crate::error::Error> {
     if group_ids.is_empty() {
         return Ok(0);
     }
-    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(out_dir).map_err(|e| crate::error::Error::export(e.to_string()))?;
     let stem = export_stem(doc);
     let mut saved = 0usize;
     for (j, gid) in group_ids.iter().enumerate() {
-        doc.ensure_group_pages(gid)?;
-        let Some(combined) = doc.render_group_final(gid)? else {
+        doc.ensure_group_pages(gid)
+            .map_err(crate::error::Error::export)?;
+        let Some(combined) = doc
+            .render_group_final(gid)
+            .map_err(crate::error::Error::export)?
+        else {
             continue;
         };
         let name = format!("{stem}_g{:02}.png", start_index + j + 1);
         let path = out_dir.join(&name);
         combined
             .save(&path)
-            .map_err(|e| format!("保存失败 {}: {e}", path.display()))?;
+            .map_err(|e| crate::error::Error::export(format!("保存失败 {}: {e}", path.display())))?;
         saved += 1;
     }
     Ok(saved)

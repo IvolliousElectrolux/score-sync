@@ -9,6 +9,19 @@ impl ScoreSyncApp {
         self.dialog = Some(DialogKind::Help);
         cx.notify();
     }
+
+    pub(super) fn show_error(
+        &mut self,
+        title: impl Into<String>,
+        err: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog = Some(DialogKind::Info {
+            title: title.into(),
+            body: err.to_string(),
+        });
+        cx.notify();
+    }
     pub(super) fn btn(
         &self,
         id: impl Into<SharedString>,
@@ -604,22 +617,18 @@ impl ScoreSyncApp {
     pub(super) fn apply_project_bg(&mut self, cx: &mut Context<Self>) {
         crate::trace::log("apply_bg: 点击应用到工程组合");
         if self.doc.groups.is_empty() {
-            self.dialog = Some(DialogKind::Info {
-                title: "提示".into(),
-                body: "当前没有输出组合. 请先分块/合并后再应用底色层.".into(),
-            });
-            cx.notify();
+            self.show_error(
+                "提示",
+                crate::error::Error::msg("当前没有输出组合. 请先分块/合并后再应用底色层."),
+                cx,
+            );
             return;
         }
         let params = self.apply_bg.read(cx).snapshot_params(cx);
         let (path, aw, ah) = match params {
             Ok(v) => v,
             Err(e) => {
-                self.dialog = Some(DialogKind::Info {
-                    title: "无法应用底色".into(),
-                    body: e,
-                });
-                cx.notify();
+                self.show_error("无法应用底色", e, cx);
                 return;
             }
         };
@@ -649,13 +658,13 @@ impl ScoreSyncApp {
                                     self.doc.current_page_index,
                                     crate::page_cache::WINDOW_RADIUS,
                                 );
-                                self.dialog = Some(DialogKind::Info {
-                                    title: "底色不适用".into(),
-                                    body: format!(
+                                self.show_error(
+                                    "底色不适用",
+                                    crate::error::Error::msg(format!(
                                         "{e}\n已取消启用. 请换更大底色 (总谱按高度定画布时左右也要盖住) 或检查谱面尺寸."
-                                    ),
-                                });
-                                cx.notify();
+                                    )),
+                                    cx,
+                                );
                                 return;
                             }
                             self.doc.retain_window(
@@ -684,20 +693,12 @@ impl ScoreSyncApp {
                         cx.notify();
                     }
                     Err(e) => {
-                        self.dialog = Some(DialogKind::Info {
-                            title: "无法应用底色".into(),
-                            body: e,
-                        });
-                        cx.notify();
+                        self.show_error("无法应用底色", crate::error::Error::msg(e), cx);
                     }
                 }
             }
             Err(e) => {
-                self.dialog = Some(DialogKind::Info {
-                    title: "无法打开底色".into(),
-                    body: e.to_string(),
-                });
-                cx.notify();
+                self.show_error("无法打开底色", crate::error::Error::image_open(&path, e), cx);
             }
         }
     }
@@ -733,6 +734,16 @@ impl ScoreSyncApp {
             return self
                 .score_video
                 .update(cx, |v, cx| v.export_dialog(cx).into_any_element());
+        }
+        if self.score_video.read(cx).is_error_open() {
+            return self
+                .score_video
+                .update(cx, |v, cx| v.error_dialog(cx).into_any_element());
+        }
+        if self.apply_bg.read(cx).is_error_open() {
+            return self
+                .apply_bg
+                .update(cx, |v, cx| v.error_dialog(cx).into_any_element());
         }
         let Some(ref dlg) = self.dialog else {
             return div().into_any_element();

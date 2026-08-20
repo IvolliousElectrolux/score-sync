@@ -169,7 +169,9 @@ impl Timeline {
         let mut total = self.audio_total();
         while total > end + 1e-9 && !self.audio_clips.is_empty() {
             let excess = total - end;
-            let last = self.audio_clips.last_mut().unwrap();
+            let Some(last) = self.audio_clips.last_mut() else {
+                break;
+            };
             if last.duration <= excess + MIN_CLIP_DUR {
                 total -= last.duration;
                 self.audio_clips.pop();
@@ -437,7 +439,7 @@ impl Timeline {
             keep_bg: false,
         });
         self.fades
-            .sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+            .sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
     }
 
     /// 删除当前选中的片段/淡入淡出区间 (轨道上的删除快捷键).

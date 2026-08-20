@@ -16,8 +16,20 @@ pub const DEFAULT_ASPECT_W: u32 = 2560;
 pub const DEFAULT_ASPECT_H: u32 = 1440;
 pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"];
 
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AspectError {
+    #[error("比例格式无效: {0} (应为 宽:高, 如 2560:1440)")]
+    Format(String),
+    #[error("比例宽度无效: {0}")]
+    Width(String),
+    #[error("比例高度无效: {0}")]
+    Height(String),
+    #[error("比例宽高必须为正整数")]
+    Zero,
+}
+
 /// 解析 "2560:1440" / "2560x1440" / "16/9" 等.
-pub fn parse_aspect(s: &str) -> Result<(u32, u32), String> {
+pub fn parse_aspect(s: &str) -> Result<(u32, u32), AspectError> {
     let s = s
         .trim()
         .replace('：', ":")
@@ -29,16 +41,16 @@ pub fn parse_aspect(s: &str) -> Result<(u32, u32), String> {
         .filter(|p| !p.is_empty())
         .collect();
     if parts.len() != 2 {
-        return Err(format!("比例格式无效: {s} (应为 宽:高, 如 {DEFAULT_ASPECT_W}:{DEFAULT_ASPECT_H})"));
+        return Err(AspectError::Format(s));
     }
     let w: u32 = parts[0]
         .parse()
-        .map_err(|_| format!("比例宽度无效: {}", parts[0]))?;
+        .map_err(|_| AspectError::Width(parts[0].to_string()))?;
     let h: u32 = parts[1]
         .parse()
-        .map_err(|_| format!("比例高度无效: {}", parts[1]))?;
+        .map_err(|_| AspectError::Height(parts[1].to_string()))?;
     if w == 0 || h == 0 {
-        return Err("比例宽高必须为正整数".into());
+        return Err(AspectError::Zero);
     }
     Ok((w, h))
 }
@@ -47,15 +59,23 @@ pub fn format_aspect(w: u32, h: u32) -> String {
     format!("{w}:{h}")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{name}: {message}")]
 pub struct ProcessError {
     pub name: String,
     pub message: String,
 }
 
-impl std::fmt::Display for ProcessError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.name, self.message)
+impl ProcessError {
+    pub fn new(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn folder(message: impl Into<String>) -> Self {
+        Self::new("处理", message)
     }
 }
 
@@ -218,24 +238,16 @@ fn process_one(
         .unwrap_or_else(|| path.display().to_string());
 
     let sheet = image::open(path)
-        .map_err(|e| ProcessError {
-            name: name.clone(),
-            message: e.to_string(),
-        })?
+        .map_err(|e| ProcessError::new(name.clone(), e.to_string()))?
         .to_rgb8();
 
-    let out = composite_and_crop(&sheet, bg, aspect_w, aspect_h).map_err(|message| ProcessError {
-        name: name.clone(),
-        message,
-    })?;
+    let out = composite_and_crop(&sheet, bg, aspect_w, aspect_h)
+        .map_err(|message| ProcessError::new(name.clone(), message))?;
 
     let dest = out_dir.join(&name);
     DynamicImage::ImageRgb8(out)
         .save(&dest)
-        .map_err(|e| ProcessError {
-            name,
-            message: e.to_string(),
-        })?;
+        .map_err(|e| ProcessError::new(name, e.to_string()))?;
     Ok(())
 }
 
@@ -248,9 +260,9 @@ pub fn process_folder(
     aspect_h: u32,
     jobs: Option<usize>,
     progress: impl Fn(usize, usize, &str) + Send + Sync + 'static,
-) -> Result<ProcessResult, String> {
+) -> Result<ProcessResult, ProcessError> {
     if aspect_w == 0 || aspect_h == 0 {
-        return Err("比例宽高必须为正整数".into());
+        return Err(ProcessError::folder("比例宽高必须为正整数"));
     }
     if let Some(j) = jobs {
         let _ = rayon::ThreadPoolBuilder::new()
@@ -259,23 +271,31 @@ pub fn process_folder(
     }
 
     if !in_dir.is_dir() {
-        return Err(format!("输入目录无效: {}", in_dir.display()));
+        return Err(ProcessError::folder(format!(
+            "输入目录无效: {}",
+            in_dir.display()
+        )));
     }
     if !bg_path.is_file() {
-        return Err(format!("底色不存在: {}", bg_path.display()));
+        return Err(ProcessError::folder(format!(
+            "底色不存在: {}",
+            bg_path.display()
+        )));
     }
 
-    let files = list_images(in_dir).map_err(|e| format!("无法读取目录: {e}"))?;
+    let files = list_images(in_dir)
+        .map_err(|e| ProcessError::folder(format!("无法读取目录: {e}")))?;
     if files.is_empty() {
-        return Err("输入目录没有图片.".into());
+        return Err(ProcessError::folder("输入目录没有图片."));
     }
 
-    fs::create_dir_all(out_dir).map_err(|e| format!("无法创建输出目录: {e}"))?;
+    fs::create_dir_all(out_dir)
+        .map_err(|e| ProcessError::folder(format!("无法创建输出目录: {e}")))?;
 
     let t0 = Instant::now();
     let bg = Arc::new(
         image::open(bg_path)
-            .map_err(|e| format!("无法打开底色: {e}"))?
+            .map_err(|e| ProcessError::folder(format!("无法打开底色: {e}")))?
             .to_rgb8(),
     );
 

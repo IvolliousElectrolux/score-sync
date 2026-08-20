@@ -6,6 +6,7 @@
 
 mod config;
 mod detect_cache;
+mod error;
 mod export;
 mod gui;
 mod model;

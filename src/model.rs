@@ -386,7 +386,7 @@ impl DocState {
         if parts.is_empty() {
             return None;
         }
-        let max_w = parts.iter().map(|p| p.width()).max().unwrap();
+        let max_w = parts.iter().map(|p| p.width()).max().unwrap_or(1);
         if parts.len() == 1 && parts[0].width() == max_w {
             return Some(parts.remove(0));
         }
@@ -1330,7 +1330,9 @@ impl DocState {
             return Err("请先选中要共享加入的块 (如脚注).");
         }
         ids.sort_by_key(|rid| self.region_sort_key(rid));
-        let g = self.active_group_mut().unwrap();
+        let Some(g) = self.active_group_mut() else {
+            return Err("请先在「输出组合」里选一个目标组.");
+        };
         let mut added = 0;
         for rid in ids {
             if !g.region_ids.contains(&rid) {
@@ -1352,7 +1354,9 @@ impl DocState {
         if g.region_ids.len() <= 1 {
             return Err("请选择含多个成员的组合.");
         }
-        let idx = self.groups.iter().position(|x| x.id == g.id).unwrap();
+        let Some(idx) = self.groups.iter().position(|x| x.id == g.id) else {
+            return Err("请选择含多个成员的组合.");
+        };
         let region_ids = g.region_ids.clone();
         let singles: Vec<Group> = region_ids
             .into_iter()

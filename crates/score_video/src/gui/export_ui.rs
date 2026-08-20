@@ -83,10 +83,12 @@ impl ScoreVideoApp {
                         }
                         ExportMsg::Done(Err(e)) => {
                             view.exporting = false;
-                            view.export_progress = "导出失败, 详情见下方日志".into();
+                            view.export_open = false;
+                            view.export_progress = "导出失败".into();
                             for line in e.lines() {
                                 view.export_log.push(line.to_string().into());
                             }
+                            view.show_error("导出失败", e, cx);
                         }
                     }
                     cx.notify();

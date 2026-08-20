@@ -145,6 +145,7 @@ dependencies = [
  "image",
  "rayon",
  "rfd",
+ "thiserror 2.0.19",
  "unicode-segmentation",
 ]
 
@@ -4637,6 +4638,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "thiserror 2.0.19",
  "ureq",
  "uuid",
  "zip",
@@ -4655,6 +4657,7 @@ dependencies = [
  "rfd",
  "rodio",
  "smallvec",
+ "thiserror 2.0.19",
  "uuid",
 ]
 

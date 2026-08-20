@@ -44,33 +44,40 @@ impl ScoreVideoApp {
 
     pub(super) fn add_audio_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut added = 0usize;
+        let mut errors: Vec<String> = Vec::new();
         for p in paths {
-            let dur = crate::audio::probe_duration(&p).unwrap_or(0.0);
-            if dur <= 0.001 {
-                self.status = format!("无法识别音频时长, 已跳过: {}", p.display()).into();
-                continue;
+            match crate::audio::probe_duration(&p) {
+                Ok(dur) if dur > 0.001 => {
+                    if added == 0 {
+                        self.push_undo();
+                    }
+                    let label = p
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("audio")
+                        .to_string();
+                    self.timeline.audio_clips.push(AudioClip {
+                        id: Uuid::new_v4(),
+                        path: p,
+                        label: label.into(),
+                        duration: dur,
+                        offset: 0.0,
+                    });
+                    added += 1;
+                }
+                Ok(_) => {
+                    errors.push(crate::error::Error::audio_probe(&p, "时长为 0").to_string());
+                }
+                Err(e) => errors.push(e.to_string()),
             }
-            if added == 0 {
-                self.push_undo();
-            }
-            let label = p
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("audio")
-                .to_string();
-            self.timeline.audio_clips.push(AudioClip {
-                id: Uuid::new_v4(),
-                path: p,
-                label: label.into(),
-                duration: dur,
-                offset: 0.0,
-            });
-            added += 1;
         }
         if added > 0 {
             self.timeline.fit_after_audio_change();
             self.audio.set_clips(self.timeline.audio_clips.clone());
             self.start_audio_preview_prep(cx);
+        }
+        if !errors.is_empty() {
+            self.show_error("导入音频失败", errors.join("\n\n"), cx);
         }
         cx.notify();
     }
@@ -116,6 +123,16 @@ impl ScoreVideoApp {
                         } else {
                             format!("音频已导入; 预览就绪 {o}/{n} (导出仍用原文件).").into()
                         };
+                        if o != n {
+                            view.show_error(
+                                "音频预览未全部就绪",
+                                format!(
+                                    "已导入, 但 {o}/{n} 个文件转成预览波形失败.\n\
+                                     导出仍使用原文件; 常见原因是 ffmpeg 不在程序目录, 或文件没有音轨."
+                                ),
+                                cx,
+                            );
+                        }
                     }
                     cx.notify();
                 })

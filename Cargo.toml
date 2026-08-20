@@ -30,6 +30,7 @@ smallvec = "1"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ureq = "2"
+thiserror = "2"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

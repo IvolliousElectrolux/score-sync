@@ -44,8 +44,15 @@ fn cluster_sorted(ys: &[i32], gap: i32) -> Vec<Vec<i32>> {
     }
     let mut groups: Vec<Vec<i32>> = vec![vec![ys[0]]];
     for &y in &ys[1..] {
-        let last = groups.last_mut().unwrap();
-        if y - *last.last().unwrap() <= gap {
+        let Some(last) = groups.last_mut() else {
+            groups.push(vec![y]);
+            continue;
+        };
+        let Some(&last_y) = last.last() else {
+            last.push(y);
+            continue;
+        };
+        if y - last_y <= gap {
             last.push(y);
         } else {
             groups.push(vec![y]);
@@ -189,7 +196,10 @@ fn group_staves(line_ys: &[i32]) -> Vec<(i32, i32)> {
         let mut picked = vec![line_ys[i]];
         let mut j = i + 1;
         while picked.len() < n_lines && j < n {
-            let gap = line_ys[j] - *picked.last().unwrap();
+            let Some(&last_y) = picked.last() else {
+                break;
+            };
+            let gap = line_ys[j] - last_y;
             if gap < min_g {
                 j += 1;
                 continue;
@@ -327,7 +337,9 @@ fn left_system_runs(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
         } else if start.is_some() {
             blank += 1;
             if blank >= min_gap {
-                let s = start.take().unwrap();
+                let Some(s) = start.take() else {
+                    continue;
+                };
                 if last_ink - s + 1 >= min_h {
                     runs.push((s, last_ink));
                 }
@@ -991,7 +1003,9 @@ fn merge_close_intervals(intervals: &[(i32, i32)], merge_gap: i32) -> Vec<(i32, 
     intervals.sort();
     let mut merged: Vec<[i32; 2]> = vec![[intervals[0].0, intervals[0].1]];
     for &(a, b) in &intervals[1..] {
-        let last = merged.last_mut().unwrap();
+        let Some(last) = merged.last_mut() else {
+            break;
+        };
         if a <= last[1] + merge_gap {
             last[1] = last[1].max(b);
         } else {

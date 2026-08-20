@@ -119,6 +119,8 @@ pub struct ScoreVideoApp {
     /// 「分割音频」按钮按下后进入待命: 下一次鼠标按下时若落在音频轨道内就
     /// 从该处切开对应片段, 否则 (点在别处) 直接取消, 不作任何改动.
     split_audio_armed: bool,
+    /// 用户可见错误弹窗 (标题, 正文). 导出弹窗打开时优先显示导出界面.
+    error_dialog: Option<(SharedString, SharedString)>,
     export_open: bool,
     export_container: Container,
     /// 帧率: 可直接点击输入框改数字 (与 CRF 那种只能加减的 stepper 不同),
@@ -170,6 +172,7 @@ impl ScoreVideoApp {
             status: "就绪. N 插入下一张组合, 空格播放/暂停, I/O 标记淡入淡出.".into(),
             fade_menu: None,
             fade_bg_rgb: DEFAULT_FADE_BG_RGB,
+            error_dialog: None,
             split_audio_armed: false,
             export_open: false,
             export_container: Container::Mp4,
@@ -221,7 +224,135 @@ impl ScoreVideoApp {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.drag_undo_pushed = false;
+        let missing: Vec<PathBuf> = self
+            .timeline
+            .audio_clips
+            .iter()
+            .filter(|c| !c.path.is_file())
+            .map(|c| c.path.clone())
+            .collect();
+        if !missing.is_empty() {
+            let listed = missing
+                .iter()
+                .map(|p| crate::error::Error::AudioMissing(p.clone()).to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.show_error(
+                "音频文件找不到",
+                format!(
+                    "工程里的音频路径已失效, 谱面切片和淡入淡出仍在.\n\
+                     把文件放回原处即可; 路径变了则先删音频轨上的旧片段再导入.\n\n{listed}"
+                ),
+                cx,
+            );
+        }
         cx.notify();
+    }
+
+    pub fn show_error(
+        &mut self,
+        title: impl Into<String>,
+        err: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        let body = err.to_string();
+        self.status = body.clone().into();
+        self.error_dialog = Some((title.into().into(), body.into()));
+        cx.notify();
+    }
+
+    pub fn is_error_open(&self) -> bool {
+        self.error_dialog.is_some()
+    }
+
+    pub fn error_dialog(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, body) = self
+            .error_dialog
+            .clone()
+            .unwrap_or_else(|| ("出错".into(), SharedString::default()));
+        div()
+            .id("sv_error_overlay")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .occlude()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(440.))
+                    .max_h(px(420.))
+                    .bg(rgb(0x1e293b))
+                    .rounded_lg()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_color(rgb(0xf8fafc))
+                            .text_lg()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xcbd5e1))
+                            .whitespace_normal()
+                            .child(body),
+                    )
+                    .child(
+                        div()
+                            .id("sv_error_ok")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x2563eb))
+                            .text_color(rgb(0xffffff))
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x1d4ed8)))
+                            .child("确定")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.error_dialog = None;
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -235,6 +366,8 @@ impl Render for ScoreVideoApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let overlay = if self.export_open {
             self.export_dialog(cx).into_any_element()
+        } else if self.error_dialog.is_some() {
+            self.error_dialog(cx).into_any_element()
         } else {
             div().into_any_element()
         };
@@ -320,20 +453,23 @@ pub fn run_gui(images: Vec<PathBuf>, audio: Option<PathBuf>) {
                     }
                     app.set_pool(pool, cx);
                     if let Some(a) = audio {
-                        if let Some(dur) = crate::audio::probe_duration(&a) {
-                            app.timeline.audio_clips.push(AudioClip {
-                                id: Uuid::new_v4(),
-                                path: a.clone(),
-                                label: a
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("audio")
-                                    .to_string()
-                                    .into(),
-                                duration: dur,
-                                offset: 0.0,
-                            });
-                            app.timeline.fit_after_audio_change();
+                        match crate::audio::probe_duration(&a) {
+                            Ok(dur) => {
+                                app.timeline.audio_clips.push(AudioClip {
+                                    id: Uuid::new_v4(),
+                                    path: a.clone(),
+                                    label: a
+                                        .file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("audio")
+                                        .to_string()
+                                        .into(),
+                                    duration: dur,
+                                    offset: 0.0,
+                                });
+                                app.timeline.fit_after_audio_change();
+                            }
+                            Err(e) => app.show_error("导入音频失败", e, cx),
                         }
                     }
                     app.focus_handle.focus(window);

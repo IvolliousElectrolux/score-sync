@@ -220,6 +220,18 @@ impl ScoreVideoApp {
             self.play_gen = self.play_gen.wrapping_add(1);
             self.timeline.playhead = self.audio.current_time();
         } else {
+            let missing: Vec<String> = self
+                .timeline
+                .audio_clips
+                .iter()
+                .filter(|c| !c.path.is_file())
+                .map(|c| {
+                    crate::error::Error::AudioMissing(c.path.clone()).to_string()
+                })
+                .collect();
+            if !missing.is_empty() {
+                self.show_error("无法播放音频", missing.join("\n"), cx);
+            }
             self.audio.set_clips(self.timeline.audio_clips.clone());
             self.audio.play_from(self.timeline.playhead);
             self.start_ticker(cx);

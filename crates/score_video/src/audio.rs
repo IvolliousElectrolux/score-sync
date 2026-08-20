@@ -262,19 +262,24 @@ fn open_decoder_raw(path: &Path) -> Option<Decoder<BufReader<File>>> {
 /// `.wav` 走 `hound` 读头. `.m4a` 等 MPEG-4 只问 ffmpeg, 绝不走 rodio
 /// (带封面的商店 m4a 会在 rodio 初始化时 panic).
 /// 其它格式先 rodio 元数据, 失败再 ffmpeg, 最后整段计数.
-pub fn probe_duration(path: &Path) -> Option<f64> {
+pub fn probe_duration(path: &Path) -> Result<f64, crate::error::Error> {
+    if !path.is_file() {
+        return Err(crate::error::Error::AudioMissing(path.to_path_buf()));
+    }
     let ext = file_ext(path);
     if ext == "wav" {
         if let Ok(reader) = hound::WavReader::open(path) {
             let sr = reader.spec().sample_rate as f64;
             let frames = reader.duration() as f64;
             if sr > 0.0 {
-                return Some(frames / sr);
+                return Ok(frames / sr);
             }
         }
     }
     if needs_ffmpeg_preview(path) {
-        return ffmpeg_probe_duration(path);
+        return ffmpeg_probe_duration(path).ok_or_else(|| {
+            crate::error::Error::audio_probe(path, "ffmpeg 无法读取时长 (文件损坏或没有音轨)")
+        });
     }
     if let Some(dec) = open_decoder_raw(path) {
         if let Some(d) = std::panic::catch_unwind(AssertUnwindSafe(|| dec.total_duration()))
@@ -283,22 +288,34 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
         {
             let secs = d.as_secs_f64();
             if secs > 0.001 {
-                return Some(secs);
+                return Ok(secs);
             }
         }
     }
     if let Some(secs) = ffmpeg_probe_duration(path) {
-        return Some(secs);
+        return Ok(secs);
     }
-    let dec = open_decoder_raw(path)?;
+    let Some(dec) = open_decoder_raw(path) else {
+        return Err(crate::error::Error::audio_probe(
+            path,
+            "解码器无法打开此文件",
+        ));
+    };
     let sample_rate = dec.sample_rate() as f64;
     let channels = dec.channels() as f64;
     if sample_rate <= 0.0 || channels <= 0.0 {
-        return None;
+        return Err(crate::error::Error::audio_probe(path, "采样率或声道无效"));
     }
-    let n = std::panic::catch_unwind(AssertUnwindSafe(|| dec.count()))
-        .ok()? as f64;
-    Some(n / sample_rate / channels)
+    let n = match std::panic::catch_unwind(AssertUnwindSafe(|| dec.count())) {
+        Ok(n) => n as f64,
+        Err(_) => {
+            return Err(crate::error::Error::audio_probe(
+                path,
+                "解码器在读取时长时崩溃, 已拦截",
+            ));
+        }
+    };
+    Ok(n / sample_rate / channels)
 }
 
 fn ffmpeg_probe_duration(path: &Path) -> Option<f64> {

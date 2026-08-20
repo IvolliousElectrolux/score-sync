@@ -78,13 +78,9 @@ fn find_pdfium_path() -> Option<PathBuf> {
     find_in_path_env()
 }
 
-pub(crate) fn bind_pdfium() -> Result<Pdfium, String> {
-    let path = find_pdfium_path().ok_or_else(|| {
-        format!(
-            "找不到 {} — 请把它放在程序同目录下, 或安装后加入系统 PATH, \
-             也可设置环境变量 PDFIUM_DYNAMIC_LIB_PATH 指定路径.",
-            lib_name()
-        )
+pub(crate) fn bind_pdfium() -> Result<Pdfium, crate::error::Error> {
+    let path = find_pdfium_path().ok_or_else(|| crate::error::Error::PdfiumMissing {
+        lib: lib_name().to_string(),
     })?;
     let dir = path
         .parent()
@@ -92,11 +88,9 @@ pub(crate) fn bind_pdfium() -> Result<Pdfium, String> {
         .unwrap_or_else(|| PathBuf::from("."));
     let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&dir))
         .or_else(|_| Pdfium::bind_to_library(&path))
-        .map_err(|e| {
-            format!(
-                "无法加载 pdfium ({}): {e}",
-                path.display()
-            )
+        .map_err(|e| crate::error::Error::PdfiumLoad {
+            path: path.clone(),
+            detail: e.to_string(),
         })?;
     Ok(Pdfium::new(bindings))
 }
@@ -108,20 +102,21 @@ pub fn pdf_pages_to_tmp_images_streaming(
     ink_threshold: i32,
     margin: i32,
     mut on_page: impl FnMut(usize, usize, PathBuf),
-) -> Result<usize, String> {
+) -> Result<usize, crate::error::Error> {
     crate::trace::log(&format!("pdf: 开始打开 {}", pdf_path.display()));
     let pdfium = bind_pdfium()?;
     crate::trace::log("pdf: pdfium 已加载");
     let document = pdfium
         .load_pdf_from_file(pdf_path, None)
-        .map_err(|e| format!("打开 PDF 失败: {e}"))?;
+        .map_err(|e| crate::error::Error::PdfOpen(e.to_string()))?;
     crate::trace::log("pdf: 文档已打开");
 
     let tmp_dir = std::env::temp_dir().join(format!(
         "crop_sheet_pdf_{}",
         uuid::Uuid::new_v4().simple()
     ));
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| crate::error::Error::msg(format!("创建 PDF 临时目录失败: {e}")))?;
     if let Ok(mut dirs) = PDF_TMP_DIRS.lock() {
         dirs.push(tmp_dir.clone());
     }
@@ -136,7 +131,10 @@ pub fn pdf_pages_to_tmp_images_streaming(
         tmp_dir.display()
     ));
     if n == 0 {
-        return Err(format!("{} 没有页面.", pdf_path.display()));
+        return Err(crate::error::Error::PdfOpen(format!(
+            "{} 没有页面.",
+            pdf_path.display()
+        )));
     }
 
     for i in 0..n {
@@ -144,11 +142,11 @@ pub fn pdf_pages_to_tmp_images_streaming(
         let page = document
             .pages()
             .get(i as u16)
-            .map_err(|e| format!("读取第 {} 页失败: {e}", i + 1))?;
+            .map_err(|e| crate::error::Error::msg(format!("读取第 {} 页失败: {e}", i + 1)))?;
         let cfg = PdfRenderConfig::new().scale_page_by_factor(PDF_RENDER_SCALE);
         let image = page
             .render_with_config(&cfg)
-            .map_err(|e| format!("渲染第 {} 页失败: {e}", i + 1))?
+            .map_err(|e| crate::error::Error::msg(format!("渲染第 {} 页失败: {e}", i + 1)))?
             .as_image()
             .into_rgb8();
         crate::trace::log(&format!(
@@ -160,7 +158,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
         let out_path = tmp_dir.join(format!("{stem}_p{:03}.png", i + 1));
         image
             .save(&out_path)
-            .map_err(|e| format!("写临时 PNG 失败: {e}"))?;
+            .map_err(|e| crate::error::Error::msg(format!("写临时 PNG 失败: {e}")))?;
         crate::trace::log(&format!("pdf: 识别 {}/{n} …", i + 1));
         crate::detect_cache::detect_and_save(&image, &out_path, ink_threshold, margin);
         crate::trace::log(&format!("pdf: 已写+识别 {}/{n} → 回传 UI", i + 1));
@@ -172,7 +170,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
 
 /// PDF 每页渲染到临时 PNG, 返回按页序的路径列表.
 #[allow(dead_code)]
-pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, String> {
+pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, crate::error::Error> {
     let mut out = Vec::new();
     pdf_pages_to_tmp_images_streaming(
         pdf_path,

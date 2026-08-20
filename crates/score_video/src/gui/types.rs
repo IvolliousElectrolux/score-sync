@@ -107,7 +107,8 @@ pub(crate) fn compute_waveform_peaks(path: &std::path::Path) -> Option<Vec<f32>>
     let dec = crate::audio::open_decoder(path)?;
     let channels = (dec.channels() as usize).max(1);
     let sample_rate = dec.sample_rate().max(1) as f64;
-    let samples: Vec<i16> = dec.collect();
+    let samples: Vec<i16> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.collect()))
+        .ok()?;
     let frames = samples.len() / channels;
     if frames == 0 {
         return None;

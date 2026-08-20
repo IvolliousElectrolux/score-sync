@@ -12,6 +12,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rayon = "1.10"
 rfd = "0.15"
 unicode-segmentation = "1"
+thiserror = "2"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

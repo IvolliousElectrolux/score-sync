@@ -17,11 +17,11 @@ impl ScoreSyncApp {
 
     pub(super) fn run_detect(&mut self, cx: &mut Context<Self>) {
         if self.doc.current_page().is_none() {
-            self.dialog = Some(DialogKind::Info {
-                title: "提示".into(),
-                body: "请先打开图片.".into(),
-            });
-            cx.notify();
+            self.show_error(
+                "提示",
+                crate::error::Error::msg("请先打开图片."),
+                cx,
+            );
             return;
         }
         if !self.current_page_pixels_ready() {
@@ -68,11 +68,11 @@ impl ScoreSyncApp {
 
     pub(super) fn run_detect_all(&mut self, cx: &mut Context<Self>) {
         if self.doc.pages.is_empty() {
-            self.dialog = Some(DialogKind::Info {
-                title: "提示".into(),
-                body: "请先打开图片.".into(),
-            });
-            cx.notify();
+            self.show_error(
+                "提示",
+                crate::error::Error::msg("请先打开图片."),
+                cx,
+            );
             return;
         }
         self.push_crop_undo_all_pages();
@@ -198,11 +198,7 @@ impl ScoreSyncApp {
                         h.undo.pop();
                     }
                 }
-                self.dialog = Some(DialogKind::Info {
-                    title: "提示".into(),
-                    body: e.into(),
-                });
-                cx.notify();
+                self.show_error("提示", crate::error::Error::msg(e), cx);
             }
         }
     }
@@ -221,11 +217,7 @@ impl ScoreSyncApp {
                         h.undo.pop();
                     }
                 }
-                self.dialog = Some(DialogKind::Info {
-                    title: "提示".into(),
-                    body: e.into(),
-                });
-                cx.notify();
+                self.show_error("提示", crate::error::Error::msg(e), cx);
             }
         }
     }
@@ -254,11 +246,7 @@ impl ScoreSyncApp {
                         h.undo.pop();
                     }
                 }
-                self.dialog = Some(DialogKind::Info {
-                    title: "提示".into(),
-                    body: e.into(),
-                });
-                cx.notify();
+                self.show_error("提示", crate::error::Error::msg(e), cx);
             }
         }
     }
@@ -276,11 +264,7 @@ impl ScoreSyncApp {
                         h.undo.pop();
                     }
                 }
-                self.dialog = Some(DialogKind::Info {
-                    title: "提示".into(),
-                    body: e.into(),
-                });
-                cx.notify();
+                self.show_error("提示", crate::error::Error::msg(e), cx);
             }
         }
     }

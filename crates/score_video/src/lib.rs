@@ -5,6 +5,7 @@
 //! 无需真正的视频解码; 导出时用 ffmpeg 把静止图拼接编码并套用淡入淡出.
 
 pub mod audio;
+pub mod error;
 pub mod export;
 pub mod gui;
 pub mod model;

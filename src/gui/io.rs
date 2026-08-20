@@ -57,10 +57,11 @@ impl ScoreSyncApp {
             } else if is_image_path(&path) {
                 images.push(path);
             } else {
-                self.dialog = Some(DialogKind::Info {
-                    title: "不支持".into(),
-                    body: format!("无法打开: {}", path.display()),
-                });
+                self.show_error(
+                    "不支持",
+                    crate::error::Error::msg(format!("无法打开: {}", path.display())),
+                    cx,
+                );
             }
         }
 
@@ -84,18 +85,20 @@ impl ScoreSyncApp {
                             self.mark_video_pool_dirty_all();
                         }
                         Err(e) => {
-                            self.dialog = Some(DialogKind::Info {
-                                title: "打开失败".into(),
-                                body: format!("{}: {e}", path.display()),
-                            });
+                            self.show_error(
+                                "打开失败",
+                                crate::error::Error::msg(format!("{}: {e}", path.display())),
+                                cx,
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    self.dialog = Some(DialogKind::Info {
-                        title: "打开失败".into(),
-                        body: format!("{}: {e}", path.display()),
-                    });
+                    self.show_error(
+                        "打开失败",
+                        crate::error::Error::image_open(&path, e),
+                        cx,
+                    );
                 }
             }
         }
@@ -165,7 +168,7 @@ impl ScoreSyncApp {
                     Err(e) => {
                         let _ = tx.send_blocking(PdfLoadMsg::Err {
                             pdf_name: name,
-                            message: e,
+                            message: e.to_string(),
                         });
                     }
                 }
@@ -220,11 +223,11 @@ impl ScoreSyncApp {
                                     }
                                 }
                                 Err(e) => {
-                                    view.dialog = Some(DialogKind::Info {
-                                        title: "打开失败".into(),
-                                        body: format!("{}: {e}", path.display()),
-                                    });
-                                    cx.notify();
+                                    view.show_error(
+                                        "打开失败",
+                                        crate::error::Error::image_open(&path, e),
+                                        cx,
+                                    );
                                 }
                             }
                         }
@@ -235,11 +238,11 @@ impl ScoreSyncApp {
                             cx.notify();
                         }
                         PdfLoadMsg::Err { pdf_name, message } => {
-                            view.dialog = Some(DialogKind::Info {
-                                title: "PDF 转换失败".into(),
-                                body: format!("{pdf_name}\n{message}"),
-                            });
-                            cx.notify();
+                            view.show_error(
+                                "PDF 转换失败",
+                                crate::error::Error::PdfOpen(format!("{pdf_name}\n{message}")),
+                                cx,
+                            );
                         }
                         PdfLoadMsg::AllFinished => {
                             crate::trace::log("ui: PDF 全部登记完成 (识别已写入 sidecar)");
@@ -394,16 +397,14 @@ impl ScoreSyncApp {
                         view.try_show_update_dialog(cx);
                     }
                     Ok(Err(e)) => {
-                        view.dialog = Some(DialogKind::Info {
-                            title: "打开工程失败".into(),
-                            body: e,
-                        });
+                        view.show_error("打开工程失败", crate::error::Error::project(e), cx);
                     }
                     Err(_) => {
-                        view.dialog = Some(DialogKind::Info {
-                            title: "打开工程失败".into(),
-                            body: "后台打开通道已关闭.".into(),
-                        });
+                        view.show_error(
+                            "打开工程失败",
+                            crate::error::Error::msg("后台打开通道已关闭."),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -485,11 +486,11 @@ impl ScoreSyncApp {
 
     pub(super) fn save_project_as(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.doc.pages.is_empty() {
-            self.dialog = Some(DialogKind::Info {
-                title: "提示".into(),
-                body: "当前没有可保存的页面.".into(),
-            });
-            cx.notify();
+            self.show_error(
+                "提示",
+                crate::error::Error::msg("当前没有可保存的页面."),
+                cx,
+            );
             return;
         }
         let start_dir = self
@@ -537,11 +538,11 @@ impl ScoreSyncApp {
             return;
         }
         if self.doc.pages.is_empty() {
-            self.dialog = Some(DialogKind::Info {
-                title: "提示".into(),
-                body: "当前没有可保存的页面.".into(),
-            });
-            cx.notify();
+            self.show_error(
+                "提示",
+                crate::error::Error::msg("当前没有可保存的页面."),
+                cx,
+            );
             return;
         }
         self.flush_mask_to_doc(cx);
@@ -590,16 +591,14 @@ impl ScoreSyncApp {
                         }
                     }
                     Ok(Err(e)) => {
-                        view.dialog = Some(DialogKind::Info {
-                            title: "保存工程失败".into(),
-                            body: e,
-                        });
+                        view.show_error("保存工程失败", crate::error::Error::project(e), cx);
                     }
                     Err(_) => {
-                        view.dialog = Some(DialogKind::Info {
-                            title: "保存工程失败".into(),
-                            body: "后台保存通道已关闭.".into(),
-                        });
+                        view.show_error(
+                            "保存工程失败",
+                            crate::error::Error::msg("后台保存通道已关闭."),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -614,11 +613,11 @@ impl ScoreSyncApp {
             self.flush_mask_to_doc(cx);
         }
         if self.doc.groups.is_empty() {
-            self.dialog = Some(DialogKind::Info {
-                title: "提示".into(),
-                body: "没有可导出的内容.".into(),
-            });
-            cx.notify();
+            self.show_error(
+                "提示",
+                crate::error::Error::export("没有可导出的内容."),
+                cx,
+            );
             return;
         }
         Self::spawn_native_dialog(
@@ -655,7 +654,7 @@ impl ScoreSyncApp {
 
         cx.spawn(async move |this, cx| {
             let mut saved = 0usize;
-            let mut err: Option<String> = None;
+            let mut err: Option<crate::error::Error> = None;
             let mut abs = 0usize;
             for (chunk_i, chunk) in group_ids.chunks(conc.max(1)).enumerate() {
                 if chunk_i > 0 {
@@ -687,7 +686,7 @@ impl ScoreSyncApp {
                             Err(e) => Some(e),
                         }
                     })
-                    .unwrap_or(Some("导出任务中断".into()));
+                    .unwrap_or(Some(crate::error::Error::export("导出任务中断")));
                 if let Some(e) = batch {
                     err = Some(e);
                     break;
@@ -700,10 +699,7 @@ impl ScoreSyncApp {
                 );
                 match err {
                     Some(e) => {
-                        view.dialog = Some(DialogKind::Info {
-                            title: "导出失败".into(),
-                            body: e,
-                        });
+                        view.show_error("导出失败", e, cx);
                     }
                     None => {
                         view.dialog = Some(DialogKind::Info {

@@ -132,7 +132,7 @@ fn plan_sections(timeline: &Timeline) -> Vec<Section> {
         cuts.push(f.start.clamp(0.0, end));
         cuts.push(f.end.clamp(0.0, end));
     }
-    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
 
     let mut sections = Vec::new();
@@ -311,11 +311,11 @@ fn run_ffmpeg(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = cmd.spawn().map_err(|e| {
-        format!(
-            "启动 ffmpeg 失败 ({step}): {e} — 请确认程序同目录下有 ffmpeg{}, \
-             或系统已安装 ffmpeg 并加入 PATH",
-            std::env::consts::EXE_SUFFIX
-        )
+        crate::error::Error::FfmpegSpawn {
+            step: step.to_string(),
+            source: e,
+        }
+        .to_string()
     })?;
 
     let tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -361,19 +361,28 @@ fn run_ffmpeg(
         })
     });
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("等待 ffmpeg 结束失败 ({step}): {e}"))?;
+    let status = child.wait().map_err(|e| {
+        crate::error::Error::Ffmpeg {
+            step: step.to_string(),
+            detail: format!("等待进程结束失败: {e}"),
+        }
+        .to_string()
+    })?;
     if let Some(h) = reader_handle {
         let _ = h.join();
     }
     if !status.success() {
         let detail = tail.lock().map(|t| t.trim().to_string()).unwrap_or_default();
-        return Err(if detail.is_empty() {
-            format!("ffmpeg 执行失败 ({step}), 退出码 {:?}", status.code())
+        let detail = if detail.is_empty() {
+            format!("退出码 {:?}", status.code())
         } else {
-            format!("ffmpeg 执行失败 ({step}), 退出码 {:?}:\n{detail}", status.code())
-        });
+            format!("退出码 {:?}:\n{detail}", status.code())
+        };
+        return Err(crate::error::Error::Ffmpeg {
+            step: step.to_string(),
+            detail,
+        }
+        .to_string());
     }
     Ok(())
 }
@@ -475,6 +484,11 @@ fn build_audio(
     codec: &str,
     tx: &async_channel::Sender<ExportMsg>,
 ) -> Result<(), String> {
+    for c in clips {
+        if !c.path.is_file() {
+            return Err(crate::error::Error::AudioMissing(c.path.clone()).to_string());
+        }
+    }
     if clips.is_empty() {
         let args = vec![
             os("-y"),
@@ -570,7 +584,8 @@ fn run_export(
     tx: &async_channel::Sender<ExportMsg>,
 ) -> Result<PathBuf, String> {
     let _ = tx.send_blocking(ExportMsg::Progress("准备素材图片...".to_string()));
-    let work = WorkDir::new().map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let work = WorkDir::new()
+        .map_err(|e| crate::error::Error::export(format!("创建临时目录失败: {e}")).to_string())?;
     let mut images = dump_pool_images(pool, work.path(), opts.width, opts.height)?;
     let black_path = work.path().join("__black__.png");
     // 用不透明黑 (alpha=255), 和 `fit_pad` 补边用的颜色/像素格式完全一致,
@@ -586,7 +601,7 @@ fn run_export(
 
     let sections = plan_sections(timeline);
     if sections.is_empty() {
-        return Err("时间轴为空, 无法导出".to_string());
+        return Err(crate::error::Error::export("时间轴为空, 无法导出").to_string());
     }
 
     let mut section_files = Vec::new();

@@ -19,14 +19,15 @@ fn host_trace(msg: &str) {
 }
 
 use gpui::{
-    div, prelude::*, px, rgb, relative, size, App, Application, Bounds, Context, Entity,
+    div, prelude::*, px, rgb, rgba, relative, size, App, Application, Bounds, Context, Entity,
     InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 
 use crate::config::{self, Config};
 use crate::process::{
-    self, format_aspect, parse_aspect, ProcessResult, DEFAULT_ASPECT_H, DEFAULT_ASPECT_W,
+    self, format_aspect, parse_aspect, ProcessError, ProcessResult, DEFAULT_ASPECT_H,
+    DEFAULT_ASPECT_W,
 };
 use crate::text_input::{self, TextInput};
 
@@ -37,7 +38,7 @@ enum UiMsg {
         total: usize,
         name: SharedString,
     },
-    Finished(Result<ProcessResult, String>),
+    Finished(Result<ProcessResult, ProcessError>),
 }
 
 pub struct ApplyBgApp {
@@ -53,6 +54,7 @@ pub struct ApplyBgApp {
     progress_total: usize,
     running: bool,
     hint: SharedString,
+    error_dialog: Option<(SharedString, SharedString)>,
 }
 
 impl ApplyBgApp {
@@ -89,6 +91,7 @@ impl ApplyBgApp {
                 "谱面完整装进比例画布: 装得下则宽=谱面宽上下补边, 上下超了则高=谱面高左右补边. 路径记入 %APPDATA%\\apply_bg; 比例仅在修改或恢复默认后保存 (默认 {DEFAULT_ASPECT_W}:{DEFAULT_ASPECT_H})."
             )
             .into(),
+            error_dialog: None,
         }
     }
 
@@ -124,17 +127,110 @@ impl ApplyBgApp {
     }
 
     /// 供宿主读取当前表单: (底色路径, 比例宽, 比例高).
-    pub fn snapshot_params(&self, cx: &App) -> Result<(PathBuf, u32, u32), String> {
+    pub fn snapshot_params(&self, cx: &App) -> Result<(PathBuf, u32, u32), ProcessError> {
         let bg = self.bg_input.read(cx).text().trim().to_string();
         if bg.is_empty() {
-            return Err("请先选择底色图片.".into());
+            return Err(ProcessError::folder("请先选择底色图片."));
         }
         let path = PathBuf::from(&bg);
         if !path.is_file() {
-            return Err(format!("底色不存在: {}", path.display()));
+            return Err(ProcessError::folder(format!(
+                "底色不存在: {}",
+                path.display()
+            )));
         }
-        let (w, h) = parse_aspect(&self.aspect_text_from_app(cx))?;
+        let (w, h) = parse_aspect(&self.aspect_text_from_app(cx))
+            .map_err(|e| ProcessError::folder(e.to_string()))?;
         Ok((path, w, h))
+    }
+
+    pub fn show_error(
+        &mut self,
+        title: impl Into<String>,
+        err: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        let body = err.to_string();
+        self.status = body.clone().into();
+        self.error_dialog = Some((title.into().into(), body.into()));
+        cx.notify();
+    }
+
+    pub fn is_error_open(&self) -> bool {
+        self.error_dialog.is_some()
+    }
+
+    pub fn error_dialog(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, body) = self
+            .error_dialog
+            .clone()
+            .unwrap_or_else(|| ("出错".into(), SharedString::default()));
+        div()
+            .id("ab_error_overlay")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .occlude()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .id("ab_error_card")
+                    .w(px(480.))
+                    .max_h(px(360.))
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x0f172a))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id("ab_error_body")
+                            .text_sm()
+                            .text_color(rgb(0x334155))
+                            .whitespace_normal()
+                            .child(body),
+                    )
+                    .child(
+                        div()
+                            .id("ab_error_ok")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x2563eb))
+                            .text_color(rgb(0xffffff))
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x1d4ed8)))
+                            .child("确定")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.error_dialog = None;
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            )
     }
 
     fn aspect_text_from_app(&self, cx: &App) -> String {
@@ -425,36 +521,38 @@ impl ApplyBgApp {
         let (aspect_w, aspect_h) = match parse_aspect(&self.aspect_text(cx)) {
             Ok(v) => v,
             Err(e) => {
-                self.status = e.into();
-                cx.notify();
+                self.show_error("比例无效", e, cx);
                 return;
             }
         };
 
         if bg.as_os_str().is_empty() {
-            self.status = "请先选择底色图片.".into();
-            cx.notify();
+            self.show_error("无法处理", ProcessError::folder("请先选择底色图片."), cx);
             return;
         }
         if in_dir.as_os_str().is_empty() {
-            self.status = "请先选择谱面输入目录.".into();
-            cx.notify();
+            self.show_error("无法处理", ProcessError::folder("请先选择谱面输入目录."), cx);
             return;
         }
         if !bg.is_file() {
-            self.status = format!("底色不存在: {}", bg.display()).into();
-            cx.notify();
+            self.show_error(
+                "无法处理",
+                ProcessError::folder(format!("底色不存在: {}", bg.display())),
+                cx,
+            );
             return;
         }
         if !in_dir.is_dir() {
-            self.status = format!("输入目录无效: {}", in_dir.display()).into();
-            cx.notify();
+            self.show_error(
+                "无法处理",
+                ProcessError::folder(format!("输入目录无效: {}", in_dir.display())),
+                cx,
+            );
             return;
         }
         match process::list_images(&in_dir) {
             Ok(files) if files.is_empty() => {
-                self.status = "输入目录没有图片.".into();
-                cx.notify();
+                self.show_error("无法处理", ProcessError::folder("输入目录没有图片."), cx);
                 return;
             }
             Ok(files) => {
@@ -462,8 +560,11 @@ impl ApplyBgApp {
                 self.progress_done = 0;
             }
             Err(e) => {
-                self.status = format!("无法读取目录: {e}").into();
-                cx.notify();
+                self.show_error(
+                    "无法处理",
+                    ProcessError::folder(format!("无法读取目录: {e}")),
+                    cx,
+                );
                 return;
             }
         }
@@ -524,15 +625,21 @@ impl ApplyBgApp {
                             );
                             if !res.errors.is_empty() {
                                 text.push_str(&format!("; 失败 {} 条", res.errors.len()));
-                                for e in res.errors.iter().take(5) {
-                                    text.push_str(&format!(" | {e}"));
-                                }
+                                view.show_error(
+                                    "部分文件处理失败",
+                                    res.errors
+                                        .iter()
+                                        .map(|e| e.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                    cx,
+                                );
                             }
                             view.status = text.into();
                         }
                         UiMsg::Finished(Err(e)) => {
                             view.running = false;
-                            view.status = format!("失败: {e}").into();
+                            view.show_error("处理失败", e, cx);
                         }
                     }
                     cx.notify();
@@ -637,14 +744,21 @@ impl ApplyBgApp {
 
 impl Render for ApplyBgApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let overlay = if self.error_dialog.is_some() {
+            self.error_dialog(cx).into_any_element()
+        } else {
+            div().into_any_element()
+        };
         div()
             .flex()
             .flex_col()
             .size_full()
+            .relative()
             .bg(rgb(0xf8fafc))
             .text_color(rgb(0x0f172a))
             .font_family(crate::ui_font())
             .child(self.panel(cx))
+            .child(overlay)
     }
 }
 
