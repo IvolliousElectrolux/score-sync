@@ -1207,7 +1207,7 @@ impl DocState {
             .collect();
         if ids.len() < 2 {
             return Err(
-                "请至少选中 2 个原子块再合并.\n(可切换标签页后 Ctrl 继续多选以实现跨页组合)",
+                "请至少选中 2 个原子块再合并.\n(可切换标签页后 ⌘/Ctrl 继续多选以实现跨页组合)",
             );
         }
         ids.sort_by_key(|rid| self.region_sort_key(rid));

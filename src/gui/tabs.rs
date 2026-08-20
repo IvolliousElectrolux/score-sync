@@ -71,7 +71,11 @@ impl ScoreSyncApp {
             if let Some(id) = pid {
                 self.crop_histories.remove(&id);
             }
-            self.status = "已关闭页面 (Ctrl+Z 可撤回).".into();
+            self.status = format!(
+                "已关闭页面 ({}Z 可撤回).",
+                apply_bg::primary_mod()
+            )
+            .into();
             self.hint = self.status.clone();
             self.refresh_render(cx);
         } else {

@@ -788,7 +788,7 @@ impl ScoreSyncApp {
                                         if this.region_y_edit.is_some() {
                                             this.apply_edit_y(window, cx);
                                         }
-                                        this.doc.click_region(&rid_sel, ev.modifiers.control);
+                                        this.doc.click_region(&rid_sel, is_primary_mod(&ev.modifiers));
                                         this.scroll_group_list_to_active();
                                         this.after_doc_change(cx);
                                     }),
@@ -836,7 +836,7 @@ impl ScoreSyncApp {
                                         if this.region_y_edit.is_some() {
                                             this.apply_edit_y(window, cx);
                                         }
-                                        this.doc.click_region(&rid, ev.modifiers.control);
+                                        this.doc.click_region(&rid, is_primary_mod(&ev.modifiers));
                                         this.scroll_group_list_to_active();
                                         this.after_doc_change(cx);
                                     }),
@@ -950,7 +950,7 @@ impl ScoreSyncApp {
                                 x: mx,
                                 y: my,
                                 armed: false,
-                                ctrl: ev.modifiers.control,
+                                ctrl: is_primary_mod(&ev.modifiers),
                             });
                             cx.notify();
                         }),

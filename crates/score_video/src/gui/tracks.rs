@@ -141,7 +141,7 @@ impl ScoreVideoApp {
                             cx.stop_propagation();
                             this.fade_menu = None;
                             let x = f32::from(ev.position.x);
-                            this.begin_fade_drag(id, x, ev.modifiers.control, cx);
+                            this.begin_fade_drag(id, x, apply_bg::is_primary_mod(&ev.modifiers), cx);
                         }),
                     )
                     .on_mouse_down(
@@ -492,7 +492,7 @@ impl ScoreVideoApp {
             return;
         }
         let min_pps = self.min_px_per_sec();
-        if event.modifiers.control {
+        if apply_bg::is_primary_mod(&event.modifiers) {
             let mouse_x = f32::from(event.position.x);
             let anchor_t = self.x_to_time(mouse_x);
             let factor = if delta_y > 0.0 { 1.15 } else { 1.0 / 1.15 };

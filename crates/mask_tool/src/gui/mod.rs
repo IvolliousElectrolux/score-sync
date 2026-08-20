@@ -201,8 +201,11 @@ impl MaskToolApp {
             opacity_undid: false,
             drag: None,
             status: "就绪".into(),
-            hint: "框选/折线与画笔各有独立颜色与透明度 (点色块打开选色盘).\n橡皮单击擦顶层, 拖动擦光. Ctrl+Z/Y 撤重."
-                .into(),
+            hint: format!(
+                "框选/折线与画笔各有独立颜色与透明度 (点色块打开选色盘).\n橡皮单击擦顶层, 拖动擦光. {}Z/Y 撤重.",
+                apply_bg::primary_mod()
+            )
+            .into(),
             embed_side_width: 0.0,
             session_key: None,
             prefs_dirty: false,
@@ -362,7 +365,6 @@ impl Render for MaskToolApp {
 pub fn run_gui(initial: Option<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         cx.bind_keys([
-            KeyBinding::new("ctrl-o", OpenFile, Some("MaskTool")),
             KeyBinding::new("e", ExportImage, Some("MaskTool")),
             KeyBinding::new("f", FitView, Some("MaskTool")),
             KeyBinding::new("delete", DeleteSelected, Some("MaskTool")),
@@ -371,11 +373,12 @@ pub fn run_gui(initial: Option<PathBuf>) {
             KeyBinding::new("l", TogglePolyMode, Some("MaskTool")),
             KeyBinding::new("p", TogglePanMode, Some("MaskTool")),
             KeyBinding::new("escape", CancelPolyDraft, Some("MaskTool")),
-            KeyBinding::new("ctrl-a", SelectAll, Some("MaskTool")),
-            KeyBinding::new("ctrl-z", Undo, Some("MaskTool")),
-            KeyBinding::new("ctrl-y", Redo, Some("MaskTool")),
-            KeyBinding::new("ctrl-shift-z", Redo, Some("MaskTool")),
         ]);
+        cx.bind_keys(apply_bg::bind_primary("o", OpenFile, Some("MaskTool")));
+        cx.bind_keys(apply_bg::bind_primary("a", SelectAll, Some("MaskTool")));
+        cx.bind_keys(apply_bg::bind_primary("z", Undo, Some("MaskTool")));
+        cx.bind_keys(apply_bg::bind_primary("y", Redo, Some("MaskTool")));
+        cx.bind_keys(apply_bg::bind_primary("shift-z", Redo, Some("MaskTool")));
         let bounds = Bounds::centered(None, size(px(1200.), px(860.)), cx);
         let initial = initial.clone();
         cx.open_window(

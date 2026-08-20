@@ -49,7 +49,7 @@ impl MaskToolApp {
             self.confirm_eyedropper_at(ix, iy, cx);
             return;
         }
-        let control = ev.modifiers.control;
+        let control = apply_bg::is_primary_mod(&ev.modifiers);
         let shift = ev.modifiers.shift;
 
         match self.mode {
@@ -491,7 +491,7 @@ impl MaskToolApp {
             return;
         }
         // 无模式禁止移动页面; Ctrl+滚轮缩放始终可用
-        if !ev.modifiers.control {
+        if !apply_bg::is_primary_mod(&ev.modifiers) {
             if self.mode == ToolMode::Select {
                 return;
             }

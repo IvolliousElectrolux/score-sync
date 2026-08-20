@@ -465,7 +465,11 @@ impl ScoreSyncApp {
         self.user_zoomed = false;
         self.zoom = 1.0;
         self.pan = point(0.0, 0.0);
-        self.status = "已新建空白工程. 可用 Ctrl+O 导入图片/PDF.".into();
+        self.status = format!(
+            "已新建空白工程. 可用 {}O 导入图片/PDF.",
+            apply_bg::primary_mod()
+        )
+        .into();
         self.hint = self.status.clone();
         self.try_show_update_dialog(cx);
         cx.notify();

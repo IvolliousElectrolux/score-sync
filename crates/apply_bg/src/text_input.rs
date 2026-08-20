@@ -757,13 +757,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, None),
         KeyBinding::new("home", Home, None),
         KeyBinding::new("end", End, None),
-        KeyBinding::new("ctrl-a", SelectAll, None),
-        KeyBinding::new("ctrl-v", Paste, None),
-        KeyBinding::new("ctrl-c", Copy, None),
-        KeyBinding::new("ctrl-x", Cut, None),
-        KeyBinding::new("cmd-a", SelectAll, None),
-        KeyBinding::new("cmd-v", Paste, None),
-        KeyBinding::new("cmd-c", Copy, None),
-        KeyBinding::new("cmd-x", Cut, None),
     ]);
+    cx.bind_keys(crate::bind_primary("a", SelectAll, None));
+    cx.bind_keys(crate::bind_primary("v", Paste, None));
+    cx.bind_keys(crate::bind_primary("c", Copy, None));
+    cx.bind_keys(crate::bind_primary("x", Cut, None));
 }

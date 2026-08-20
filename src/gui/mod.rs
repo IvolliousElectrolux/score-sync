@@ -79,6 +79,7 @@ pub(crate) use crate::pdf;
 pub(crate) use crate::project::{self, is_project_path};
 pub(crate) use apply_bg::text_input::TextInput;
 pub(crate) use apply_bg::gui::ApplyBgApp;
+pub(crate) use apply_bg::is_primary_mod;
 pub(crate) use mask_tool::gui::MaskToolApp;
 pub(crate) use mask_tool::mask::MaskRect;
 pub(crate) use score_video::gui::ScoreVideoApp;
@@ -215,8 +216,11 @@ impl ScoreSyncApp {
             view_bounds: Bounds::default(),
             drag: None,
             status: "就绪".into(),
-            hint: "拖入/打开图片、PDF 或工程. Ctrl+S 保存工程. 标签右键可复制本页."
-                .into(),
+            hint: format!(
+                "拖入/打开图片、PDF 或工程. {}S 保存工程. 标签右键可复制本页.",
+                apply_bg::primary_mod()
+            )
+            .into(),
             region_panel_open: false,
             side_width: SIDE_PANEL_W,
             side_tool: SideTool::Crop,
@@ -674,27 +678,12 @@ pub fn run_gui(initial: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         apply_bg::text_input::bind_keys(cx);
         score_video::gui::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-o", OpenFile, Some("ScoreSync")),
-            KeyBinding::new("ctrl-shift-n", NewProject, Some("ScoreSync")),
-            KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreSync")),
-            KeyBinding::new("ctrl-s", SaveProject, Some("ScoreSync")),
-            KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("ScoreSync")),
-            // 任意面板 (含视频 / 输入框失焦前) 都能保存
-            KeyBinding::new("ctrl-s", SaveProject, None),
-            KeyBinding::new("ctrl-shift-s", SaveProjectAs, None),
-            KeyBinding::new("ctrl-shift-o", OpenProject, None),
-            KeyBinding::new("ctrl-shift-n", NewProject, None),
-            KeyBinding::new("ctrl-s", SaveProject, Some("ScoreVideo")),
-            KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("ScoreVideo")),
-            KeyBinding::new("ctrl-shift-o", OpenProject, Some("ScoreVideo")),
-            KeyBinding::new("ctrl-shift-n", NewProject, Some("ScoreVideo")),
+        let mut keys = vec![
             KeyBinding::new("d", DetectPage, Some("ScoreSync")),
             KeyBinding::new("a", DetectAll, Some("ScoreSync")),
             KeyBinding::new("n", ToggleAddBlock, Some("ScoreSync")),
             KeyBinding::new("s", ToggleSplitBlock, Some("ScoreSync")),
             KeyBinding::new("m", MergeSelected, Some("ScoreSync")),
-            KeyBinding::new("ctrl-m", PairUngrouped, Some("ScoreSync")),
             KeyBinding::new("u", UngroupActive, Some("ScoreSync")),
             KeyBinding::new("g", ShareIntoGroup, Some("ScoreSync")),
             KeyBinding::new("e", ExportGroups, Some("ScoreSync")),
@@ -708,16 +697,6 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("escape", CancelParamEdit, Some("ScoreSync")),
             KeyBinding::new("enter", ConfirmParamEdit, None),
             KeyBinding::new("escape", CancelParamEdit, None),
-            KeyBinding::new("ctrl-z", Undo, Some("ScoreSync")),
-            KeyBinding::new("ctrl-y", Redo, Some("ScoreSync")),
-            KeyBinding::new("ctrl-shift-z", Redo, Some("ScoreSync")),
-            KeyBinding::new("ctrl-a", SelectAllPageRegions, Some("ScoreSync")),
-            // 蒙版工具 (右侧切换到蒙版时 key_context=MaskTool)
-            KeyBinding::new("ctrl-o", mask_tool::gui::OpenFile, Some("MaskTool")),
-            KeyBinding::new("ctrl-shift-o", OpenProject, Some("MaskTool")),
-            KeyBinding::new("ctrl-shift-n", NewProject, Some("MaskTool")),
-            KeyBinding::new("ctrl-s", SaveProject, Some("MaskTool")),
-            KeyBinding::new("ctrl-shift-s", SaveProjectAs, Some("MaskTool")),
             KeyBinding::new("e", mask_tool::gui::ExportImage, Some("MaskTool")),
             KeyBinding::new("f", mask_tool::gui::FitView, Some("MaskTool")),
             KeyBinding::new("delete", mask_tool::gui::DeleteSelected, Some("MaskTool")),
@@ -726,11 +705,35 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("l", mask_tool::gui::TogglePolyMode, Some("MaskTool")),
             KeyBinding::new("p", mask_tool::gui::TogglePanMode, Some("MaskTool")),
             KeyBinding::new("escape", mask_tool::gui::CancelPolyDraft, Some("MaskTool")),
-            KeyBinding::new("ctrl-a", mask_tool::gui::SelectAll, Some("MaskTool")),
-            KeyBinding::new("ctrl-z", mask_tool::gui::Undo, Some("MaskTool")),
-            KeyBinding::new("ctrl-y", mask_tool::gui::Redo, Some("MaskTool")),
-            KeyBinding::new("ctrl-shift-z", mask_tool::gui::Redo, Some("MaskTool")),
-        ]);
+        ];
+        keys.extend(apply_bg::bind_primary("o", OpenFile, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("s", SaveProject, None));
+        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, None));
+        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, None));
+        keys.extend(apply_bg::bind_primary("shift-n", NewProject, None));
+        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreVideo")));
+        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreVideo")));
+        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreVideo")));
+        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreVideo")));
+        keys.extend(apply_bg::bind_primary("m", PairUngrouped, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("z", Undo, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("y", Redo, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("shift-z", Redo, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("a", SelectAllPageRegions, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("o", mask_tool::gui::OpenFile, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("a", mask_tool::gui::SelectAll, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("z", mask_tool::gui::Undo, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("y", mask_tool::gui::Redo, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("shift-z", mask_tool::gui::Redo, Some("MaskTool")));
+        cx.bind_keys(keys);
         let bounds = default_window_bounds(cx);
         let initial = initial.clone();
         cx.open_window(

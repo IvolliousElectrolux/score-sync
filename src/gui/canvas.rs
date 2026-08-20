@@ -168,7 +168,7 @@ impl ScoreSyncApp {
         let (sx, sy) = self.screen_in_view(event.position);
         let xform = self.xform();
         let (_ix, iy) = xform.screen_to_image(sx, sy);
-        let ctrl = event.modifiers.control;
+        let ctrl = is_primary_mod(&event.modifiers);
 
         if self.canvas_tool == CanvasTool::SplitBlock {
             self.push_crop_undo_current();
@@ -400,7 +400,7 @@ impl ScoreSyncApp {
             ScrollDelta::Pixels(p) => f32::from(p.y),
             ScrollDelta::Lines(l) => l.y * 30.0,
         };
-        if event.modifiers.control {
+        if is_primary_mod(&event.modifiers) {
             let (sx, sy) = self.screen_in_view(event.position);
             let xform = self.xform();
             let (ix, iy) = xform.screen_to_image(sx, sy);

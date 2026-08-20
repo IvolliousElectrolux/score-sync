@@ -520,7 +520,11 @@ impl ScoreSyncApp {
                 self.restore_crop_from_mask_target(cx);
                 self.focus_handle.focus(window);
                 self.status = "分块工具".into();
-                self.hint = "拖入/打开图片、PDF 或工程. Ctrl+S 保存工程.".into();
+                self.hint = format!(
+                    "拖入/打开图片、PDF 或工程. {}S 保存工程.",
+                    apply_bg::primary_mod()
+                )
+                .into();
             }
             SideTool::Mask => {
                 self.mask_target = None;
@@ -530,8 +534,11 @@ impl ScoreSyncApp {
                 self.mask_tool.read(cx).focus_handle_ref().focus(window);
                 self.status = "蒙版工具".into();
                 self.hint =
-                    "蒙版编辑当前组合的拼合图. 标签切换组合; Ctrl+A 全选蒙版."
-                        .into();
+                    format!(
+                        "蒙版编辑当前组合的拼合图. 标签切换组合; {}A 全选蒙版.",
+                        apply_bg::primary_mod()
+                    )
+                    .into();
             }
             SideTool::Project => {
                 self.focus_handle.focus(window);

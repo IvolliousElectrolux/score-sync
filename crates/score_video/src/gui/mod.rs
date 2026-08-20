@@ -71,10 +71,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("o", MarkFadeOut, Some("ScoreVideo")),
         KeyBinding::new("delete", DeleteSelected, Some("ScoreVideo")),
         KeyBinding::new("backspace", DeleteSelected, Some("ScoreVideo")),
-        KeyBinding::new("ctrl-z", Undo, Some("ScoreVideo")),
-        KeyBinding::new("ctrl-y", Redo, Some("ScoreVideo")),
-        KeyBinding::new("ctrl-shift-z", Redo, Some("ScoreVideo")),
     ]);
+    cx.bind_keys(apply_bg::bind_primary("z", Undo, Some("ScoreVideo")));
+    cx.bind_keys(apply_bg::bind_primary("y", Redo, Some("ScoreVideo")));
+    cx.bind_keys(apply_bg::bind_primary("shift-z", Redo, Some("ScoreVideo")));
 }
 
 pub struct ScoreVideoApp {

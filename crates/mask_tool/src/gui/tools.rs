@@ -175,7 +175,7 @@ impl MaskToolApp {
             ToolMode::Poly => "折线: 逐点连线, 靠近首点吸附闭环 (右键取消)".into(),
             ToolMode::Brush => "画笔 (拖动画布涂抹; 可改颜色/粗细)".into(),
             ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光".into(),
-            ToolMode::Select => "选择 (可 Ctrl 多选 / Shift 拖选)".into(),
+            ToolMode::Select => format!("选择 (可 {}多选 / Shift 拖选)", apply_bg::primary_mod()).into(),
             ToolMode::Pan => "平移".into(),
         }
     }

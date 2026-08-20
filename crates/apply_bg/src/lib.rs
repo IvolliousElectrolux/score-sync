@@ -2,8 +2,11 @@
 
 pub mod config;
 pub mod gui;
+pub mod keys;
 pub mod process;
 pub mod text_input;
+
+pub use keys::{bind_primary, is_primary_mod, primary_mod, primary_shift, with_mod};
 
 /// 界面中文字体: Windows 用雅黑, macOS 用苹方.
 pub fn ui_font() -> &'static str {

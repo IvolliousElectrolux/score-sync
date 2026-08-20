@@ -571,9 +571,12 @@ impl MaskToolApp {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgb(0x334155))
                             .child(if embedded {
-                                "蒙版列表 (Ctrl+A 全选 · Delete 删除)"
+                                format!(
+                                    "蒙版列表 ({}A 全选 · Delete 删除)",
+                                    apply_bg::primary_mod()
+                                )
                             } else {
-                                "蒙版列表 (选中后 Delete 删除)"
+                                "蒙版列表 (选中后 Delete 删除)".to_string()
                             }),
                     )
             .child(
@@ -609,7 +612,7 @@ impl MaskToolApp {
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
-                                    if ev.modifiers.control {
+                                    if apply_bg::is_primary_mod(&ev.modifiers) {
                                         if this.selected.contains(&id_click) {
                                             this.selected.remove(&id_click);
                                         } else {

@@ -74,7 +74,7 @@ impl ScoreSyncApp {
             .items_center()
             .gap_x_1()
             .w_full()
-            .child(self.menu_item("open", "打开 (Ctrl+O)", false, Self::open_file, cx))
+            .child(self.menu_item("open", apply_bg::with_mod("打开", "O"), false, Self::open_file, cx))
             .child(self.menu_item(
                 "detect",
                 "识别本页 (D)",
@@ -522,7 +522,7 @@ impl ScoreSyncApp {
                             ))
                             .child(self.btn(
                                 "proj_save",
-                                "保存 (Ctrl+S)",
+                                apply_bg::with_mod("保存", "S"),
                                 true,
                                 |this, window, cx| this.save_project(window, cx),
                                 cx,
@@ -747,7 +747,7 @@ impl ScoreSyncApp {
             return self.update_available_dialog(cx).into_any_element();
         }
         let (title, body) = match dlg {
-            DialogKind::Help => ("操作说明".to_string(), HELP_TEXT.to_string()),
+            DialogKind::Help => ("操作说明".to_string(), help_text()),
             DialogKind::Info { title, body } => (title.clone(), body.clone()),
             DialogKind::UnsavedExit
             | DialogKind::UnsavedNew
