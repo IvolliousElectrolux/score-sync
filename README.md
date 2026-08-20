@@ -4,7 +4,7 @@
 
 从扫描谱或 PDF 出发, 在同一界面完成 **谱表分块 → 蒙版清理 → 加底色裁切 → 视频剪辑导出**, 支持工程保存/继续编辑, 一路做到可以直接发布的同步曲谱视频 (MP4/MKV).
 
-当前版本: **1.3.5**
+当前版本: **1.3.6**
 
 ## 功能
 
@@ -25,6 +25,8 @@
   (`ffmpeg.exe` / `ffmpeg`), 二者都不随源码提交: 优先找程序自身同目录下的那份,
   找不到再退回系统 PATH. 本地开发把它们放进 `vendor/` (已 gitignore) 再拷到
   `target/debug(或release)/` 即可; 打包发行版时随可执行文件一起放进同一目录/压缩包.
+  工程面板用的 `底色.png` 从 1.3.6 起不再打进各平台包, 需要时从
+  [v1.0.0](https://github.com/IvolliousElectrolux/score-sync/releases/tag/v1.0.0) 下载.
 
 ## 构建与运行
 
@@ -80,7 +82,7 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 
 ## 常用快捷键
 
-应用内按 `H` / `F1` 可查看完整说明. 概要:
+应用内按 `H` / `F1` 可查看完整说明. 概要 (Windows 为 Ctrl, macOS 为 ⌘):
 
 - `Ctrl+O` 打开图片/PDF
 - `D` / `A` 识别本页 / 全部页
@@ -90,6 +92,11 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
   `I`/`O` 标记淡入/淡出, 轨道区 `Ctrl+滚轮` 缩放
 
 ## 版本摘要
+
+### 1.3.6
+- 图标: 手绘扭曲法式 F 谱号嵌进白色圆角方块
+- macOS: 保存/撤销/多选等主快捷键改为 ⌘ (Control 仍可用); 提供 Apple Silicon 安装包
+- 底色: `底色.png` 改为独立资源, 见 [v1.0.0](https://github.com/IvolliousElectrolux/score-sync/releases/tag/v1.0.0), 各平台包不再重复打包
 
 ### 1.3.5
 - 视频: 淡入淡出可 Ctrl 多选; 右键「保持背景为底色」只淡乐谱内容、不淡到黑
