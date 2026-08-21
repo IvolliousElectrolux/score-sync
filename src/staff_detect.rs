@@ -1,12 +1,25 @@
-//! 谱表行检测: 先认五线谱表, 再按左侧墨迹连通收成谱行.
+//! 谱表行检测: 先认五线谱表, 再看相邻谱表之间是否有墨迹像素直接 8 连通.
 //!
-//! 钢琴大谱表、合唱、交响用同一套逻辑 — 质量够的谱子左侧括线/行首小节线
-//! 会自然把同一谱行连上, 行与行之间没有这种连通就不会粘.
+//! 只把上下两核之间真正挨着的像素当成连通 (含对角). 贴着页面四边的墨迹
+//! 以及和它们连在一起的像素不参与. 剩下的连通域若没有内部孔洞 (实心边条
+//! 等单连通块), 也不参与连通.
 
 use std::collections::VecDeque;
 
 use image::{Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
+
+const D8: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+const D4: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
 /// 旧工程 / sidecar 字段, 识别已不再使用.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,28 +88,6 @@ fn longest_black_run(row: &[bool]) -> usize {
         }
     }
     best
-}
-
-fn longest_black_run_start(row: &[bool]) -> Option<usize> {
-    let mut best_len = 0usize;
-    let mut best_start = 0usize;
-    let mut cur = 0usize;
-    let mut cur_start = 0usize;
-    for (x, &v) in row.iter().enumerate() {
-        if v {
-            if cur == 0 {
-                cur_start = x;
-            }
-            cur += 1;
-            if cur > best_len {
-                best_len = cur;
-                best_start = cur_start;
-            }
-        } else {
-            cur = 0;
-        }
-    }
-    (best_len > 0).then_some(best_start)
 }
 
 fn n_transitions(row: &[bool]) -> usize {
@@ -313,14 +304,206 @@ fn looks_like_system(ink: &[Vec<bool>], y0: i32, y1: i32) -> bool {
     has_brace(ink, y0, y1) || count_barlines(ink, y0, y1) >= 2
 }
 
-/// 左侧条带里连续的谱行竖段 (行间缝会断开). 漏检五线时仍能抓住整块谱行.
-fn left_system_runs(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
-    let hit = left_band_hit_rows(ink);
+/// 去掉贴着页面四边的墨迹, 以及和它们 8 连通的全部像素 (边框 / 通页竖线).
+fn strip_border_components(ink: &[Vec<bool>]) -> Vec<Vec<bool>> {
+    if ink.is_empty() {
+        return Vec::new();
+    }
+    let h = ink.len();
+    let w = ink[0].len();
+    if w == 0 {
+        return vec![Vec::new(); h];
+    }
+    let mut border = vec![vec![false; w]; h];
+    let mut q = VecDeque::new();
+    let mut push_seed = |x: usize, y: usize, q: &mut VecDeque<(usize, usize)>| {
+        if ink[y][x] && !border[y][x] {
+            border[y][x] = true;
+            q.push_back((x, y));
+        }
+    };
+    for x in 0..w {
+        push_seed(x, 0, &mut q);
+        if h > 1 {
+            push_seed(x, h - 1, &mut q);
+        }
+    }
+    for y in 0..h {
+        push_seed(0, y, &mut q);
+        if w > 1 {
+            push_seed(w - 1, y, &mut q);
+        }
+    }
+    while let Some((x, y)) = q.pop_front() {
+        for (dx, dy) in D8 {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                continue;
+            }
+            let ux = nx as usize;
+            let uy = ny as usize;
+            if !ink[uy][ux] || border[uy][ux] {
+                continue;
+            }
+            border[uy][ux] = true;
+            q.push_back((ux, uy));
+        }
+    }
+    let mut out = vec![vec![false; w]; h];
+    for y in 0..h {
+        for x in 0..w {
+            out[y][x] = ink[y][x] && !border[y][x];
+        }
+    }
+    out
+}
+
+/// 丢掉没有内部孔洞的连通域 (实心边条、污点). 谱表被小节线封住后行间是孔.
+fn keep_ccs_with_holes(ink: &[Vec<bool>]) -> Vec<Vec<bool>> {
+    if ink.is_empty() || ink[0].is_empty() {
+        return Vec::new();
+    }
+    let h = ink.len();
+    let w = ink[0].len();
+    let mut label = vec![vec![0i32; w]; h];
+    let mut q = VecDeque::new();
+    let mut boxes: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut next_id = 1i32;
+    for y in 0..h {
+        for x in 0..w {
+            if !ink[y][x] || label[y][x] != 0 {
+                continue;
+            }
+            let id = next_id;
+            next_id += 1;
+            let mut x0 = x as i32;
+            let mut y0 = y as i32;
+            let mut x1 = x as i32;
+            let mut y1 = y as i32;
+            q.clear();
+            label[y][x] = id;
+            q.push_back((x, y));
+            while let Some((cx, cy)) = q.pop_front() {
+                x0 = x0.min(cx as i32);
+                y0 = y0.min(cy as i32);
+                x1 = x1.max(cx as i32);
+                y1 = y1.max(cy as i32);
+                for (dx, dy) in D8 {
+                    let nx = cx as i32 + dx;
+                    let ny = cy as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    let ux = nx as usize;
+                    let uy = ny as usize;
+                    if !ink[uy][ux] || label[uy][ux] != 0 {
+                        continue;
+                    }
+                    label[uy][ux] = id;
+                    q.push_back((ux, uy));
+                }
+            }
+            boxes.push((x0, y0, x1, y1));
+        }
+    }
+    let mut keep = vec![false; next_id as usize];
+    for (i, &(x0, y0, x1, y1)) in boxes.iter().enumerate() {
+        let id = (i + 1) as i32;
+        if cc_has_enclosed_hole(&label, id, x0, y0, x1, y1, w, h) {
+            keep[id as usize] = true;
+        }
+    }
+    let mut out = vec![vec![false; w]; h];
+    for y in 0..h {
+        for x in 0..w {
+            let id = label[y][x];
+            if id > 0 && keep[id as usize] {
+                out[y][x] = true;
+            }
+        }
+    }
+    out
+}
+
+fn cc_has_enclosed_hole(
+    label: &[Vec<i32>],
+    id: i32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    w: usize,
+    h: usize,
+) -> bool {
+    let pw = (x1 - x0 + 3) as usize;
+    let ph = (y1 - y0 + 3) as usize;
+    if pw < 3 || ph < 3 {
+        return false;
+    }
+    let idx = |lx: usize, ly: usize| ly * pw + lx;
+    let mut fg = vec![false; pw * ph];
+    for y in y0.max(0)..=y1.min(h as i32 - 1) {
+        for x in x0.max(0)..=x1.min(w as i32 - 1) {
+            if label[y as usize][x as usize] == id {
+                let lx = (x - x0 + 1) as usize;
+                let ly = (y - y0 + 1) as usize;
+                fg[idx(lx, ly)] = true;
+            }
+        }
+    }
+    let mut seen = vec![false; pw * ph];
+    let mut q = VecDeque::new();
+    q.push_back((0usize, 0usize));
+    seen[0] = true;
+    while let Some((x, y)) = q.pop_front() {
+        for (dx, dy) in D4 {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= pw as i32 || ny >= ph as i32 {
+                continue;
+            }
+            let ux = nx as usize;
+            let uy = ny as usize;
+            let i = idx(ux, uy);
+            if seen[i] || fg[i] {
+                continue;
+            }
+            seen[i] = true;
+            q.push_back((ux, uy));
+        }
+    }
+    let mut enclosed = 0usize;
+    for ly in 1..ph - 1 {
+        for lx in 1..pw - 1 {
+            let i = idx(lx, ly);
+            if !fg[i] && !seen[i] {
+                enclosed += 1;
+                if enclosed >= 4 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 去掉贴边分量后, 该行是否还有墨 (用于行间缝 / 漏检五线时的竖段).
+fn interior_hit_rows(interior: &[Vec<bool>]) -> Vec<bool> {
+    interior
+        .iter()
+        .map(|row| row.iter().any(|&v| v))
+        .collect()
+}
+
+/// 去掉贴边分量后的连续谱行竖段 (行间缝会断开). 漏检五线时仍能抓住整块谱行.
+fn left_system_runs(interior: &[Vec<bool>]) -> Vec<(i32, i32)> {
+    let hit = interior_hit_rows(interior);
     let h = hit.len() as i32;
     if h <= 0 {
         return Vec::new();
     }
-    let min_gap = (typical_line_gap(&find_staff_line_ys(ink)) * 2 + 4).clamp(12, 40);
+    let min_gap = (typical_line_gap(&find_staff_line_ys(interior)) * 2 + 4).clamp(12, 40);
     let min_h = ((h as f32 * 0.12).round() as i32).max(72);
 
     let mut runs = Vec::new();
@@ -354,38 +537,16 @@ fn left_system_runs(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
     runs
 }
 
-/// 五线谱表为核; 左侧括线/行首小节线 8 连通的相邻谱表收成一行.
-fn collect_system_cores(ink: &[Vec<bool>]) -> Vec<(i32, i32)> {
+/// 五线谱表为核; 相邻两核之间须有墨迹像素直接 8 连通才收成一行.
+fn collect_system_cores(ink: &[Vec<bool>], interior: &[Vec<bool>]) -> Vec<(i32, i32)> {
     let line_ys = find_staff_line_ys(ink);
     let staves = group_staves(&line_ys);
-    let mut staff_cores = merge_staves_by_left_ink(ink, staves);
-    let runs = left_system_runs(ink);
-
-    let mut cores = if runs.is_empty() {
-        staff_cores
-    } else {
-        let mut used = vec![false; staff_cores.len()];
-        let mut out = Vec::new();
-        for &(r0, r1) in &runs {
-            let mut t = r0;
-            let mut b = r1;
-            for (i, &(c0, c1)) in staff_cores.iter().enumerate() {
-                if overlaps(c0, c1, r0, r1) {
-                    t = t.min(c0);
-                    b = b.max(c1);
-                    used[i] = true;
-                }
-            }
-            out.push((t, b));
-        }
-        for (i, c) in staff_cores.drain(..).enumerate() {
-            if !used[i] {
-                out.push(c);
-            }
-        }
-        out
-    };
-    cores = split_by_left_disconnects(ink, cores);
+    let mut cores = merge_staves_by_left_ink(interior, staves);
+    if cores.is_empty() {
+        // 漏检五线时才退回「连续有墨的竖段」, 有谱表核时绝不用行占用去粘行.
+        cores = left_system_runs(interior);
+    }
+    cores = split_by_left_disconnects(interior, cores);
 
     // 丢掉既无括号又几乎无小节线的假核
     if cores.len() > 1 {
@@ -422,104 +583,27 @@ fn dedup_overlapping_cores(cores: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     dedup
 }
 
-/// 只扫左侧括线 / 行首小节线. 默认约 14%; 首页缩进时按最靠右的五线左缘最多扩到约 24%.
-fn left_probe_x_range(ink: &[Vec<bool>]) -> (usize, usize) {
-    if ink.is_empty() {
-        return (0, 0);
-    }
-    let w = ink[0].len();
-    if w == 0 {
-        return (0, 0);
-    }
-    let x_lo = ((w as f32 * 0.003).round() as usize)
-        .max(1)
-        .min(w.saturating_sub(1));
-    let mut x_hi = ((w as f32 * 0.14).round() as usize)
-        .max(x_lo + 8)
-        .min(w);
-    let cap = ((w as f32 * 0.24).round() as usize).max(x_hi).min(w);
-    let mut starts: Vec<usize> = ink
-        .iter()
-        .filter(|row| is_staff_line_row(row))
-        .filter_map(|row| longest_black_run_start(row))
-        .filter(|&x| x >= x_lo && x < cap)
-        .collect();
-    if !starts.is_empty() {
-        starts.sort_unstable();
-        // 同一缩进的五线会扎堆; 单根杂线不拉宽探测带.
-        let mut i = 0;
-        while i < starts.len() {
-            let mut j = i + 1;
-            while j < starts.len() && starts[j] - starts[i] <= 12 {
-                j += 1;
-            }
-            if j - i >= 3 {
-                x_hi = x_hi.max((starts[j - 1] + 8).min(cap));
-            }
-            i = j;
-        }
-    }
-    (x_lo, x_hi)
-}
-
-/// 通页竖线 (装订线 / 页边框). 谱行竖线会在行间缝断开, 不能当成装订线拦掉.
-fn col_is_page_rule(ink: &[Vec<bool>], x: usize) -> bool {
-    if ink.is_empty() || x >= ink[0].len() {
-        return false;
-    }
-    let h = ink.len();
-    let hit = ink.iter().filter(|row| row[x]).count();
-    if (hit as f32) < h as f32 * 0.70 {
-        return false;
-    }
-    let margin = ((h as f32 * 0.08).round() as usize).max(16).min(h / 6);
-    let min_interior_blank = ((h as f32 * 0.012).round() as i32).clamp(16, 40);
-    let mut blank_run = 0i32;
-    for y in margin..h.saturating_sub(margin) {
-        if !ink[y][x] {
-            blank_run += 1;
-            if blank_run >= min_interior_blank {
-                return false;
-            }
-        } else {
-            blank_run = 0;
-        }
-    }
-    let top_band = ((h as f32 * 0.12).round() as usize).max(8).min(h / 4);
-    let bot_start = h.saturating_sub(top_band);
-    let has_top = (0..top_band).any(|y| ink[y][x]);
-    let has_bot = (bot_start..h).any(|y| ink[y][x]);
-    has_top && has_bot
-}
-
-/// 左侧条带里, 上核底边和下核顶边是否被同一块墨迹 8 连通连上.
+/// 全页 (已去掉贴边、无孔连通域) 上, 上核底边和下核顶边是否被同一块墨迹 8 连通连上.
+/// 只走像素邻接 (含对角), 不把「这一行有墨」当成连通.
 fn left_ink_connects(ink: &[Vec<bool>], y_upper: i32, y_lower: i32, pad: i32) -> bool {
-    if ink.is_empty() {
+    if ink.is_empty() || ink[0].is_empty() {
         return false;
     }
     let h = ink.len() as i32;
-    let (x_lo, x_hi) = left_probe_x_range(ink);
-    if x_hi <= x_lo {
-        return false;
-    }
+    let w = ink[0].len();
     let y0 = (y_upper.min(y_lower) - pad).max(0);
     let y1 = (y_upper.max(y_lower) + pad).min(h - 1);
     if y1 <= y0 {
         return false;
     }
-    let bw = x_hi - x_lo;
+    let bw = w;
     let bh = (y1 - y0 + 1) as usize;
-    let mut blocked = vec![false; bw];
-    for (i, x) in (x_lo..x_hi).enumerate() {
-        blocked[i] = col_is_page_rule(ink, x);
-    }
-
-    let idx = |x: usize, y: i32| -> usize { (y - y0) as usize * bw + (x - x_lo) };
+    let idx = |x: usize, y: i32| -> usize { (y - y0) as usize * bw + x };
     let mut seen = vec![false; bw * bh];
     let mut q = VecDeque::new();
     for y in y0..=y_upper.min(y1) {
-        for x in x_lo..x_hi {
-            if blocked[x - x_lo] || !ink[y as usize][x] {
+        for x in 0..w {
+            if !ink[y as usize][x] {
                 continue;
             }
             let i = idx(x, y);
@@ -536,25 +620,15 @@ fn left_ink_connects(ink: &[Vec<bool>], y_upper: i32, y_lower: i32, pad: i32) ->
     if q.is_empty() {
         return false;
     }
-    const D8: [(i32, i32); 8] = [
-        (-1, -1),
-        (0, -1),
-        (1, -1),
-        (-1, 0),
-        (1, 0),
-        (-1, 1),
-        (0, 1),
-        (1, 1),
-    ];
     while let Some((x, y)) = q.pop_front() {
         for (dx, dy) in D8 {
             let nx = x as i32 + dx;
             let ny = y + dy;
-            if nx < x_lo as i32 || nx >= x_hi as i32 || ny < y0 || ny > y1 {
+            if nx < 0 || nx >= w as i32 || ny < y0 || ny > y1 {
                 continue;
             }
             let ux = nx as usize;
-            if blocked[ux - x_lo] || !ink[ny as usize][ux] {
+            if !ink[ny as usize][ux] {
                 continue;
             }
             let i = idx(ux, ny);
@@ -571,7 +645,7 @@ fn left_ink_connects(ink: &[Vec<bool>], y_upper: i32, y_lower: i32, pad: i32) ->
     false
 }
 
-/// 相邻谱表只要左侧墨迹连通 (括线 / 行首小节线), 就收成一行. 不按间距硬配.
+/// 相邻谱表只要墨迹像素直接 8 连通, 就收成一行. 不按间距硬配.
 fn merge_staves_by_left_ink(ink: &[Vec<bool>], mut cores: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     if cores.len() < 2 {
         return cores;
@@ -599,91 +673,69 @@ fn merge_staves_by_left_ink(ink: &[Vec<bool>], mut cores: Vec<(i32, i32)>) -> Ve
     out
 }
 
-/// 左侧条带该行是否有墨 (通页装订线列不算).
-fn left_band_hit_rows(ink: &[Vec<bool>]) -> Vec<bool> {
-    if ink.is_empty() {
-        return Vec::new();
-    }
-    let (x_lo, x_hi) = left_probe_x_range(ink);
-    if x_hi <= x_lo {
-        return vec![false; ink.len()];
-    }
-    let mut blocked = vec![false; x_hi - x_lo];
-    for (i, x) in (x_lo..x_hi).enumerate() {
-        blocked[i] = col_is_page_rule(ink, x);
-    }
-    ink.iter()
-        .map(|row| {
-            (x_lo..x_hi).any(|x| !blocked[x - x_lo] && row[x])
-        })
-        .collect()
-}
-
-/// 块内检测: 左侧条带若出现一段真正的空白缝 (行与行的括线在此断开), 把块切开.
+/// 块内按相邻谱表是否真有像素连通切开, 不用「行上有没有墨」去切.
 fn split_by_left_disconnects(ink: &[Vec<bool>], intervals: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     if ink.is_empty() || intervals.is_empty() {
         return intervals;
     }
-    let left_hit = left_band_hit_rows(ink);
     let line_ys = find_staff_line_ys(ink);
-    let min_gap = (typical_line_gap(&line_ys) * 2 + 4).clamp(12, 40);
-    let mut heights: Vec<i32> = intervals.iter().map(|(t, b)| b - t + 1).collect();
+    let staves = group_staves(&line_ys);
+    if staves.len() < 2 {
+        return intervals;
+    }
+    let mut heights: Vec<i32> = staves.iter().map(|(t, b)| b - t + 1).collect();
     heights.sort();
-    let med = heights[heights.len() / 2].max(24);
-    let min_piece = (med / 5).clamp(20, 96);
+    let med_h = heights[heights.len() / 2].max(20);
+    let pad = (med_h / 6).clamp(4, 18);
+    let min_piece = (med_h / 5).clamp(20, 96);
 
     let mut out = Vec::new();
     for (y0, y1) in intervals {
-        out.extend(split_interval_at_left_gaps(
-            &left_hit, y0, y1, min_gap, min_piece,
+        out.extend(split_interval_at_disconnects(
+            ink, &staves, y0, y1, pad, min_piece,
         ));
     }
     out.sort_by_key(|c| c.0);
     out
 }
 
-fn split_interval_at_left_gaps(
-    left_hit: &[bool],
+fn split_interval_at_disconnects(
+    ink: &[Vec<bool>],
+    staves: &[(i32, i32)],
     y0: i32,
     y1: i32,
-    min_gap: i32,
+    pad: i32,
     min_piece: i32,
 ) -> Vec<(i32, i32)> {
-    let h = left_hit.len() as i32;
+    let h = ink.len() as i32;
     let y0 = y0.max(0);
     let y1 = y1.min(h - 1);
     if y1 < y0 {
         return Vec::new();
     }
-    let mut runs = Vec::new();
-    let mut start: Option<i32> = None;
-    for y in y0..=y1 {
-        if !left_hit[y as usize] {
-            if start.is_none() {
-                start = Some(y);
-            }
-        } else if let Some(s) = start.take() {
-            runs.push((s, y - 1));
-        }
+    let inside: Vec<(i32, i32)> = staves
+        .iter()
+        .copied()
+        .filter(|&(t, b)| overlaps(t, b, y0, y1))
+        .collect();
+    if inside.len() < 2 {
+        return vec![(y0, y1)];
     }
-    if let Some(s) = start {
-        runs.push((s, y1));
-    }
-
     let mut cuts: Vec<i32> = Vec::new();
-    for (a, b) in runs {
-        if b - a + 1 < min_gap {
+    for w in inside.windows(2) {
+        let (_, b) = w[0];
+        let (nt, _) = w[1];
+        if left_ink_connects(ink, b, nt, pad) {
             continue;
         }
-        if a - y0 < min_piece || y1 - b < min_piece {
-            continue;
+        let cut = (b + nt) / 2;
+        if cut - y0 >= min_piece && y1 - cut >= min_piece {
+            cuts.push(cut);
         }
-        cuts.push(a - 1);
     }
     if cuts.is_empty() {
         return vec![(y0, y1)];
     }
-
     let mut pieces = Vec::new();
     let mut t = y0;
     for cut in cuts {
@@ -691,9 +743,6 @@ fn split_interval_at_left_gaps(
             pieces.push((t, cut));
         }
         t = (cut + 1).max(t);
-        while t <= y1 && !left_hit[t as usize] {
-            t += 1;
-        }
     }
     if t <= y1 {
         pieces.push((t, y1));
@@ -708,7 +757,12 @@ fn split_interval_at_left_gaps(
 /// 宽松/紧密判定: 向邻行**五线核**方向搜时, 是否先遇到「整行完全无黑像素」.
 /// - 宽松 (五线之前能见到空白): 扩到分隔空白为止 (含踏板/指法; 细白缝可桥接)
 /// - 紧密 (空白前就顶到邻行五线): 与邻核平分间隙
-fn system_extents(ink: &[Vec<bool>], cores: &[(i32, i32)], margin: i32) -> Vec<(i32, i32)> {
+fn system_extents(
+    ink: &[Vec<bool>],
+    interior: &[Vec<bool>],
+    cores: &[(i32, i32)],
+    margin: i32,
+) -> Vec<(i32, i32)> {
     let h = ink.len() as i32;
     if cores.is_empty() || h <= 0 {
         return Vec::new();
@@ -718,7 +772,7 @@ fn system_extents(ink: &[Vec<bool>], cores: &[(i32, i32)], margin: i32) -> Vec<(
         .iter()
         .map(|row| !row.iter().any(|&x| x))
         .collect();
-    let left_blank: Vec<bool> = left_band_hit_rows(ink).into_iter().map(|hit| !hit).collect();
+    let left_blank: Vec<bool> = interior_hit_rows(interior).into_iter().map(|hit| !hit).collect();
     let left_sep = (typical_line_gap(&find_staff_line_ys(ink)) * 2 + 4).clamp(12, 40);
     // 谱表与 Ped. 之间细白缝不截断; 达到此长度才算行间分隔
     let sep_blank = 3i32;
@@ -1115,11 +1169,13 @@ pub fn detect_bands(
         return Vec::new();
     }
 
-    // 五线谱表 → 左侧连通收成谱行 → 扩边界后再按块内左侧断开切开
-    let cores = collect_system_cores(&ink);
+    // 五线谱表 → 去掉贴边 / 无孔连通域 → 全页连通收成谱行 → 扩边界后再切开
+    let interior = strip_border_components(&ink);
+    let connectors = keep_ccs_with_holes(&interior);
+    let cores = collect_system_cores(&ink, &connectors);
     let systems_content = split_by_left_disconnects(
-        &ink,
-        system_extents(&ink, &cores, margin),
+        &connectors,
+        system_extents(&ink, &connectors, &cores, margin),
     );
     let mut systems = filter_short_systems(systems_content.clone());
     if systems.is_empty() && !systems_content.is_empty() {
@@ -1395,6 +1451,17 @@ mod tests {
         }
     }
 
+    /// 左右小节线贴在五线两端, 把行间封成孔, 整行才是有效连通域.
+    fn paint_staff_frame(img: &mut RgbImage, y0: u32, y1: u32) {
+        paint_barline(img, 24, y0, y1);
+        paint_barline(img, 378, y0, y1);
+    }
+
+    fn paint_indented_frame(img: &mut RgbImage, y0: u32, y1: u32) {
+        paint_barline(img, 80, y0, y1);
+        paint_barline(img, 378, y0, y1);
+    }
+
     fn system_count(img: &RgbImage) -> (usize, Vec<Band>) {
         let bands = detect_bands(img, 200, 20);
         let n = bands.iter().filter(|b| b.kind == "system").count();
@@ -1417,13 +1484,13 @@ mod tests {
 
     #[test]
     fn indented_left_barline_still_merges() {
-        // 首页缩进: 五线从约 20% 处开始, 默认 14% 探测带够不到行首竖线.
+        // 首页缩进: 五线从约 20% 处开始; 连通改全页后不再依赖左侧探测带宽度.
         let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
         paint_staff_from(&mut img, 80, 80);
         paint_staff_from(&mut img, 140, 80);
         paint_staff_from(&mut img, 200, 80);
         paint_staff_from(&mut img, 260, 80);
-        paint_barline(&mut img, 78, 80, 293);
+        paint_indented_frame(&mut img, 80, 293);
         let (n, bands) = system_count(&img);
         assert_eq!(
             n, 1,
@@ -1438,8 +1505,8 @@ mod tests {
         paint_staff_from(&mut img, 140, 80);
         paint_staff_from(&mut img, 280, 80);
         paint_staff_from(&mut img, 340, 80);
-        paint_barline(&mut img, 78, 80, 173);
-        paint_barline(&mut img, 78, 280, 373);
+        paint_indented_frame(&mut img, 80, 173);
+        paint_indented_frame(&mut img, 280, 373);
         let (n, bands) = system_count(&img);
         assert_eq!(
             n, 2,
@@ -1454,7 +1521,7 @@ mod tests {
         paint_staff(&mut img, 140);
         paint_staff(&mut img, 280);
         paint_staff(&mut img, 340);
-        paint_barline(&mut img, 10, 80, 380);
+        paint_staff_frame(&mut img, 80, 380);
         let (n, bands) = system_count(&img);
         assert_eq!(n, 1, "left connector should merge all four staves, got {bands:?}");
     }
@@ -1480,9 +1547,9 @@ mod tests {
         paint_staff(&mut img, 140);
         paint_staff(&mut img, 280);
         paint_staff(&mut img, 340);
-        // 每行自己的行首竖线, 行间缝没有连通
-        paint_barline(&mut img, 10, 80, 173);
-        paint_barline(&mut img, 10, 280, 373);
+        // 每行自己封成有孔连通域, 行间缝没有连通
+        paint_staff_frame(&mut img, 80, 173);
+        paint_staff_frame(&mut img, 280, 373);
         let (n, bands) = system_count(&img);
         assert_eq!(
             n, 2,
@@ -1497,9 +1564,9 @@ mod tests {
         paint_staff(&mut img, 140);
         paint_staff(&mut img, 280);
         paint_staff(&mut img, 340);
-        paint_barline(&mut img, 10, 80, 173);
-        paint_barline(&mut img, 10, 280, 373);
-        // 行间缝中央有墨, 整行空白检测会失败, 只能靠块内左侧断开切开
+        paint_staff_frame(&mut img, 80, 173);
+        paint_staff_frame(&mut img, 280, 373);
+        // 行间缝中央有墨, 整行空白检测会失败, 只能靠块内空白缝切开
         for y in 210..220 {
             for x in 120..300 {
                 img.put_pixel(x, y, Rgb([0, 0, 0]));
@@ -1518,7 +1585,29 @@ mod tests {
         );
     }
 
-    /// 左侧竖线只要 8 连通穿过行间缝即可, 不要求单列覆盖率.
+    #[test]
+    fn gap_ink_not_touching_staves_does_not_merge() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        paint_staff_frame(&mut img, 80, 173);
+        paint_staff_frame(&mut img, 280, 373);
+        // 行间缝里大块墨, 但不碰到上下谱表 — 旧逻辑会当成「行占用」粘行
+        for y in 200..230 {
+            for x in 40..360 {
+                img.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        let (n, bands) = system_count(&img);
+        assert_eq!(
+            n, 2,
+            "ink in the gap must not merge unless it touches both staves, got {bands:?}"
+        );
+    }
+
+    /// 竖线只要 8 连通穿过行间缝即可, 不要求单列覆盖率.
     #[test]
     fn jagged_one_pixel_connector_still_merges() {
         let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
@@ -1526,6 +1615,8 @@ mod tests {
         paint_staff(&mut img, 140);
         paint_staff(&mut img, 280);
         paint_staff(&mut img, 340);
+        paint_staff_frame(&mut img, 80, 173);
+        paint_staff_frame(&mut img, 280, 373);
         let mut x = 52u32;
         for y in 80..=380 {
             img.put_pixel(x, y, Rgb([0, 0, 0]));
@@ -1549,6 +1640,57 @@ mod tests {
         assert!(
             n >= 2,
             "full-page gutter must not glue systems, got {bands:?}"
+        );
+    }
+
+    #[test]
+    fn solid_margin_bar_without_holes_does_not_glue() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        paint_staff_frame(&mut img, 80, 173);
+        paint_staff_frame(&mut img, 280, 373);
+        // 不贴页边的实心竖条, 把两行连上但自身无孔
+        paint_barline(&mut img, 8, 80, 380);
+        let (n, bands) = system_count(&img);
+        assert_eq!(
+            n, 2,
+            "solid margin bar without holes must not glue systems, got {bands:?}"
+        );
+    }
+
+    #[test]
+    fn mid_page_barline_still_merges() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        paint_staff_frame(&mut img, 80, 380);
+        paint_barline(&mut img, 200, 80, 380);
+        let (n, bands) = system_count(&img);
+        assert_eq!(n, 1, "barline in the middle of the page should merge, got {bands:?}");
+    }
+
+    #[test]
+    fn edge_touching_rule_is_ignored() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        // 贴顶贴底的通页竖线, 以及连在它上面的短横, 都应被当成贴边分量丢掉
+        paint_barline(&mut img, 0, 0, 599);
+        for x in 0..12 {
+            img.put_pixel(x, 0, Rgb([0, 0, 0]));
+            img.put_pixel(x, 599, Rgb([0, 0, 0]));
+        }
+        let (n, bands) = system_count(&img);
+        assert!(
+            n >= 2,
+            "ink connected to the page edge must not glue systems, got {bands:?}"
         );
     }
 
@@ -1584,17 +1726,18 @@ mod tests {
 
     fn diagnose_page(img: &RgbImage, threshold: i32, tag: &str, out_dir: &std::path::Path) {
         let ink = to_ink(img, threshold.clamp(1, 254) as u8);
+        let interior = strip_border_components(&ink);
+        let connectors = keep_ccs_with_holes(&interior);
         let h = ink.len() as i32;
         let w = if h > 0 { ink[0].len() } else { 0 };
-        let (x_lo, x_hi) = left_probe_x_range(&ink);
         let line_ys = find_staff_line_ys(&ink);
         let staves = group_staves(&line_ys);
-        let merged = merge_staves_by_left_ink(&ink, staves.clone());
-        let split = split_by_left_disconnects(&ink, merged.clone());
+        let merged = merge_staves_by_left_ink(&connectors, staves.clone());
+        let split = split_by_left_disconnects(&connectors, merged.clone());
         let bands = detect_bands(img, threshold, 20);
         let systems: Vec<&Band> = bands.iter().filter(|b| b.kind == "system").collect();
         println!(
-            "=== {tag} {w}x{h} thr={threshold} probe={x_lo}..{x_hi} lines={} staves={} merged={} split={} systems={} ===",
+            "=== {tag} {w}x{h} thr={threshold} lines={} staves={} merged={} split={} systems={} ===",
             line_ys.len(),
             staves.len(),
             merged.len(),
@@ -1604,7 +1747,7 @@ mod tests {
         for (i, &(t, b)) in staves.iter().enumerate() {
             let nxt = staves.get(i + 1).copied();
             let conn = nxt
-                .map(|(nt, _)| left_ink_connects(&ink, b, nt, 8))
+                .map(|(nt, _)| left_ink_connects(&connectors, b, nt, 8))
                 .unwrap_or(false);
             println!(
                 "  staff {i}: {t}-{b} h={} next_conn={conn}",
@@ -1613,8 +1756,8 @@ mod tests {
         }
         println!("  merged: {merged:?}");
         println!("  split:  {split:?}");
-        println!("  left_runs: {:?}", left_system_runs(&ink));
-        let left_hit = left_band_hit_rows(&ink);
+        println!("  left_runs: {:?}", left_system_runs(&connectors));
+        let left_hit = interior_hit_rows(&connectors);
         let mut br = 0i32;
         let mut bs: Option<i32> = None;
         for y in 0..h {
@@ -1749,8 +1892,10 @@ mod tests {
                     "  p8 first-system dark x: {:?}",
                     cols.iter().take(15).collect::<Vec<_>>()
                 );
-                let (x_lo, x_hi) = left_probe_x_range(&ink);
-                println!("  probe {x_lo}..{x_hi} of w={w}");
+                let interior = strip_border_components(&ink);
+                let kept: usize = interior.iter().map(|r| r.iter().filter(|&&v| v).count()).sum();
+                let raw: usize = ink.iter().map(|r| r.iter().filter(|&&v| v).count()).sum();
+                println!("  interior ink {kept}/{raw} of w={w}");
             }
         }
     }
