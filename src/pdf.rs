@@ -97,10 +97,12 @@ pub(crate) fn bind_pdfium() -> Result<Pdfium, crate::error::Error> {
 
 /// PDF 逐页渲染到临时 PNG; 每完成一页回调 `(index0, total, path)`.
 /// 渲染后立刻在本线程识别并写 sidecar, 不占用 UI.
+/// `should_continue` 返回 false 时停在当前页之前 (已写出的页保留), 返回已完成页数.
 pub fn pdf_pages_to_tmp_images_streaming(
     pdf_path: &Path,
     ink_threshold: i32,
     margin: i32,
+    mut should_continue: impl FnMut() -> bool,
     mut on_page: impl FnMut(usize, usize, PathBuf),
 ) -> Result<usize, crate::error::Error> {
     crate::trace::log(&format!("pdf: 开始打开 {}", pdf_path.display()));
@@ -138,6 +140,10 @@ pub fn pdf_pages_to_tmp_images_streaming(
     }
 
     for i in 0..n {
+        if !should_continue() {
+            crate::trace::log(&format!("pdf: 在 {i}/{n} 处放弃 (已换工程或取消导入)"));
+            return Ok(i);
+        }
         crate::trace::log(&format!("pdf: 渲染 {}/{n} …", i + 1));
         let page = document
             .pages()
@@ -176,6 +182,7 @@ pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, crate::e
         pdf_path,
         crate::model::DEFAULT_INK_THRESHOLD,
         crate::model::DEFAULT_MARGIN,
+        || true,
         |_, _, p| {
             out.push(p);
         },

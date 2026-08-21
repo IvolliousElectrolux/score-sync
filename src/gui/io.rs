@@ -124,6 +124,9 @@ impl ScoreSyncApp {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        let gen = self.pdf_load_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let token = Arc::clone(&self.pdf_load_gen);
+        self.pdf_importing = true;
         self.status = format!(
             "PDF 后台渲染中… ({})",
             pdfs.first()
@@ -140,24 +143,32 @@ impl ScoreSyncApp {
         let margin = self.doc.margin;
         std::thread::spawn(move || {
             for pdf in pdfs {
+                if token.load(Ordering::SeqCst) != gen {
+                    break;
+                }
                 let name = pdf
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("pdf")
                     .to_string();
-                let result =
-                    pdf::pdf_pages_to_tmp_images_streaming(
-                        &pdf,
-                        ink,
-                        margin,
-                        |i, total, path| {
+                let token_loop = Arc::clone(&token);
+                let result = pdf::pdf_pages_to_tmp_images_streaming(
+                    &pdf,
+                    ink,
+                    margin,
+                    move || token_loop.load(Ordering::SeqCst) == gen,
+                    |i, total, path| {
                         let _ = tx.send_blocking(PdfLoadMsg::Page {
                             path,
                             index: i,
                             total,
                             pdf_name: name.clone(),
                         });
-                    });
+                    },
+                );
+                if token.load(Ordering::SeqCst) != gen {
+                    break;
+                }
                 match result {
                     Ok(n) => {
                         let _ = tx.send_blocking(PdfLoadMsg::Done {
@@ -173,7 +184,9 @@ impl ScoreSyncApp {
                     }
                 }
             }
-            let _ = tx.send_blocking(PdfLoadMsg::AllFinished);
+            if token.load(Ordering::SeqCst) == gen {
+                let _ = tx.send_blocking(PdfLoadMsg::AllFinished);
+            }
         });
 
         cx.spawn(async move |this, cx| {
@@ -182,6 +195,9 @@ impl ScoreSyncApp {
                 let stop = matches!(msg, PdfLoadMsg::AllFinished);
                 let is_page = matches!(msg, PdfLoadMsg::Page { .. });
                 this.update(cx, |view, cx| {
+                    if view.pdf_load_gen.load(Ordering::SeqCst) != gen {
+                        return;
+                    }
                     match msg {
                         PdfLoadMsg::Page {
                             path,
@@ -246,6 +262,7 @@ impl ScoreSyncApp {
                         }
                         PdfLoadMsg::AllFinished => {
                             crate::trace::log("ui: PDF 全部登记完成 (识别已写入 sidecar)");
+                            view.pdf_importing = false;
                             view.refresh_render(cx);
                             view.start_hydrate_all(true, cx);
                         }
@@ -334,6 +351,7 @@ impl ScoreSyncApp {
         }
         self.flush_mask_to_doc(cx);
         self.opening = true;
+        self.abandon_pdf_import();
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -432,8 +450,17 @@ impl ScoreSyncApp {
         self.do_new_project(cx);
     }
 
+    /// 丢掉进行中的 PDF 导入与全量 hydrate, 避免页回调写进新工程.
+    pub(super) fn abandon_pdf_import(&mut self) {
+        let _ = self.pdf_load_gen.fetch_add(1, Ordering::SeqCst);
+        self.pdf_importing = false;
+        self.hydrate_gen = self.hydrate_gen.wrapping_add(1);
+        self.page_load_gen = self.page_load_gen.wrapping_add(1);
+    }
+
     /// 清空当前文档/视频/蒙版状态, 回到可重新导入的空白工程.
     pub(super) fn do_new_project(&mut self, cx: &mut Context<Self>) {
+        self.abandon_pdf_import();
         let mask_prefs = self.doc.mask_prefs.clone();
         self.flush_mask_to_doc(cx);
         self.doc = DocState::new();
@@ -535,6 +562,16 @@ impl ScoreSyncApp {
             self.status = "工程读写进行中, 请稍候…".into();
             self.hint = self.status.clone();
             cx.notify();
+            return;
+        }
+        if self.pdf_importing {
+            self.show_error(
+                "提示",
+                crate::error::Error::msg(
+                    "PDF 仍在载入, 请等全部页到齐后再保存; 若要放弃这份 PDF, 请先新建工程.",
+                ),
+                cx,
+            );
             return;
         }
         if self.doc.pages.is_empty() {

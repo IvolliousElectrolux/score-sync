@@ -30,6 +30,7 @@ use smallvec::smallvec;
 
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::PathBuf;
+pub(crate) use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) use std::sync::Arc;
 pub(crate) use std::time::Duration;
 
@@ -157,6 +158,10 @@ pub(crate) struct ScoreSyncApp {
     page_load_gen: u64,
     /// 全量灌入识别 sidecar 的代数, 防止重叠 hydrate 互相覆盖
     hydrate_gen: u64,
+    /// PDF 导入代数: 新建/打开工程时自增, 后台渲染与 UI 登记都丢弃旧代
+    pdf_load_gen: Arc<AtomicU64>,
+    /// 仍有 PDF 页在后台渲染或登记 (保存会不完整)
+    pdf_importing: bool,
     /// 视频池组合脏标记 (分块/蒙版/底色变更后需重算缓存)
     video_pool_dirty: HashSet<String>,
     /// 全部视频池视为脏 (底色整体变更等)
@@ -257,6 +262,8 @@ impl ScoreSyncApp {
             dirty: false,
             page_load_gen: 0,
             hydrate_gen: 0,
+            pdf_load_gen: Arc::new(AtomicU64::new(0)),
+            pdf_importing: false,
             video_pool_dirty: HashSet::new(),
             video_pool_all_dirty: true,
             allow_close: false,
