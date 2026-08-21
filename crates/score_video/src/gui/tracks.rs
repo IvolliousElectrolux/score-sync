@@ -210,6 +210,7 @@ impl ScoreVideoApp {
         }
         let ox = f32::from(self.left_bounds.origin.x);
         let oy = f32::from(self.left_bounds.origin.y);
+        self.speed_menu_open = false;
         self.fade_menu = Some(FadeContextMenu {
             x: x - ox,
             y: y - oy,

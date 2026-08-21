@@ -6,6 +6,7 @@
 //! - `audio_clips`: 顺序播放, 不单独存起点, 由前面片段时长累加得出.
 //!
 //! 时间轴总长取当前非空音/视频轨的较短末端; 删短一轨时会把较长轨裁齐.
+//! 末段右边缘对齐音频末尾: 向右拖只缩短该块, 不会超出音频.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -116,7 +117,7 @@ impl Timeline {
         self.fades.iter().map(|f| f.end).fold(0.0, f64::max)
     }
 
-    /// 非空音/视频轨的末端时刻; 两轨都有内容时取较短者 (时间轴边界对齐最短轨).
+    /// 非空音/视频轨的末端时刻; 两轨都有内容时取较短者 (删短一轨时把另一轨裁齐).
     pub fn shortest_av_end(&self) -> Option<f64> {
         let v = (!self.video_clips.is_empty()).then(|| self.video_end());
         let a = (!self.audio_clips.is_empty()).then(|| self.audio_total());
@@ -365,26 +366,32 @@ impl Timeline {
     }
 
     /// 拖动片段右边界 (同步下一片段的左边界).
-    /// 末段不得超出音频轨末端 (有音频时), 以保证边界对齐最短轨.
+    /// 末段有音频时右边缘钉在音频末尾: 往右拖等于把左边界右移, 块变短.
     pub fn trim_right(&mut self, id: Uuid, new_end: f64) {
         let Some(idx) = self.clip_idx(id) else { return };
+        let is_last = idx + 1 >= self.video_clips.len();
+        if is_last && !self.audio_clips.is_empty() {
+            let delta = new_end - self.video_clips[idx].end;
+            self.slide_last_pinned_to_audio(idx, self.video_clips[idx].start + delta);
+            self.sync_tracks_to_shortest();
+            return;
+        }
         let min = self.video_clips[idx].start + MIN_CLIP_DUR;
-        let max = if idx + 1 < self.video_clips.len() {
-            self.video_clips[idx + 1].end - MIN_CLIP_DUR
-        } else if !self.audio_clips.is_empty() {
-            self.audio_total()
-        } else {
+        let max = if is_last {
             f64::MAX
+        } else {
+            self.video_clips[idx + 1].end - MIN_CLIP_DUR
         };
         let ne = new_end.clamp(min, max.max(min));
         self.video_clips[idx].end = ne;
-        if idx + 1 < self.video_clips.len() {
+        if !is_last {
             self.video_clips[idx + 1].start = ne;
         }
         self.sync_tracks_to_shortest();
     }
 
     /// 整体拖动片段 (两侧边界同步偏移相同的量, 不产生缝隙/重叠).
+    /// 末段有音频时右边缘钉在音频末尾, 只移动左边界 (往右拖则块变短).
     pub fn drag_body(&mut self, id: Uuid, delta: f64) {
         let Some(idx) = self.clip_idx(id) else { return };
         let min_start = if idx == 0 {
@@ -392,12 +399,16 @@ impl Timeline {
         } else {
             self.video_clips[idx - 1].start + MIN_CLIP_DUR
         };
-        let max_end = if idx + 1 < self.video_clips.len() {
-            self.video_clips[idx + 1].end - MIN_CLIP_DUR
-        } else if !self.audio_clips.is_empty() {
-            self.audio_total()
-        } else {
+        let is_last = idx + 1 >= self.video_clips.len();
+        if is_last && !self.audio_clips.is_empty() {
+            self.slide_last_pinned_to_audio(idx, self.video_clips[idx].start + delta);
+            self.sync_tracks_to_shortest();
+            return;
+        }
+        let max_end = if is_last {
             f64::MAX
+        } else {
+            self.video_clips[idx + 1].end - MIN_CLIP_DUR
         };
         let dur = self.video_clips[idx].end - self.video_clips[idx].start;
         let mut new_start = self.video_clips[idx].start + delta;
@@ -408,10 +419,27 @@ impl Timeline {
         if idx > 0 {
             self.video_clips[idx - 1].end = new_start;
         }
-        if idx + 1 < self.video_clips.len() {
+        if !is_last {
             self.video_clips[idx + 1].start = new_end;
         }
         self.sync_tracks_to_shortest();
+    }
+
+    /// 末段右边缘钉在音频末尾, 只改起点 (并同步上一段终点).
+    fn slide_last_pinned_to_audio(&mut self, idx: usize, new_start: f64) {
+        let end = self.audio_total();
+        let min_start = if idx == 0 {
+            0.0
+        } else {
+            self.video_clips[idx - 1].start + MIN_CLIP_DUR
+        };
+        let max_start = (end - MIN_CLIP_DUR).max(min_start);
+        let ns = new_start.clamp(min_start, max_start);
+        self.video_clips[idx].start = ns;
+        self.video_clips[idx].end = end.max(ns + MIN_CLIP_DUR);
+        if idx > 0 {
+            self.video_clips[idx - 1].end = ns;
+        }
     }
 
     /// 标记淡入/淡出: 若已有鼠标拖选区间, 直接生成; 否则两次按键各标一端.
@@ -1009,6 +1037,36 @@ mod tests {
         assert!((tl.audio_total() - 30.0).abs() < 1e-9);
         assert!((tl.video_end() - 30.0).abs() < 1e-9);
         assert!((tl.timeline_end() - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn last_clip_drag_right_shortens_and_stays_on_audio_end() {
+        let mut tl = Timeline::new();
+        let pool = vec![item("a"), item("b")];
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 5.0;
+        tl.insert_next(&pool).unwrap();
+        tl.audio_clips.push(AudioClip {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("a.wav"),
+            label: "a".into(),
+            duration: 10.0,
+            offset: 0.0,
+        });
+        tl.fit_after_audio_change();
+        let last_id = tl.video_clips.last().unwrap().id;
+        let audio_end = tl.audio_total();
+        let old_start = tl.video_clips.last().unwrap().start;
+        assert!((tl.video_end() - audio_end).abs() < 1e-9);
+        tl.drag_body(last_id, 2.0);
+        let last = tl.video_clips.last().unwrap();
+        assert!((last.end - audio_end).abs() < 1e-6);
+        assert!((last.start - (old_start + 2.0)).abs() < 1e-6);
+        assert!((tl.audio_total() - audio_end).abs() < 1e-9);
+        tl.trim_right(last_id, audio_end + 1.0);
+        let last = tl.video_clips.last().unwrap();
+        assert!((last.end - audio_end).abs() < 1e-6);
+        assert!(last.start > old_start + 2.0);
     }
 
     #[test]

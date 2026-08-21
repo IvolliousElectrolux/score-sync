@@ -2,15 +2,15 @@
 //!
 //! rodio 的 `Sink` 只能从头顺序播放已 append 的音源, 不支持中途寻址; 因此每次
 //! 跳转 (播放/暂停/拖动播放头) 都重新创建 `Sink`, 定位到覆盖目标时刻的那条
-//! `AudioClip`, 用 `skip_duration` 跳过其内部偏移, 再依次 append 该条剩余部分
-//! 与后续所有片段.
+//! `AudioClip`. 1x 用 `skip_duration` 跳过内部偏移; 倍速预览走 ffmpeg `atempo`
+//! (变速不变调, 避免 rodio `set_speed` 把音高一起抬高).
 
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,8 @@ pub struct AudioEngine {
     playing: bool,
     started_at: Option<Instant>,
     base_time: f64,
+    /// 预览倍速 (仅播放引擎, 不影响导出).
+    speed: f32,
 }
 
 impl AudioEngine {
@@ -42,6 +44,7 @@ impl AudioEngine {
                 playing: false,
                 started_at: None,
                 base_time: 0.0,
+                speed: 1.0,
             },
             Err(_) => Self {
                 _stream: None,
@@ -51,6 +54,7 @@ impl AudioEngine {
                 playing: false,
                 started_at: None,
                 base_time: 0.0,
+                speed: 1.0,
             },
         }
     }
@@ -66,16 +70,35 @@ impl AudioEngine {
         self.playing
     }
 
-    /// 播放中按墙钟估算当前时刻; 暂停时返回记录的播放头.
+    /// 播放中按墙钟×倍速估算当前时刻; 暂停时返回记录的播放头.
     pub fn current_time(&self) -> f64 {
         if self.playing {
             let elapsed = self
                 .started_at
                 .map(|t| t.elapsed().as_secs_f64())
                 .unwrap_or(0.0);
-            self.base_time + elapsed
+            self.base_time + elapsed * (self.speed as f64)
         } else {
             self.base_time
+        }
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// 预览倍速. 播放中途改速会按当前时刻重建解码 (ffmpeg atempo 保音调).
+    pub fn set_speed(&mut self, speed: f32) {
+        let speed = speed.clamp(0.25, 4.0);
+        if (speed - self.speed).abs() < 1e-4 {
+            return;
+        }
+        let t = self.current_time();
+        self.speed = speed;
+        if self.playing {
+            self.base_time = t;
+            self.started_at = Some(Instant::now());
+            self.restart_from(t);
         }
     }
 
@@ -114,17 +137,24 @@ impl AudioEngine {
         let Ok(sink) = Sink::try_new(handle) else {
             return;
         };
+        let stretch = (self.speed - 1.0).abs() > 1e-3;
         let mut cum = 0.0;
         for clip in &self.clips {
             let end = cum + clip.duration;
             if end > t {
                 let local_offset = (t - cum).max(0.0);
-                if let Some(dec) = open_decoder(&clip.path) {
+                let remain = (clip.duration - local_offset).max(0.0);
+                let src_t = clip.offset + local_offset;
+                if stretch {
+                    if let Some(src) = open_atempo_source(&clip.path, src_t, remain, self.speed) {
+                        sink.append(src);
+                    }
+                } else if let Some(dec) = open_decoder(&clip.path) {
                     // `clip.offset` 是该段在源文件里的起始时刻 (分割音频
                     // 产生的后半段 > 0), `local_offset` 是本次寻址点相对
                     // 这一段自己起点的偏移, 两者相加才是源文件里真正要
                     // 跳到的位置.
-                    let skip = Duration::from_secs_f64(clip.offset + local_offset);
+                    let skip = Duration::from_secs_f64(src_t);
                     if let Ok(src) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                         dec.skip_duration(skip)
                     })) {
@@ -221,19 +251,167 @@ pub fn ensure_preview_wav(src: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
+fn decode_path(path: &Path) -> Option<PathBuf> {
+    if needs_ffmpeg_preview(path) {
+        let wav = preview_wav_path(path);
+        wav.is_file().then_some(wav)
+    } else if path.is_file() {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// ffmpeg `atempo` 单级只接受 0.5..=2.0, 3x 拆成 2×1.5.
+pub(crate) fn atempo_filter(speed: f32) -> String {
+    let mut s = speed as f64;
+    let mut parts = Vec::new();
+    while s > 2.0 + 1e-4 {
+        parts.push("atempo=2".to_string());
+        s /= 2.0;
+    }
+    while s < 0.5 - 1e-4 {
+        parts.push("atempo=0.5".to_string());
+        s *= 2.0;
+    }
+    if (s - 1.0).abs() > 1e-4 {
+        parts.push(format!("atempo={s:.5}"));
+    }
+    if parts.is_empty() {
+        "anull".into()
+    } else {
+        parts.join(",")
+    }
+}
+
+const ATEMPO_RATE: u32 = 44100;
+const ATEMPO_CH: u16 = 2;
+
+/// 按需启动 ffmpeg atempo, 把 PCM 喂给 rodio (变速不变调).
+struct AtempoSource {
+    path: PathBuf,
+    start: f64,
+    duration: f64,
+    speed: f32,
+    child: Option<Child>,
+    stdout: Option<BufReader<ChildStdout>>,
+}
+
+fn open_atempo_source(path: &Path, start: f64, duration: f64, speed: f32) -> Option<AtempoSource> {
+    let decode = decode_path(path)?;
+    if duration < 1e-3 {
+        return None;
+    }
+    Some(AtempoSource {
+        path: decode,
+        start: start.max(0.0),
+        duration,
+        speed,
+        child: None,
+        stdout: None,
+    })
+}
+
+impl AtempoSource {
+    fn ensure_started(&mut self) -> bool {
+        if self.stdout.is_some() {
+            return true;
+        }
+        let mut cmd = Command::new(crate::export::ffmpeg_path());
+        cmd.arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-ss")
+            .arg(format!("{:.6}", self.start))
+            .arg("-t")
+            .arg(format!("{:.6}", self.duration))
+            .arg("-i")
+            .arg(&self.path)
+            .arg("-vn")
+            .arg("-af")
+            .arg(atempo_filter(self.speed))
+            .arg("-f")
+            .arg("s16le")
+            .arg("-acodec")
+            .arg("pcm_s16le")
+            .arg("-ac")
+            .arg(ATEMPO_CH.to_string())
+            .arg("-ar")
+            .arg(ATEMPO_RATE.to_string())
+            .arg("-")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let stdout = match child.stdout.take() {
+            Some(s) => BufReader::new(s),
+            None => {
+                let _ = child.kill();
+                return false;
+            }
+        };
+        self.child = Some(child);
+        self.stdout = Some(stdout);
+        true
+    }
+}
+
+impl Iterator for AtempoSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.ensure_started() {
+            return None;
+        }
+        let stdout = self.stdout.as_mut()?;
+        let mut buf = [0u8; 2];
+        stdout.read_exact(&mut buf).ok()?;
+        Some(i16::from_le_bytes(buf))
+    }
+}
+
+impl Source for AtempoSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        ATEMPO_CH
+    }
+
+    fn sample_rate(&self) -> u32 {
+        ATEMPO_RATE
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        let secs = self.duration / (self.speed as f64).max(0.01);
+        Some(Duration::from_secs_f64(secs.max(0.0)))
+    }
+}
+
+impl Drop for AtempoSource {
+    fn drop(&mut self) {
+        self.stdout.take();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// 打开预览解码器. m4a 只在已转好 WAV 时打开, 绝不让 rodio 直接碰 MPEG-4
 /// (会 unreachable panic). 未转好则返回 None, 调用方应先 `ensure_preview_wav`.
 pub fn open_decoder(path: &Path) -> Option<Decoder<BufReader<File>>> {
-    let decode_path = if needs_ffmpeg_preview(path) {
-        let wav = preview_wav_path(path);
-        if !wav.is_file() {
-            return None;
-        }
-        wav
-    } else {
-        path.to_path_buf()
-    };
-    open_decoder_raw(&decode_path)
+    open_decoder_raw(&decode_path(path)?)
 }
 
 fn open_decoder_raw(path: &Path) -> Option<Decoder<BufReader<File>>> {
@@ -365,6 +543,14 @@ mod tests {
     #[test]
     fn parse_ffmpeg_duration_na() {
         assert!(parse_ffmpeg_duration("Duration: N/A, start: 0.000000").is_none());
+    }
+
+    #[test]
+    fn atempo_filter_chains_beyond_2x() {
+        assert_eq!(super::atempo_filter(1.0), "anull");
+        assert_eq!(super::atempo_filter(1.25), "atempo=1.25000");
+        assert_eq!(super::atempo_filter(2.0), "atempo=2.00000");
+        assert_eq!(super::atempo_filter(3.0), "atempo=2,atempo=1.50000");
     }
 
     #[test]

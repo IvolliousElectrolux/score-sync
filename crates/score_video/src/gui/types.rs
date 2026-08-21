@@ -24,6 +24,16 @@ pub(crate) const WAVEFORM_MAX_BUCKETS: usize = 200_000;
 pub(crate) const TRACKS_TOTAL_H: f32 = TRACK_H * 2.0 + AUDIO_TRACK_H;
 /// 拖动底部缩放条圆点缩放时, 可视时间窗口的最小时长 (秒).
 pub(crate) const MIN_VISIBLE_SECS: f64 = 0.2;
+/// 预览倍速 (导出始终 1x). 按钮显示当前值, 点击列出全部档位.
+pub(crate) const PLAYBACK_SPEEDS: &[f32] = &[1.0, 1.25, 1.5, 2.0, 3.0];
+
+pub(crate) fn fmt_speed(speed: f32) -> String {
+    if (speed - speed.round()).abs() < 1e-3 {
+        format!("x{}", speed.round() as i32)
+    } else {
+        format!("x{speed}")
+    }
+}
 
 #[derive(Clone)]
 pub(crate) enum VideoDrag {

@@ -396,11 +396,12 @@ impl ScoreSyncApp {
         if self.dialog.is_some() {
             return;
         }
-        let delta_y = match event.delta {
-            ScrollDelta::Pixels(p) => f32::from(p.y),
-            ScrollDelta::Lines(l) => l.y * 30.0,
+        let (delta_x, delta_y) = match event.delta {
+            ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+            ScrollDelta::Lines(l) => (l.x * 30.0, l.y * 30.0),
         };
         if is_primary_mod(&event.modifiers) {
+            let zoom_delta = if delta_y.abs() > 0.01 { delta_y } else { delta_x };
             let (sx, sy) = self.screen_in_view(event.position);
             let xform = self.xform();
             let (ix, iy) = xform.screen_to_image(sx, sy);
@@ -413,7 +414,7 @@ impl ScoreSyncApp {
             } else {
                 1.0
             };
-            let factor = if delta_y > 0.0 { 1.15 } else { 1.0 / 1.15 };
+            let factor = if zoom_delta > 0.0 { 1.15 } else { 1.0 / 1.15 };
             let current_zoom = if self.user_zoomed { self.zoom } else { 1.0 };
             self.user_zoomed = true;
             self.zoom = (current_zoom * factor).clamp(0.05, 40.0);
@@ -422,7 +423,15 @@ impl ScoreSyncApp {
             self.pan.y = sy - (vh - self.img_h as f32 * new_scale) * 0.5 - iy * new_scale;
             cx.notify();
         } else {
-            self.pan.y += delta_y;
+            // 与蒙版一致: 滚轮的 x/y 都平移画布. Shift+滚轮在 Windows 上常把
+            // 滚动量放进 x; 其它平台仍在 y, 此时把 y 当作横向位移.
+            if event.modifiers.shift {
+                let dx = if delta_x.abs() > 0.01 { delta_x } else { delta_y };
+                self.pan.x += dx;
+            } else {
+                self.pan.x += delta_x;
+                self.pan.y += delta_y;
+            }
             self.user_zoomed = true;
             cx.notify();
         }

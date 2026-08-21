@@ -213,6 +213,12 @@ impl ScoreVideoApp {
         (delta + adj, adj)
     }
 
+    pub(super) fn set_playback_speed(&mut self, speed: f32, cx: &mut Context<Self>) {
+        self.audio.set_speed(speed);
+        self.speed_menu_open = false;
+        cx.notify();
+    }
+
     pub fn play_pause(&mut self, cx: &mut Context<Self>) {
         if self.audio.is_playing() {
             self.audio.pause();

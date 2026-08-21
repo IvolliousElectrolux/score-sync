@@ -28,7 +28,7 @@ pub(crate) use std::time::Duration;
 pub(crate) use gpui::{
     actions, canvas, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds,
     Context, Corners, CursorStyle, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Render,
     RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
@@ -141,6 +141,12 @@ pub struct ScoreVideoApp {
     redo_stack: Vec<crate::model::TimelineSnapshot>,
     /// 当前拖拽是否已为本次变更压过撤销栈.
     drag_undo_pushed: bool,
+    /// 倍速下拉是否打开.
+    speed_menu_open: bool,
+    /// 倍速按钮屏幕 bounds, 供下拉定位.
+    speed_btn_bounds: Bounds<Pixels>,
+    /// 倍速菜单悬浮层 bounds (与绝对定位同一坐标系, 对齐蒙版取色器).
+    speed_layer_bounds: Bounds<Pixels>,
 }
 
 impl ScoreVideoApp {
@@ -186,6 +192,9 @@ impl ScoreVideoApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             drag_undo_pushed: false,
+            speed_menu_open: false,
+            speed_btn_bounds: Bounds::default(),
+            speed_layer_bounds: Bounds::default(),
         };
         app
     }
