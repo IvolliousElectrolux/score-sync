@@ -52,8 +52,8 @@ cargo run -r -- path\to\project.staffcrop
 
 发布构建产物: `target/release/score_sync.exe` (Windows) 或 `target/release/score_sync` (macOS).
 GitHub Actions 工作流 `.github/workflows/macos.yml` 在打 `v*` 标签或手动
-`workflow_dispatch` 时于 macOS runner 上编译, 并上传
-`score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`.
+`workflow_dispatch` 时于 macos-14 上编译 arm64 与 x64 (x64 交叉编译, 不再等
+macos-13), 并上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`.
 
 ## 工程格式
 
