@@ -41,6 +41,7 @@ impl ScoreSyncApp {
             return;
         }
         self.doc.current_page_index = index;
+        self.scroll_page_tabs_to_index(index);
         if self.doc.pages[index].image.is_some() {
             self.request_page_window(cx);
             if self.pending_redetect {
@@ -124,29 +125,16 @@ impl ScoreSyncApp {
         }
     }
 
-    /// 虚拟页签槽宽: 优先用已测到的页签宽度, 短页码模式不用 76px 长标签估宽.
+    /// 虚拟页签槽宽: 页数多时只用短页码的保守估宽.
+    /// 不能取已测宽度的最大值: 长标签残留或偏宽的一页会把槽位抬太大,
+    /// 可视范围只剩几个, 右侧一片空白.
     pub(super) fn tab_slot_px(&self) -> f32 {
         let n = self.doc.pages.len();
-        let mut max_w = 0.0f32;
-        let mut counted = 0usize;
-        for (&i, b) in &self.tab_bounds {
-            if i >= n {
-                continue;
-            }
-            let w = f32::from(b.size.width);
-            if w > 8.0 {
-                max_w = max_w.max(w);
-                counted += 1;
-            }
-        }
-        let slot = if counted > 0 {
-            max_w + TAB_GAP_PX
-        } else if n > TAB_VIRTUAL_THRESHOLD {
+        if n > TAB_VIRTUAL_THRESHOLD {
             TAB_COMPACT_SLOT_PX
         } else {
             TAB_SLOT_PX
-        };
-        slot.clamp(32.0, 200.0)
+        }
     }
 
     pub(super) fn visible_tab_range(&self) -> (usize, usize) {
@@ -157,23 +145,43 @@ impl ScoreSyncApp {
         if n <= TAB_VIRTUAL_THRESHOLD {
             return (0, n);
         }
-        let slot = self.tab_slot_px();
+        let slot = self.tab_slot_px().max(1.0);
         let view_w = f32::from(self.tab_scroll.bounds().size.width);
-        let view_w = if view_w < 8.0 { 960.0 } else { view_w };
+        let view_w = if view_w < 32.0 { 960.0 } else { view_w };
         let off = (-f32::from(self.tab_scroll.offset().x)).max(0.0);
         let mut start = ((off / slot).floor() as usize).saturating_sub(8);
         let mut end = (((off + view_w) / slot).ceil() as usize)
             .saturating_add(8)
             .min(n);
+        // 当前页必须画出来, 否则从列表跳到该页时页签栏里根本没有它.
+        let cur = self.doc.current_page_index.min(n.saturating_sub(1));
+        start = start.min(cur);
+        end = end.max(cur.saturating_add(1)).min(n);
         let max_off = f32::from(self.tab_scroll.max_offset().width).max(0.0);
-        // 短页签实际比占位窄时, 滚到右缘仍够不到按估宽算出的末页, 这里补上.
-        if max_off <= 1.0 || off + slot >= max_off {
+        if max_off <= 1.0 {
+            // 视口还没撑开或全部能放下: 先画出全部, 下一帧才能量到真宽度.
+            start = 0;
+            end = n;
+        } else if off + slot >= max_off {
             end = n;
             let vis = ((view_w / slot).ceil() as usize).saturating_add(16);
             start = start.min(n.saturating_sub(vis));
         }
         let start = start.min(n);
         (start, end.max(start))
+    }
+
+    pub(super) fn scroll_page_tabs_to_index(&self, ix: usize) {
+        let n = self.doc.pages.len();
+        if n == 0 {
+            return;
+        }
+        let slot = self.tab_slot_px().max(1.0);
+        let view_w = f32::from(self.tab_scroll.bounds().size.width).max(200.0);
+        let max = f32::from(self.tab_scroll.max_offset().width).max(0.0);
+        let target = (ix as f32 * slot - view_w * 0.35).clamp(0.0, max);
+        self.tab_scroll
+            .set_offset(point(px(-target), px(0.)));
     }
     pub(super) fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.side_tool == SideTool::Mask {
@@ -197,6 +205,8 @@ impl ScoreSyncApp {
 
         let mut row = div()
             .id("mask_tab_bar_row")
+            .w_full()
+            .min_w(px(0.))
             .flex()
             .flex_row()
             .items_center()
@@ -377,6 +387,8 @@ impl ScoreSyncApp {
 
         let mut row = div()
             .id("tab_bar_row")
+            .w_full()
+            .min_w(px(0.))
             .flex()
             .flex_row()
             .items_center()

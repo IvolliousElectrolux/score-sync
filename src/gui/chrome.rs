@@ -283,6 +283,7 @@ impl ScoreSyncApp {
             .child(
                 div()
                     .w_full()
+                    .min_w(px(0.))
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(rgb(0xcbd5e1))

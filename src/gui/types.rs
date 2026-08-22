@@ -21,7 +21,6 @@ pub(crate) const TAB_VIRTUAL_THRESHOLD: usize = 48;
 pub(crate) const TAB_SLOT_PX: f32 = 76.0;
 /// 短页码页签 (含间距) 的保守估宽, 略窄以便多渲染几页, 避免末页被虚拟列表裁掉.
 pub(crate) const TAB_COMPACT_SLOT_PX: f32 = 44.0;
-pub(crate) const TAB_GAP_PX: f32 = 4.0;
 /// 输出组合 / 蒙版组合超过此值时只渲染可视范围 (数据仍是全部).
 pub(crate) const GROUP_LIST_VIRTUAL_THRESHOLD: usize = 80;
 pub(crate) const GROUP_ROW_PX: f32 = 30.0;
