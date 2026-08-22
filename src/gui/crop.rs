@@ -114,8 +114,7 @@ impl ScoreSyncApp {
                 done += 1;
                 let d = done;
                 this.update(cx, |view, cx| {
-                    view.doc.apply_detect_file(idx, &file);
-                    view.doc.upsert_page_groups(idx);
+                    view.doc.replace_page_detect(idx, &file);
                     if d == n || d % 8 == 0 {
                         view.status = format!("识别进度 {d}/{n}…").into();
                         view.hint = view.status.clone();

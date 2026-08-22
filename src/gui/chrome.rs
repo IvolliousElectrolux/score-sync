@@ -22,6 +22,13 @@ impl ScoreSyncApp {
         });
         cx.notify();
     }
+
+    pub(super) fn has_modal_overlay(&self, cx: &App) -> bool {
+        self.dialog.is_some()
+            || self.apply_bg.read(cx).is_error_open()
+            || self.score_video.read(cx).is_error_open()
+            || self.score_video.read(cx).is_export_open()
+    }
     pub(super) fn btn(
         &self,
         id: impl Into<SharedString>,
@@ -730,6 +737,13 @@ impl ScoreSyncApp {
         self.sync_mask_image(cx);
     }
     pub(super) fn dialog_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 关窗/新建确认必须盖过子面板错误, 否则「确定」被挡住也退不出.
+        if matches!(self.dialog, Some(DialogKind::UnsavedExit)) {
+            return self.unsaved_exit_dialog(cx).into_any_element();
+        }
+        if matches!(self.dialog, Some(DialogKind::UnsavedNew)) {
+            return self.unsaved_new_dialog(cx).into_any_element();
+        }
         if self.score_video.read(cx).is_export_open() {
             return self
                 .score_video
@@ -748,12 +762,6 @@ impl ScoreSyncApp {
         let Some(ref dlg) = self.dialog else {
             return div().into_any_element();
         };
-        if matches!(dlg, DialogKind::UnsavedExit) {
-            return self.unsaved_exit_dialog(cx).into_any_element();
-        }
-        if matches!(dlg, DialogKind::UnsavedNew) {
-            return self.unsaved_new_dialog(cx).into_any_element();
-        }
         if matches!(dlg, DialogKind::UpdateAvailable { .. }) {
             return self.update_available_dialog(cx).into_any_element();
         }
@@ -818,13 +826,12 @@ impl ScoreSyncApp {
                     cx.stop_propagation();
                 }),
             )
-            .child(
-                div()
-                    .id("dialog_card")
-                    .w(px(520.))
-                    .h(px(520.))
-                    .max_h(px(520.))
-                    .p_4()
+                    .child(
+                        div()
+                            .id("dialog_card")
+                            .w(px(520.))
+                            .max_h(px(520.))
+                            .p_4()
                     .rounded_lg()
                     .bg(rgb(0xffffff))
                     .border_1()

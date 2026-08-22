@@ -367,7 +367,7 @@ impl Render for ScoreSyncApp {
                 let x = f32::from(ev.position.x);
                 let y = f32::from(ev.position.y);
                 // Help 打开时仍允许拖 Help 滚动条; 其它拖拽一律忽略
-                if this.dialog.is_some() {
+                if this.has_modal_overlay(cx) {
                     if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
                         this.apply_scrollbar_drag(x, y, cx);
                     }
@@ -391,7 +391,7 @@ impl Render for ScoreSyncApp {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseUpEvent, _, cx| {
-                    if this.dialog.is_some() {
+                    if this.has_modal_overlay(cx) {
                         if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
                             this.drag = None;
                             cx.notify();
@@ -471,6 +471,8 @@ impl Render for ScoreSyncApp {
                     this.cancel_param_edit(window, cx);
                 } else if this.region_y_edit.is_some() {
                     this.cancel_edit_y(window, cx);
+                } else {
+                    this.dismiss_blocking_overlays(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &mask_tool::gui::OpenFile, window, cx| {
@@ -767,6 +769,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
                         if app.allow_close {
                             return true;
                         }
+                        app.dismiss_error_overlays(cx);
                         app.refresh_dirty_from_panels(cx);
                         if !app.dirty {
                             return true;

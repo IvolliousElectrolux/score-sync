@@ -124,6 +124,31 @@ impl ScoreSyncApp {
         }
     }
 
+    /// 虚拟页签槽宽: 优先用已测到的页签宽度, 短页码模式不用 76px 长标签估宽.
+    pub(super) fn tab_slot_px(&self) -> f32 {
+        let n = self.doc.pages.len();
+        let mut max_w = 0.0f32;
+        let mut counted = 0usize;
+        for (&i, b) in &self.tab_bounds {
+            if i >= n {
+                continue;
+            }
+            let w = f32::from(b.size.width);
+            if w > 8.0 {
+                max_w = max_w.max(w);
+                counted += 1;
+            }
+        }
+        let slot = if counted > 0 {
+            max_w + TAB_GAP_PX
+        } else if n > TAB_VIRTUAL_THRESHOLD {
+            TAB_COMPACT_SLOT_PX
+        } else {
+            TAB_SLOT_PX
+        };
+        slot.clamp(32.0, 200.0)
+    }
+
     pub(super) fn visible_tab_range(&self) -> (usize, usize) {
         let n = self.doc.pages.len();
         if n == 0 {
@@ -132,13 +157,21 @@ impl ScoreSyncApp {
         if n <= TAB_VIRTUAL_THRESHOLD {
             return (0, n);
         }
+        let slot = self.tab_slot_px();
         let view_w = f32::from(self.tab_scroll.bounds().size.width);
         let view_w = if view_w < 8.0 { 960.0 } else { view_w };
         let off = (-f32::from(self.tab_scroll.offset().x)).max(0.0);
-        let start = ((off / TAB_SLOT_PX).floor() as usize).saturating_sub(8);
-        let end = (((off + view_w) / TAB_SLOT_PX).ceil() as usize)
+        let mut start = ((off / slot).floor() as usize).saturating_sub(8);
+        let mut end = (((off + view_w) / slot).ceil() as usize)
             .saturating_add(8)
             .min(n);
+        let max_off = f32::from(self.tab_scroll.max_offset().width).max(0.0);
+        // 短页签实际比占位窄时, 滚到右缘仍够不到按估宽算出的末页, 这里补上.
+        if max_off <= 1.0 || off + slot >= max_off {
+            end = n;
+            let vis = ((view_w / slot).ceil() as usize).saturating_add(16);
+            start = start.min(n.saturating_sub(vis));
+        }
         let start = start.min(n);
         (start, end.max(start))
     }
@@ -354,10 +387,11 @@ impl ScoreSyncApp {
             .track_scroll(handle)
             .scrollbar_width(px(0.))
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
+        let slot = self.tab_slot_px();
         if n > TAB_VIRTUAL_THRESHOLD && start > 0 {
             row = row.child(
                 div()
-                    .w(px(start as f32 * TAB_SLOT_PX))
+                    .w(px(start as f32 * slot))
                     .h(px(1.))
                     .flex_shrink_0(),
             );
@@ -469,7 +503,7 @@ impl ScoreSyncApp {
         if n > TAB_VIRTUAL_THRESHOLD && end < n {
             row = row.child(
                 div()
-                    .w(px((n - end) as f32 * TAB_SLOT_PX))
+                    .w(px((n - end) as f32 * slot))
                     .h(px(1.))
                     .flex_shrink_0(),
             );

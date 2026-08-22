@@ -45,6 +45,26 @@ impl ScoreSyncApp {
         self.try_show_update_dialog(cx);
         cx.notify();
     }
+
+    pub(super) fn dismiss_error_overlays(&mut self, cx: &mut Context<Self>) {
+        self.apply_bg.update(cx, |v, cx| v.clear_error(cx));
+        self.score_video.update(cx, |v, cx| v.clear_error(cx));
+    }
+
+    /// Esc: 关掉普通提示/子面板错误, 确认关窗/新建的对话框也取消.
+    pub(super) fn dismiss_blocking_overlays(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_error_overlays(cx);
+        match self.dialog {
+            Some(DialogKind::UnsavedExit | DialogKind::UnsavedNew) => {
+                self.dialog = None;
+                cx.notify();
+            }
+            Some(DialogKind::Info { .. } | DialogKind::Help | DialogKind::UpdateAvailable { .. }) => {
+                self.dismiss_dialog(cx);
+            }
+            None => {}
+        }
+    }
     pub(super) fn load_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut images = Vec::new();
         let mut pdfs = Vec::new();

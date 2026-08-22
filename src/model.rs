@@ -738,6 +738,30 @@ impl DocState {
         self.group_masks.retain(|k, _| valid.contains(k));
     }
 
+    /// 去掉已经找不到 region 的组合和残留 rid.
+    /// 有页尚未灌入 regions 时不要调用, 否则会误删那些页的组合.
+    pub fn prune_dangling_groups(&mut self) {
+        let valid: HashSet<String> = self
+            .pages
+            .iter()
+            .flat_map(|p| p.regions.keys().cloned())
+            .collect();
+        for g in &mut self.groups {
+            g.region_ids.retain(|id| valid.contains(id));
+        }
+        self.groups.retain(|g| !g.region_ids.is_empty());
+        self.selected_region_ids.retain(|id| valid.contains(id));
+        self.ensure_active_group();
+    }
+
+    /// 全部页都已有识别结果时才清幽灵组合 (避免 hydrate 中途误删).
+    pub fn prune_dangling_groups_if_hydrated(&mut self) {
+        if self.pages.is_empty() || self.pages.iter().any(|p| p.regions.is_empty()) {
+            return;
+        }
+        self.prune_dangling_groups();
+    }
+
     /// 加载一页 RGB 图并写入会话 tmp, 再自动识别. `switch_to`: 是否切到新页.
     pub fn add_page(
         &mut self,
@@ -886,6 +910,7 @@ impl DocState {
                 .collect();
             self.groups_manual_order = false;
             self.sort_groups();
+            self.prune_dangling_groups_if_hydrated();
             self.ensure_active_group();
         }
     }
@@ -1022,6 +1047,7 @@ impl DocState {
         for i in 0..self.pages.len() {
             self.ensure_page_groups(i);
         }
+        self.prune_dangling_groups_if_hydrated();
         self.ensure_active_group();
     }
 
@@ -1040,9 +1066,25 @@ impl DocState {
         loaded
     }
 
+    /// 用 sidecar 替换本页 regions, 并按新结果重建本页输出组合.
+    /// 必须在替换前记下旧 rid: 重新识别会生成全新 id, 不能靠新 id 去匹配旧组合.
+    pub fn replace_page_detect(
+        &mut self,
+        page_idx: usize,
+        file: &crate::detect_cache::PageDetectFile,
+    ) {
+        let old_ids: HashSet<String> = self
+            .pages
+            .get(page_idx)
+            .map(|p| p.regions.keys().cloned().collect())
+            .unwrap_or_default();
+        self.apply_detect_file(page_idx, file);
+        self.upsert_page_groups(page_idx, &old_ids);
+    }
+
     /// 按页序插入/替换本页 groups, 其它页的组块顺序不受影响.
-    /// 只动本页涉及到的组合, 不因其它页尚未灌入 regions 而误删它们的组.
-    pub fn upsert_page_groups(&mut self, page_idx: usize) {
+    /// `old_region_ids` 是替换前本页的 rid, 用来丢掉已失效的旧组合.
+    pub fn upsert_page_groups(&mut self, page_idx: usize, old_region_ids: &HashSet<String>) {
         let page_rids: HashSet<String> = self
             .pages
             .get(page_idx)
@@ -1051,8 +1093,20 @@ impl DocState {
         if page_rids.is_empty() {
             return;
         }
-        self.groups
-            .retain(|g| !g.region_ids.iter().any(|id| page_rids.contains(id)));
+        let mut drop_ids = page_rids.clone();
+        drop_ids.extend(old_region_ids.iter().cloned());
+        self.groups = self
+            .groups
+            .drain(..)
+            .filter_map(|mut g| {
+                g.region_ids.retain(|id| !drop_ids.contains(id));
+                if g.region_ids.is_empty() {
+                    None
+                } else {
+                    Some(g)
+                }
+            })
+            .collect();
         let mut ordered: Vec<Region> = self.pages[page_idx]
             .regions
             .values()
@@ -2034,5 +2088,91 @@ mod tests {
                 vec!["r1-3".to_string(), "r1-4".to_string()],
             ]
         );
+    }
+
+    fn replace_page_regions(doc: &mut DocState, page_idx: usize, bands: &[(i32, i32)]) -> HashSet<String> {
+        let old_ids: HashSet<String> = doc.pages[page_idx].regions.keys().cloned().collect();
+        let page_id = doc.pages[page_idx].id.clone();
+        doc.pages[page_idx].regions.clear();
+        for (i, &(y0, y1)) in bands.iter().enumerate() {
+            let rid = format!("n{page_idx}-{i}");
+            doc.pages[page_idx].regions.insert(
+                rid.clone(),
+                Region {
+                    id: rid,
+                    page_id: page_id.clone(),
+                    y0,
+                    y1,
+                    kind: "system".into(),
+                    color: COLORS[i % COLORS.len()].to_string(),
+                },
+            );
+        }
+        doc.rebuild_rid_index();
+        old_ids
+    }
+
+    #[test]
+    fn upsert_page_groups_drops_stale_rids_from_redetect() {
+        let mut doc = DocState::new();
+        doc.pages.push(stub_page(400));
+        seed_bands(&mut doc, 0, &[(10, 20), (40, 50), (70, 80)]);
+        let old_ids = replace_page_regions(&mut doc, 0, &[(12, 22), (42, 52)]);
+        doc.upsert_page_groups(0, &old_ids);
+        let rids: Vec<String> = doc.groups.iter().flat_map(|g| g.region_ids.clone()).collect();
+        assert_eq!(doc.groups.len(), 2);
+        assert!(rids.iter().all(|id| id.starts_with("n0-")));
+        assert!(doc.groups.iter().all(|g| doc.group_top_key(g).0 != usize::MAX));
+    }
+
+    #[test]
+    fn upsert_page_groups_keeps_other_page_and_strips_cross_page_old_rids() {
+        let mut doc = DocState::new();
+        doc.pages.push(stub_page(400));
+        doc.pages.push(stub_page(400));
+        seed_bands(&mut doc, 0, &[(10, 20), (40, 50)]);
+        seed_bands(&mut doc, 1, &[(10, 20), (40, 50)]);
+        doc.groups.retain(|g| {
+            g.region_ids != ["r0-1".to_string()] && g.region_ids != ["r1-0".to_string()]
+        });
+        doc.groups.push(Group {
+            id: "cross".into(),
+            region_ids: vec!["r0-1".into(), "r1-0".into()],
+            name: String::new(),
+        });
+        let old_ids = replace_page_regions(&mut doc, 0, &[(12, 22), (42, 52)]);
+        doc.upsert_page_groups(0, &old_ids);
+        assert!(
+            doc.groups
+                .iter()
+                .all(|g| g.region_ids.iter().all(|id| doc.find_region(id).is_some()))
+        );
+        assert!(doc.groups.iter().any(|g| g.region_ids == ["r1-0".to_string()]));
+        assert!(doc.groups.iter().any(|g| g.region_ids == ["r1-1".to_string()]));
+        assert_eq!(
+            doc.groups
+                .iter()
+                .filter(|g| g.region_ids.iter().any(|id| id.starts_with("n0-")))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn prune_dangling_skips_while_some_page_has_no_regions() {
+        let mut doc = DocState::new();
+        doc.pages.push(stub_page(400));
+        doc.pages.push(stub_page(400));
+        seed_bands(&mut doc, 0, &[(10, 20)]);
+        doc.groups.push(Group {
+            id: "pending".into(),
+            region_ids: vec!["r1-future".into()],
+            name: String::new(),
+        });
+        doc.prune_dangling_groups_if_hydrated();
+        assert!(doc.groups.iter().any(|g| g.id == "pending"));
+        seed_bands(&mut doc, 1, &[(10, 20)]);
+        doc.prune_dangling_groups_if_hydrated();
+        assert!(!doc.groups.iter().any(|g| g.id == "pending"));
     }
 }

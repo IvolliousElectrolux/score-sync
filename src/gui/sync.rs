@@ -704,6 +704,7 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn after_doc_change(&mut self, cx: &mut Context<Self>) {
+        self.doc.prune_dangling_groups_if_hydrated();
         self.doc.sync_group_colors();
         self.mark_dirty();
         self.mark_video_pool_dirty_all();

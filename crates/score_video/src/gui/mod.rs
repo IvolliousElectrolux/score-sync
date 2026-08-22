@@ -274,6 +274,12 @@ impl ScoreVideoApp {
         self.error_dialog.is_some()
     }
 
+    pub fn clear_error(&mut self, cx: &mut Context<Self>) {
+        if self.error_dialog.take().is_some() {
+            cx.notify();
+        }
+    }
+
     pub fn error_dialog(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, body) = self
             .error_dialog
@@ -293,26 +299,13 @@ impl ScoreVideoApp {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
+                cx.listener(|this, _, _, cx| {
+                    this.error_dialog = None;
                     cx.stop_propagation();
+                    cx.notify();
                 }),
             )
             .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|_, _, _, cx| {
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_move(cx.listener(|_, _, _, cx| {
-                cx.stop_propagation();
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
                 MouseButton::Right,
                 cx.listener(|_, _, _, cx| {
                     cx.stop_propagation();
@@ -328,14 +321,27 @@ impl ScoreVideoApp {
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .overflow_hidden()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_color(rgb(0xf8fafc))
                             .text_lg()
                             .child(title),
                     )
                     .child(
                         div()
+                            .id("sv_error_body")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .max_h(px(280.))
+                            .overflow_scroll()
                             .text_sm()
                             .text_color(rgb(0xcbd5e1))
                             .whitespace_normal()
@@ -344,6 +350,7 @@ impl ScoreVideoApp {
                     .child(
                         div()
                             .id("sv_error_ok")
+                            .flex_shrink_0()
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -353,10 +360,11 @@ impl ScoreVideoApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0x1d4ed8)))
                             .child("确定")
-                            .on_mouse_up(
+                            .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
                                     this.error_dialog = None;
+                                    cx.stop_propagation();
                                     cx.notify();
                                 }),
                             ),

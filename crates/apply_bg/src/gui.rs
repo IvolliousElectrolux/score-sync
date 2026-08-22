@@ -160,6 +160,12 @@ impl ApplyBgApp {
         self.error_dialog.is_some()
     }
 
+    pub fn clear_error(&mut self, cx: &mut Context<Self>) {
+        if self.error_dialog.take().is_some() {
+            cx.notify();
+        }
+    }
+
     pub fn error_dialog(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, body) = self
             .error_dialog
@@ -179,15 +185,17 @@ impl ApplyBgApp {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
+                cx.listener(|this, _, _, cx| {
+                    this.error_dialog = None;
                     cx.stop_propagation();
+                    cx.notify();
                 }),
             )
             .child(
                 div()
                     .id("ab_error_card")
                     .w(px(480.))
-                    .max_h(px(360.))
+                    .max_h(px(420.))
                     .rounded_lg()
                     .bg(rgb(0xffffff))
                     .p_4()
@@ -195,8 +203,16 @@ impl ApplyBgApp {
                     .flex_col()
                     .gap_3()
                     .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgb(0x0f172a))
@@ -205,6 +221,10 @@ impl ApplyBgApp {
                     .child(
                         div()
                             .id("ab_error_body")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .max_h(px(280.))
+                            .overflow_scroll()
                             .text_sm()
                             .text_color(rgb(0x334155))
                             .whitespace_normal()
@@ -213,6 +233,7 @@ impl ApplyBgApp {
                     .child(
                         div()
                             .id("ab_error_ok")
+                            .flex_shrink_0()
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -222,10 +243,11 @@ impl ApplyBgApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0x1d4ed8)))
                             .child("确定")
-                            .on_mouse_up(
+                            .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
                                     this.error_dialog = None;
+                                    cx.stop_propagation();
                                     cx.notify();
                                 }),
                             ),
@@ -625,13 +647,17 @@ impl ApplyBgApp {
                             );
                             if !res.errors.is_empty() {
                                 text.push_str(&format!("; 失败 {} 条", res.errors.len()));
+                                let mut lines: Vec<String> =
+                                    res.errors.iter().map(|e| e.to_string()).collect();
+                                const SHOW: usize = 12;
+                                if lines.len() > SHOW {
+                                    let extra = lines.len() - SHOW;
+                                    lines.truncate(SHOW);
+                                    lines.push(format!("… 另有 {extra} 条"));
+                                }
                                 view.show_error(
                                     "部分文件处理失败",
-                                    res.errors
-                                        .iter()
-                                        .map(|e| e.to_string())
-                                        .collect::<Vec<_>>()
-                                        .join("\n"),
+                                    lines.join("\n"),
                                     cx,
                                 );
                             }
