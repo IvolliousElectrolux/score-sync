@@ -2,8 +2,9 @@
 //!
 //! rodio 的 `Sink` 只能从头顺序播放已 append 的音源, 不支持中途寻址; 因此每次
 //! 跳转 (播放/暂停/拖动播放头) 都重新创建 `Sink`, 定位到覆盖目标时刻的那条
-//! `AudioClip`. 1x 用 `skip_duration` 跳过内部偏移; 倍速预览走 ffmpeg `atempo`
-//! (变速不变调, 避免 rodio `set_speed` 把音高一起抬高).
+//! `AudioClip`. 1x 对 16-bit WAV (含 m4a 转出来的预览 WAV) 按采样点 `seek`,
+//! 不要用 `skip_duration` 从头解码 (长文件暂停再播会卡, 墙钟却继续走, 出声时
+//! 播放头已经往后漂). 倍速预览仍走 ffmpeg `atempo` (变速不变调).
 
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -62,7 +63,7 @@ impl AudioEngine {
     pub fn set_clips(&mut self, clips: Vec<AudioClip>) {
         self.clips = clips;
         if self.playing {
-            self.restart_from(self.current_time());
+            self.begin_playback_at(self.current_time());
         }
     }
 
@@ -70,7 +71,7 @@ impl AudioEngine {
         self.playing
     }
 
-    /// 播放中按墙钟×倍速估算当前时刻; 暂停时返回记录的播放头.
+    /// 播放中按墙钟×倍速估算当前时刻; 暂停, 或解码还没就绪时, 停在 `base_time`.
     pub fn current_time(&self) -> f64 {
         if self.playing {
             let elapsed = self
@@ -96,17 +97,12 @@ impl AudioEngine {
         let t = self.current_time();
         self.speed = speed;
         if self.playing {
-            self.base_time = t;
-            self.started_at = Some(Instant::now());
-            self.restart_from(t);
+            self.begin_playback_at(t);
         }
     }
 
     pub fn play_from(&mut self, t: f64) {
-        self.base_time = t.max(0.0);
-        self.started_at = Some(Instant::now());
-        self.playing = true;
-        self.restart_from(self.base_time);
+        self.begin_playback_at(t);
     }
 
     pub fn pause(&mut self) {
@@ -120,11 +116,22 @@ impl AudioEngine {
 
     /// 拖动播放头 (无论播放/暂停中都调用).
     pub fn seek(&mut self, t: f64) {
-        self.base_time = t.max(0.0);
-        self.started_at = Some(Instant::now());
+        let t = t.max(0.0);
         if self.playing {
-            self.restart_from(self.base_time);
+            self.begin_playback_at(t);
+        } else {
+            self.base_time = t;
+            self.started_at = None;
         }
+    }
+
+    /// 先完成寻址再开墙钟, 避免拉起解码的时间被算进播放头.
+    fn begin_playback_at(&mut self, t: f64) {
+        self.base_time = t.max(0.0);
+        self.playing = true;
+        self.started_at = None;
+        self.restart_from(self.base_time);
+        self.started_at = Some(Instant::now());
     }
 
     fn restart_from(&mut self, t: f64) {
@@ -145,19 +152,21 @@ impl AudioEngine {
                 let local_offset = (t - cum).max(0.0);
                 let remain = (clip.duration - local_offset).max(0.0);
                 let src_t = clip.offset + local_offset;
-                if stretch {
-                    if let Some(src) = open_atempo_source(&clip.path, src_t, remain, self.speed) {
-                        sink.append(src);
-                    }
-                } else if let Some(dec) = open_decoder(&clip.path) {
+                if remain >= 1e-4 {
                     // `clip.offset` 是该段在源文件里的起始时刻 (分割音频
                     // 产生的后半段 > 0), `local_offset` 是本次寻址点相对
                     // 这一段自己起点的偏移, 两者相加才是源文件里真正要
                     // 跳到的位置.
-                    let skip = Duration::from_secs_f64(src_t);
-                    if let Ok(src) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        dec.skip_duration(skip)
-                    })) {
+                    if stretch {
+                        if let Some(src) =
+                            open_atempo_source(&clip.path, src_t, remain, self.speed)
+                        {
+                            sink.append(src);
+                        }
+                    } else if let Some(src) = open_wav_slice(&clip.path, src_t, remain) {
+                        sink.append(src);
+                    } else if let Some(src) = open_atempo_source(&clip.path, src_t, remain, 1.0)
+                    {
                         sink.append(src);
                     }
                 }
@@ -262,6 +271,72 @@ fn decode_path(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// 16-bit PCM WAV 按采样点寻址, 避免 rodio `skip_duration` 从头解码.
+struct WavSliceSource {
+    samples: hound::WavIntoSamples<BufReader<File>, i16>,
+    channels: u16,
+    sample_rate: u32,
+    remaining: u64,
+}
+
+fn open_wav_slice(path: &Path, start: f64, duration: f64) -> Option<WavSliceSource> {
+    let decode = decode_path(path)?;
+    if duration < 1e-4 {
+        return None;
+    }
+    let mut reader = hound::WavReader::new(BufReader::new(File::open(&decode).ok()?)).ok()?;
+    let spec = reader.spec();
+    if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
+        return None;
+    }
+    let sr = spec.sample_rate.max(1);
+    let ch = spec.channels.max(1);
+    let total = reader.duration() as u64;
+    let start_idx = ((start.max(0.0) * sr as f64).round() as u64).min(total);
+    reader.seek(start_idx as u32).ok()?;
+    let want = ((duration.max(0.0) * sr as f64).round() as u64).saturating_mul(ch as u64);
+    let avail = total.saturating_sub(start_idx).saturating_mul(ch as u64);
+    Some(WavSliceSource {
+        samples: reader.into_samples::<i16>(),
+        channels: ch,
+        sample_rate: sr,
+        remaining: want.min(avail),
+    })
+}
+
+impl Iterator for WavSliceSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        self.samples.next()?.ok()
+    }
+}
+
+impl Source for WavSliceSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        let ch = self.channels.max(1) as u64;
+        let sr = self.sample_rate.max(1) as f64;
+        let secs = (self.remaining / ch) as f64 / sr;
+        Some(Duration::from_secs_f64(secs.max(0.0)))
+    }
+}
+
 /// ffmpeg `atempo` 单级只接受 0.5..=2.0, 3x 拆成 2×1.5.
 pub(crate) fn atempo_filter(speed: f32) -> String {
     let mut s = speed as f64;
@@ -327,10 +402,11 @@ impl AtempoSource {
             .arg(format!("{:.6}", self.duration))
             .arg("-i")
             .arg(&self.path)
-            .arg("-vn")
-            .arg("-af")
-            .arg(atempo_filter(self.speed))
-            .arg("-f")
+            .arg("-vn");
+        if (self.speed - 1.0).abs() > 1e-3 {
+            cmd.arg("-af").arg(atempo_filter(self.speed));
+        }
+        cmd.arg("-f")
             .arg("s16le")
             .arg("-acodec")
             .arg("pcm_s16le")
@@ -551,6 +627,40 @@ mod tests {
         assert_eq!(super::atempo_filter(1.25), "atempo=1.25000");
         assert_eq!(super::atempo_filter(2.0), "atempo=2.00000");
         assert_eq!(super::atempo_filter(3.0), "atempo=2,atempo=1.50000");
+    }
+
+    #[test]
+    fn wav_slice_seeks_by_sample_not_decode() {
+        use rodio::Source;
+        let dir = std::env::temp_dir().join(format!("sv_wav_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            for i in 0..8000 {
+                w.write_sample(i as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mut src = super::open_wav_slice(&path, 0.5, 0.25).expect("wav slice");
+        assert_eq!(src.sample_rate(), 8000);
+        assert_eq!(src.channels(), 1);
+        let first = src.next().unwrap();
+        assert_eq!(first, 4000);
+        let n = 1 + src.count();
+        assert_eq!(n, 2000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wav_slice_rejects_non_pcm16() {
+        assert!(super::open_wav_slice(std::path::Path::new("nope.mp3"), 0.0, 1.0).is_none());
     }
 
     #[test]
