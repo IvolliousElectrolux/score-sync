@@ -25,3 +25,11 @@ crates/**/Cargo.lock
 !/assets/app.ico
 !/assets/app.rc
 
+# PyInstaller
+/dist/
+/build/
+*.spec
+/tools/dist/
+/tools/build/
+**/__pycache__/
+

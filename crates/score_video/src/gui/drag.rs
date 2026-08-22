@@ -50,7 +50,6 @@ impl ScoreVideoApp {
                     let t = self.x_to_time(x);
                     self.push_undo();
                     self.timeline.insert_at(t, group_id);
-                    self.status = "已从素材池拖入片段".into();
                 } else if moved < 4.0 {
                     self.expanded_pool = if self.expanded_pool.as_deref() == Some(group_id.as_str())
                     {
@@ -255,7 +254,6 @@ impl ScoreVideoApp {
                 self.push_undo();
                 self.timeline.move_audio(from, to);
                 self.audio.set_clips(self.timeline.audio_clips.clone());
-                self.status = "已调整音频顺序".into();
             }
             self.drag = None;
             cx.notify();

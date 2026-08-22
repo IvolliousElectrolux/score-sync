@@ -280,14 +280,9 @@ impl ScoreVideoApp {
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    this.push_undo();
-                                    let keep = this.timeline.toggle_keep_bg_on_selected();
+                    this.push_undo();
+                    let _keep = this.timeline.toggle_keep_bg_on_selected();
                                     this.fade_menu = None;
-                                    this.status = if keep {
-                                        "已对选中淡入淡出保持底色 (只淡乐谱, 不淡到黑).".into()
-                                    } else {
-                                        "已恢复为淡到黑.".into()
-                                    };
                                     cx.notify();
                                 }),
                             ),

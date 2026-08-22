@@ -540,16 +540,6 @@ impl ScoreVideoApp {
             .child(self.preview(cx))
             .child(self.tracks(cx))
             .child(self.track_bar(cx))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(rgb(0x64748b))
-                    .bg(rgb(0x0f172a))
-                    .child(self.status.clone()),
-            )
             .child(self.fade_context_menu_overlay(cx))
             .child(self.speed_menu_overlay(cx))
     }

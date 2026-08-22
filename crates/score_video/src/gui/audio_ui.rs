@@ -95,7 +95,6 @@ impl ScoreVideoApp {
             return;
         }
         let n = jobs.len();
-        self.status = format!("正在准备音频预览 ({n})…").into();
         let (tx, rx) = async_channel::unbounded::<(PathBuf, bool)>();
         std::thread::spawn(move || {
             for p in jobs {
@@ -117,22 +116,15 @@ impl ScoreVideoApp {
                     view.waveform_cache.remove(&path);
                     view.waveform_pending.remove(&path);
                     view.audio.set_clips(view.timeline.audio_clips.clone());
-                    if d == n {
-                        view.status = if o == n {
-                            "音频预览已就绪.".into()
-                        } else {
-                            format!("音频已导入; 预览就绪 {o}/{n} (导出仍用原文件).").into()
-                        };
-                        if o != n {
-                            view.show_error(
-                                "音频预览未全部就绪",
-                                format!(
-                                    "已导入, 但 {o}/{n} 个文件转成预览波形失败.\n\
-                                     导出仍使用原文件; 常见原因是 ffmpeg 不在程序目录, 或文件没有音轨."
-                                ),
-                                cx,
-                            );
-                        }
+                    if d == n && o != n {
+                        view.show_error(
+                            "音频预览未全部就绪",
+                            format!(
+                                "已导入, 但 {o}/{n} 个文件转成预览波形失败.\n\
+                                 导出仍使用原文件; 常见原因是 ffmpeg 不在程序目录, 或文件没有音轨."
+                            ),
+                            cx,
+                        );
                     }
                     cx.notify();
                 })
@@ -146,11 +138,6 @@ impl ScoreVideoApp {
     /// 按下时在 `Render` 里加的全屏透明遮罩上判定落点 (见那边的说明).
     pub(super) fn toggle_split_audio_armed(&mut self, cx: &mut Context<Self>) {
         self.split_audio_armed = !self.split_audio_armed;
-        self.status = if self.split_audio_armed {
-            "分割音频: 在音频轨道上点击要切开的位置 (点其他地方取消)".into()
-        } else {
-            "已取消分割音频".into()
-        };
         cx.notify();
     }
 
@@ -166,7 +153,6 @@ impl ScoreVideoApp {
         // 轨道水平范围内, 避免缩放滚动后边界抖动导致误判取消.
         let in_track_x = x >= left - 2.0 && x <= right + 2.0;
         if !in_track_x {
-            self.status = "已取消分割音频".into();
             cx.notify();
             return;
         }
@@ -174,10 +160,8 @@ impl ScoreVideoApp {
         self.push_undo();
         if self.timeline.split_audio_at(t) {
             self.audio.set_clips(self.timeline.audio_clips.clone());
-            self.status = format!("已在 {} 处分割音频", fmt_time(t)).into();
         } else {
             self.undo_stack.pop();
-            self.status = "该处没有可分割的音频片段 (太靠近边界或未落在片段上)".into();
         }
         cx.notify();
     }
@@ -188,7 +172,6 @@ impl ScoreVideoApp {
             return false;
         }
         self.split_audio_armed = false;
-        self.status = "已取消分割音频".into();
         cx.notify();
         true
     }

@@ -20,7 +20,6 @@ impl ScoreVideoApp {
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         let Some(prev) = self.undo_stack.pop() else {
-            self.status = "没有可撤回的操作.".into();
             cx.notify();
             return;
         };
@@ -28,13 +27,11 @@ impl ScoreVideoApp {
         self.timeline.load_snapshot(prev);
         self.audio.set_clips(self.timeline.audio_clips.clone());
         self.drag = None;
-        self.status = "已撤回.".into();
         cx.notify();
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         let Some(next) = self.redo_stack.pop() else {
-            self.status = "没有可重做的操作.".into();
             cx.notify();
             return;
         };
@@ -45,7 +42,6 @@ impl ScoreVideoApp {
         self.timeline.load_snapshot(next);
         self.audio.set_clips(self.timeline.audio_clips.clone());
         self.drag = None;
-        self.status = "已重做.".into();
         cx.notify();
     }
 
@@ -269,10 +265,10 @@ impl ScoreVideoApp {
     pub fn insert_next(&mut self, cx: &mut Context<Self>) {
         self.push_undo();
         match self.timeline.insert_next(&self.pool) {
-            Ok(()) => self.status = "已插入下一张组合".into(),
+            Ok(()) => {}
             Err(e) => {
                 self.undo_stack.pop();
-                self.status = e.into();
+                self.show_error("无法插入下一张组合", e, cx);
             }
         }
         cx.notify();

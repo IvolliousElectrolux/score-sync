@@ -111,3 +111,64 @@ jobs:
             gh release create "$TAG" --title "$TAG" --notes "Score Sync ${TAG}"
           fi
           gh release upload "$TAG" "${STAGE}.zip" --clobber
+
+  warp-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build warp_staffcrop_timeline
+        run: |
+          set -euo pipefail
+          python3 -c "import tkinter"
+          python3 -m pip install -U pip pyinstaller
+          python3 -m PyInstaller --noconfirm --windowed --onefile \
+            --name warp_staffcrop_timeline \
+            tools/warp_staffcrop_timeline.py
+          VER=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          STAGE="warp_staffcrop_timeline-${VER}-macos-arm64"
+          mkdir -p "$STAGE"
+          cp dist/warp_staffcrop_timeline "$STAGE/"
+          chmod +x "$STAGE/warp_staffcrop_timeline"
+          cp tools/warp_staffcrop_timeline.py "$STAGE/"
+          ditto -c -k --sequesterRsrc --keepParent "$STAGE" "${STAGE}.zip"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          ls -lh "${STAGE}.zip" "$STAGE"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+
+      - name: Attach zip to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "no release tag; skip attach"
+            exit 0
+          fi
+          for i in $(seq 1 20); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              break
+            fi
+            echo "waiting for release $TAG ($i)"
+            sleep 15
+          done
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "Score Sync ${TAG}"
+          fi
+          gh release upload "$TAG" "${STAGE}.zip" --clobber

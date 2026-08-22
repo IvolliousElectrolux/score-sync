@@ -76,10 +76,9 @@ impl ScoreVideoApp {
                                 view.export_log.drain(0..drop_n);
                             }
                         }
-                        ExportMsg::Done(Ok(path)) => {
+                        ExportMsg::Done(Ok(_)) => {
                             view.exporting = false;
                             view.export_open = false;
-                            view.status = format!("导出完成: {}", path.display()).into();
                         }
                         ExportMsg::Done(Err(e)) => {
                             view.exporting = false;

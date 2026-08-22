@@ -112,7 +112,6 @@ pub struct ScoreVideoApp {
     /// 正在后台解码计算波形中的路径, 避免同一文件重复起线程.
     waveform_pending: std::collections::HashSet<PathBuf>,
     drag: Option<VideoDrag>,
-    status: SharedString,
     fade_menu: Option<FadeContextMenu>,
     /// 淡向底色时用的 RGB (宿主从工程底色图采样).
     fade_bg_rgb: [u8; 3],
@@ -175,7 +174,6 @@ impl ScoreVideoApp {
             waveform_cache: std::collections::HashMap::new(),
             waveform_pending: std::collections::HashSet::new(),
             drag: None,
-            status: "就绪. N 插入下一张组合, 空格播放/暂停, I/O 标记淡入淡出.".into(),
             fade_menu: None,
             fade_bg_rgb: DEFAULT_FADE_BG_RGB,
             error_dialog: None,
@@ -264,9 +262,7 @@ impl ScoreVideoApp {
         err: impl std::fmt::Display,
         cx: &mut Context<Self>,
     ) {
-        let body = err.to_string();
-        self.status = body.clone().into();
-        self.error_dialog = Some((title.into().into(), body.into()));
+        self.error_dialog = Some((title.into().into(), err.to_string().into()));
         cx.notify();
     }
 

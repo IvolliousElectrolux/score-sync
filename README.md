@@ -4,7 +4,7 @@
 
 从扫描谱或 PDF 出发, 在同一界面完成 **谱表分块 → 蒙版清理 → 加底色裁切 → 视频剪辑导出**, 支持工程保存/继续编辑, 一路做到可以直接发布的同步曲谱视频 (MP4/MKV).
 
-当前版本: **1.3.9**
+当前版本: **1.3.10**
 
 ## 功能
 
@@ -53,7 +53,8 @@ cargo run -r -- path\to\project.staffcrop
 发布构建产物: `target/release/score_sync.exe` (Windows) 或 `target/release/score_sync` (macOS).
 GitHub Actions 工作流 `.github/workflows/macos.yml` 在打 `v*` 标签或手动
 `workflow_dispatch` 时于 macos-14 上编译 arm64 与 x64 (x64 交叉编译, 不再等
-macos-13), 并上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`.
+macos-13), 并上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`, 以及
+`warp_staffcrop_timeline-<ver>-macos-arm64.zip`.
 
 ## 工程格式
 
@@ -82,6 +83,8 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
     mask_tool/        # 蒙版库 (可嵌入, 可独立运行)
     apply_bg/         # 谱面加底色库 (可嵌入, 可独立批处理)
     score_video/      # 视频栏库 (可嵌入, 可独立调试)
+  tools/
+    warp_staffcrop_timeline.py  # 旧工程时间轴 t' = a*t + b (无参数打开窗口)
 ```
 
 ## 常用快捷键
@@ -96,6 +99,12 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
   `I`/`O` 标记淡入/淡出, 轨道区 `Ctrl+滚轮` 缩放
 
 ## 版本摘要
+
+### 1.3.10
+- 视频: 预览按采样寻址, 长音频暂停后再播不再跳点; 导出按时间轴逐帧写出, 翻页不再越到后面越漂
+- 页签: 紧凑页签始终能滚到当前页
+- 视频: 去掉底部状态栏, 出错只走弹窗
+- 工具: 独立「工程时间轴对齐」(`tools/warp_staffcrop_timeline.py`) 按 t' = a·t + b 重写旧工程; Release 附 Windows / macOS 可执行文件
 
 ### 1.3.9
 - 分块: 重新识别后清掉对不上任何块的幽灵组合 (列表里的 p0c*)
