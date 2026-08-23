@@ -166,7 +166,12 @@ pub(crate) const DEFAULT_FADE_BG_RGB: [u8; 3] = [0xE8, 0xD4, 0xB0];
 
 pub(crate) fn fmt_time(t: f64) -> String {
     let t = t.max(0.0);
-    let m = (t / 60.0).floor() as u64;
-    let s = t - (m as f64) * 60.0;
-    format!("{m:02}:{s:05.2}")
+    let h = (t / 3600.0).floor() as u64;
+    let m = ((t - (h as f64) * 3600.0) / 60.0).floor() as u64;
+    let s = t - (h as f64) * 3600.0 - (m as f64) * 60.0;
+    if h > 0 {
+        format!("{h:02}:{m:02}:{s:05.2}")
+    } else {
+        format!("{m:02}:{s:05.2}")
+    }
 }

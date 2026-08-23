@@ -67,17 +67,21 @@ impl ScoreSyncApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { rgb(0x1d4ed8) } else { rgb(0x334155) };
+        let bg = if active { rgb(0x2563eb) } else { rgb(0xf8fafc) };
+        let fg = if active { rgb(0xffffff) } else { rgb(0x334155) };
+        let hover = if active { rgb(0x1d4ed8) } else { rgb(0xe2e8f0) };
         div()
             .id(id.into())
+            .flex_shrink_0()
             .px_2()
             .py_1()
-            .text_sm()
+            .rounded_md()
+            .bg(bg)
             .text_color(fg)
+            .text_xs()
+            .whitespace_nowrap()
             .cursor_pointer()
-            .rounded_sm()
-            .hover(|s| s.bg(rgb(0xe2e8f0)))
-            .when(active, |d| d.bg(rgb(0xdbeafe)))
+            .hover(move |s| s.bg(hover))
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -86,14 +90,23 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 顶部菜单栏: 文字项横排, 非独立按钮块
+        // 分块菜单: 放在左栏顶上一行, 按钮尺寸对齐视频轨运输条.
         div()
+            .id("crop_toolbar")
+            .flex_shrink_0()
             .flex()
             .flex_row()
-            .flex_wrap()
             .items_center()
-            .gap_x_1()
+            .gap_1()
+            .pl_2()
+            .pr_1()
+            .py_1()
             .w_full()
+            .min_w(px(0.))
+            .overflow_x_scroll()
+            .bg(rgb(0xe2e8f0))
+            .border_b_1()
+            .border_color(rgb(0xcbd5e1))
             .child(self.menu_item("open", apply_bg::with_mod("打开", "O"), false, Self::open_file, cx))
             .child(self.menu_item(
                 "detect",
@@ -170,13 +183,6 @@ impl ScoreSyncApp {
                 "适应窗口 (F)",
                 false,
                 |this, _, cx| this.fit_to_view(cx),
-                cx,
-            ))
-            .child(self.menu_item(
-                "help",
-                "操作说明 (H)",
-                false,
-                |this, _, cx| this.show_help(cx),
                 cx,
             ))
     }
@@ -280,6 +286,9 @@ impl ScoreSyncApp {
             .flex_1()
             .min_w(px(0.))
             .min_h(px(0.))
+            .when(self.side_tool == SideTool::Crop, |d| {
+                d.child(self.toolbar(cx))
+            })
             .child(
                 div()
                     .w_full()

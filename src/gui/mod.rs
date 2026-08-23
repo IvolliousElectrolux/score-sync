@@ -116,6 +116,10 @@ pub(crate) struct ScoreSyncApp {
     dialog: Option<DialogKind>,
     /// 标签右键菜单
     tab_menu: Option<TabContextMenu>,
+    /// 页签悬停 1s 后的完整文件名提示
+    tab_hover_idx: Option<usize>,
+    tab_hover_gen: u64,
+    tab_tooltip: Option<TabTooltip>,
     /// 原子块 y0-y1 行内编辑
     edit_y_input: Entity<TextInput>,
     /// 正在编辑 y 的 region id
@@ -238,6 +242,9 @@ impl ScoreSyncApp {
             mask_preview_voff: 0,
             dialog: None,
             tab_menu: None,
+            tab_hover_idx: None,
+            tab_hover_gen: 0,
+            tab_tooltip: None,
             edit_y_input,
             region_y_edit: None,
             param_input,
@@ -629,14 +636,35 @@ impl Render for ScoreSyncApp {
                                     .text_lg()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgb(0x0f172a))
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
                                     .child(title_core),
+                            )
+                            .child(div().flex_1().min_w(px(8.)))
+                            .child(
+                                div()
+                                    .id("help_header")
+                                    .flex_shrink_0()
+                                    .mr_2()
+                                    .w(px(22.))
+                                    .h(px(22.))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(rgb(0x64748b))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .text_color(rgb(0x334155))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0xe2e8f0)).border_color(rgb(0x334155)))
+                                    .child("?")
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| this.show_help(cx)),
+                                    ),
                             ),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .pb_1()
-                            .child(self.toolbar(cx)),
                     ),
             )
             .child(
@@ -670,6 +698,7 @@ impl Render for ScoreSyncApp {
             )
             .child(self.dialog_overlay(cx))
             .child(self.tab_context_menu_overlay(cx))
+            .child(self.tab_tooltip_overlay())
             .child(self.tab_drag_ghost())
             .child(self.member_drag_ghost())
             .child(self.group_drag_ghost())
@@ -700,6 +729,8 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("f", FitView, Some("ScoreSync")),
             KeyBinding::new("h", ShowHelp, Some("ScoreSync")),
             KeyBinding::new("f1", ShowHelp, Some("ScoreSync")),
+            KeyBinding::new("h", ShowHelp, None),
+            KeyBinding::new("f1", ShowHelp, None),
             KeyBinding::new("delete", DeleteSelected, Some("ScoreSync")),
             KeyBinding::new("backspace", DeleteSelected, Some("ScoreSync")),
             KeyBinding::new("enter", ConfirmParamEdit, Some("ScoreSync")),

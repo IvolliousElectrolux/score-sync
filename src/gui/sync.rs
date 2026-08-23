@@ -518,6 +518,7 @@ impl ScoreSyncApp {
             SideTool::Crop => {
                 // 回到分块: 定位到当前蒙版组合所在页并选中该组
                 self.restore_crop_from_mask_target(cx);
+                self.scroll_page_tabs_to_index(self.doc.current_page_index);
                 self.focus_handle.focus(window);
                 self.status = "分块工具".into();
                 self.hint = format!(
@@ -541,6 +542,7 @@ impl ScoreSyncApp {
                     .into();
             }
             SideTool::Project => {
+                self.scroll_page_tabs_to_index(self.doc.current_page_index);
                 self.focus_handle.focus(window);
                 self.status = "工程工具".into();
                 self.hint =

@@ -109,31 +109,96 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn page_tab_label(&self, i: usize) -> SharedString {
-        let n = self.doc.pages.len();
+        self.page_tab_caption(i).0
+    }
+
+    fn page_tab_caption(&self, i: usize) -> (SharedString, SharedString) {
         let Some(p) = self.doc.pages.get(i) else {
-            return "?".into();
+            return ("?".into(), "?".into());
         };
         let has_sel = p
             .regions
             .keys()
             .any(|rid| self.doc.selected_region_ids.contains(rid));
         let mark = if has_sel { "●" } else { "" };
-        if n > TAB_VIRTUAL_THRESHOLD {
-            format!("{mark}{}", p.tab_badge(i + 1)).into()
-        } else {
-            format!("{mark}{}:{}", p.tab_badge(i + 1), p.title()).into()
-        }
+        let (show, full) = format_page_tab_caption(mark, &p.tab_badge(i + 1), &p.title());
+        (show.into(), full.into())
     }
 
-    /// 虚拟页签槽宽: 页数多时只用短页码的保守估宽.
-    /// 不能取已测宽度的最大值: 长标签残留或偏宽的一页会把槽位抬太大,
-    /// 可视范围只剩几个, 右侧一片空白.
+    pub(super) fn note_tab_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if matches!(self.drag, Some(DragKind::TabReorder { .. }) | Some(DragKind::TabHScroll { .. }))
+        {
+            self.clear_tab_hover(cx);
+            return;
+        }
+        if self.tab_hover_idx == Some(idx) {
+            return;
+        }
+        self.tab_hover_idx = Some(idx);
+        self.tab_tooltip = None;
+        self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
+        let gen = self.tab_hover_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1000))
+                .await;
+            this.update(cx, |view, cx| {
+                if view.tab_hover_gen != gen || view.tab_hover_idx != Some(idx) {
+                    return;
+                }
+                let (show, full) = view.page_tab_caption(idx);
+                if show == full {
+                    return;
+                }
+                let (x, y) = view
+                    .tab_bounds
+                    .get(&idx)
+                    .map(|b| {
+                        (
+                            f32::from(b.origin.x),
+                            f32::from(b.origin.y) + f32::from(b.size.height) + 6.0,
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
+                view.tab_tooltip = Some(TabTooltip {
+                    page_index: idx,
+                    x,
+                    y,
+                    text: full,
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn clear_tab_hover(&mut self, cx: &mut Context<Self>) {
+        if self.tab_hover_idx.is_none() && self.tab_tooltip.is_none() {
+            return;
+        }
+        self.tab_hover_idx = None;
+        self.tab_tooltip = None;
+        self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// 虚拟页签槽宽 (标签宽 + gap). 有实测则用平均值, 避免占位和真标签对不上在末尾抖动.
     pub(super) fn tab_slot_px(&self) -> f32 {
-        let n = self.doc.pages.len();
-        if n > TAB_VIRTUAL_THRESHOLD {
-            TAB_COMPACT_SLOT_PX
+        const GAP: f32 = 4.0;
+        let mut sum = 0.0;
+        let mut n = 0u32;
+        for b in self.tab_bounds.values() {
+            let w = f32::from(b.size.width);
+            if w > 8.0 {
+                sum += w;
+                n += 1;
+            }
+        }
+        if n >= 3 {
+            (sum / n as f32 + GAP).clamp(64.0, 360.0)
         } else {
-            TAB_SLOT_PX
+            TAB_SLOT_PX + GAP
         }
     }
 
@@ -153,22 +218,18 @@ impl ScoreSyncApp {
         let mut end = (((off + view_w) / slot).ceil() as usize)
             .saturating_add(8)
             .min(n);
-        // 当前页必须画出来, 否则从列表跳到该页时页签栏里根本没有它.
         let cur = self.doc.current_page_index.min(n.saturating_sub(1));
-        start = start.min(cur);
-        end = end.max(cur.saturating_add(1)).min(n);
-        let max_off = f32::from(self.tab_scroll.max_offset().width).max(0.0);
-        if max_off <= 1.0 {
-            // 视口还没撑开或全部能放下: 先画出全部, 下一帧才能量到真宽度.
-            start = 0;
-            end = n;
-        } else if off + slot >= max_off {
-            end = n;
-            let vis = ((view_w / slot).ceil() as usize).saturating_add(16);
-            start = start.min(n.saturating_sub(vis));
+        let vis = ((view_w / slot).ceil() as usize).saturating_add(16);
+        // 只把窗口扩到刚能看见当前页, 不要 start=min(cur) 一下子画出 0..n.
+        if cur < start {
+            start = cur;
+            end = end.max((start + vis).min(n));
+        } else if cur >= end {
+            end = (cur + 1).min(n);
+            start = start.min(end.saturating_sub(vis));
         }
         let start = start.min(n);
-        (start, end.max(start))
+        (start, end.max(start).min(n))
     }
 
     pub(super) fn scroll_page_tabs_to_index(&self, ix: usize) {
@@ -177,8 +238,11 @@ impl ScoreSyncApp {
             return;
         }
         let slot = self.tab_slot_px().max(1.0);
-        let view_w = f32::from(self.tab_scroll.bounds().size.width).max(200.0);
-        let max = f32::from(self.tab_scroll.max_offset().width).max(0.0);
+        let view_w = f32::from(self.tab_scroll.bounds().size.width);
+        let view_w = if view_w < 32.0 { 960.0 } else { view_w };
+        // 用槽宽估算 max, 不读上一帧 (蒙版页签/未布局完) 的 max_offset, 否则点末页会来回夹.
+        let add_w = 36.0;
+        let max = (n as f32 * slot + add_w - view_w).max(0.0);
         let target = (ix as f32 * slot - view_w * 0.35).clamp(0.0, max);
         self.tab_scroll
             .set_offset(point(px(-target), px(0.)));
@@ -398,7 +462,10 @@ impl ScoreSyncApp {
             .overflow_x_scroll()
             .track_scroll(handle)
             .scrollbar_width(px(0.))
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                this.clear_tab_hover(cx);
+                cx.notify();
+            }));
         let slot = self.tab_slot_px();
         if n > TAB_VIRTUAL_THRESHOLD && start > 0 {
             row = row.child(
@@ -440,6 +507,13 @@ impl ScoreSyncApp {
                     .when(show_line && line_after, |d| {
                         d.border_r_2().border_color(rgb(0xf59e0b))
                     })
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.note_tab_hover(idx, cx);
+                        } else if this.tab_hover_idx == Some(idx) {
+                            this.clear_tab_hover(cx);
+                        }
+                    }))
                     .child(Self::measure_item_bounds(cx.entity(), idx, "tab"))
                     .child(tab.label.clone())
                     .child(
@@ -474,6 +548,7 @@ impl ScoreSyncApp {
                             if matches!(this.drag, Some(DragKind::TabHScroll { .. })) {
                                 return;
                             }
+                            this.clear_tab_hover(cx);
                             this.switch_page(idx, cx);
                             let mx = f32::from(ev.position.x);
                             let my = f32::from(ev.position.y);
@@ -502,6 +577,7 @@ impl ScoreSyncApp {
                     .on_mouse_up(
                         MouseButton::Right,
                         cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
+                            this.clear_tab_hover(cx);
                             this.tab_menu = Some(TabContextMenu {
                                 page_index: idx,
                                 x: f32::from(ev.position.x),
@@ -567,6 +643,7 @@ impl ScoreSyncApp {
                 if !matches!(this.drag, Some(DragKind::TabReorder { .. })) {
                     return;
                 }
+                this.clear_tab_hover(cx);
                 if let Some(DragKind::TabReorder {
                     from,
                     start_x,
@@ -750,6 +827,30 @@ impl ScoreSyncApp {
             .child(label)
             .into_any_element()
     }
+
+    pub(super) fn tab_tooltip_overlay(&self) -> impl IntoElement {
+        let Some(ref tip) = self.tab_tooltip else {
+            return div().into_any_element();
+        };
+        div()
+            .id(SharedString::from(format!("tab-tooltip-{}", tip.page_index)))
+            .absolute()
+            .left(px(tip.x))
+            .top(px(tip.y))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgb(0xffffe1))
+            .border_1()
+            .border_color(rgb(0x6b6b6b))
+            .text_color(rgb(0x000000))
+            .text_xs()
+            .whitespace_nowrap()
+            .shadow_sm()
+            .child(tip.text.clone())
+            .into_any_element()
+    }
+
     pub(super) fn tab_context_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(ref menu) = self.tab_menu else {
             return div().into_any_element();
@@ -812,5 +913,118 @@ impl ScoreSyncApp {
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// 末尾 `_p` + 数字起至文件名结束, 例如 `_p007.png` / `_p007_copy.png`.
+fn page_tab_png_suffix(title: &str) -> &str {
+    let b = title.as_bytes();
+    let mut i = 0;
+    let mut last = None;
+    while i + 2 < b.len() {
+        if b[i] == b'_' && b[i + 1] == b'p' && b[i + 2].is_ascii_digit() {
+            last = Some(i);
+            i += 2;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    last.map(|s| &title[s..]).unwrap_or("")
+}
+
+/// 半角 / 窄字符占 1 列, 全角 / 宽字符占 2 列.
+fn ch_cols(c: char) -> usize {
+    let u = c as u32;
+    if u < 0x1100 {
+        return 1;
+    }
+    let wide = matches!(
+        u,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0x303E
+            | 0x3040..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x1F900..=0x1F9FF
+            | 0x20000..=0x3FFFD
+    );
+    if wide { 2 } else { 1 }
+}
+
+fn str_cols(s: &str) -> usize {
+    s.chars().map(ch_cols).sum()
+}
+
+fn take_cols(s: &str, max: usize) -> &str {
+    let mut cols = 0;
+    for (i, c) in s.char_indices() {
+        let w = ch_cols(c);
+        if cols + w > max {
+            return &s[..i];
+        }
+        cols += w;
+    }
+    s
+}
+
+fn format_page_tab_caption(mark: &str, badge: &str, title: &str) -> (String, String) {
+    let full = format!("{mark}{badge}:{title}");
+    let prefix = format!("{mark}{badge}:");
+    let suffix = page_tab_png_suffix(title);
+    let middle = if !suffix.is_empty() && title.ends_with(suffix) {
+        &title[..title.len() - suffix.len()]
+    } else {
+        title
+    };
+    if str_cols(middle) <= TAB_LABEL_NAME_COLS {
+        return (full.clone(), full);
+    }
+    const ELLIPSIS: &str = "……";
+    let mid = take_cols(middle, TAB_LABEL_NAME_COLS);
+    (format!("{prefix}{mid}{ELLIPSIS}{suffix}"), full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncates_pdf_name_keeps_index_and_page_suffix() {
+        let title = "Bach Fantasies, Preludes and Fugues, Henle.pdf_p007.png";
+        let (show, full) = format_page_tab_caption("", "7", title);
+        assert_eq!(full, format!("7:{title}"));
+        assert_eq!(show, "7:Bach Fantas……_p007.png");
+    }
+
+    #[test]
+    fn short_name_unchanged() {
+        let (show, full) = format_page_tab_caption("", "3", "page.png");
+        assert_eq!(show, full);
+        assert_eq!(show, "3:page.png");
+    }
+
+    #[test]
+    fn cjk_counts_as_two_cols() {
+        let title = "贝多芬钢琴奏鸣曲全集.pdf_p001.png";
+        let (show, _) = format_page_tab_caption("", "1", title);
+        assert_eq!(show, "1:贝多芬钢琴……_p001.png");
+        assert_eq!(str_cols("贝多芬钢琴"), TAB_LABEL_NAME_COLS - 1);
+    }
+
+    #[test]
+    fn mixed_width_does_not_split_cjk() {
+        let title = "Bach贝多芬Fantasies.pdf_p002.png";
+        let (show, _) = format_page_tab_caption("", "2", title);
+        assert_eq!(show, "2:Bach贝多芬F……_p002.png");
+        assert_eq!(str_cols("Bach贝多芬F"), TAB_LABEL_NAME_COLS);
     }
 }

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{Pixels, Point};
+use gpui::{Pixels, Point, SharedString};
 use crate::model::{Group, Page, Region};
 use mask_tool::mask::MaskRect;
 
@@ -15,12 +15,12 @@ pub(crate) const SIDE_PANEL_MIN: f32 = 220.0;
 /// 拖拽排序: 超过此像素位移才进入拖拽态 (防点击抖动出虚影)
 pub(crate) const REORDER_DRAG_SLOP: f32 = 5.0;
 pub(crate) const SIDE_PANEL_MAX: f32 = 720.0;
-/// 页数超过此值时页签只显示页码, 并只渲染可视范围.
+/// 页数超过此值时页签只渲染可视范围 (文案仍是页码:文件名).
 pub(crate) const TAB_VIRTUAL_THRESHOLD: usize = 48;
-/// 长标签 (带文件名) 的估宽; 短页码标签会窄得多, 见 `tab_slot_px`.
+/// 页签估宽 (页码:文件名 + 间距); 有实测后用平均值.
 pub(crate) const TAB_SLOT_PX: f32 = 76.0;
-/// 短页码页签 (含间距) 的保守估宽, 略窄以便多渲染几页, 避免末页被虚拟列表裁掉.
-pub(crate) const TAB_COMPACT_SLOT_PX: f32 = 44.0;
+/// 页签中间 PDF 名的最大显示列宽 (半角=1, 全角=2). 超出则截断并加…….
+pub(crate) const TAB_LABEL_NAME_COLS: usize = 11;
 /// 输出组合 / 蒙版组合超过此值时只渲染可视范围 (数据仍是全部).
 pub(crate) const GROUP_LIST_VIRTUAL_THRESHOLD: usize = 80;
 pub(crate) const GROUP_ROW_PX: f32 = 30.0;
@@ -274,6 +274,13 @@ pub(crate) struct TabContextMenu {
     pub(crate) page_index: usize,
     pub(crate) x: f32,
     pub(crate) y: f32,
+}
+
+pub(crate) struct TabTooltip {
+    pub(crate) page_index: usize,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) text: SharedString,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
