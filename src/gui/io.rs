@@ -53,6 +53,10 @@ impl ScoreSyncApp {
 
     /// Esc: 关掉普通提示/子面板错误, 确认关窗/新建的对话框也取消.
     pub(super) fn dismiss_blocking_overlays(&mut self, cx: &mut Context<Self>) {
+        if self.pdf_import.is_some() {
+            self.close_import_dialog(cx);
+            return;
+        }
         self.dismiss_error_overlays(cx);
         match self.dialog {
             Some(DialogKind::UnsavedExit | DialogKind::UnsavedNew) => {
@@ -66,16 +70,13 @@ impl ScoreSyncApp {
         }
     }
     pub(super) fn load_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let mut images = Vec::new();
-        let mut pdfs = Vec::new();
         let mut projects = Vec::new();
+        let mut openables = Vec::new();
         for path in paths {
             if is_project_path(&path) {
                 projects.push(path);
-            } else if is_pdf_path(&path) {
-                pdfs.push(path);
-            } else if is_image_path(&path) {
-                images.push(path);
+            } else if is_pdf_path(&path) || is_image_path(&path) {
+                openables.push(path);
             } else {
                 self.show_error(
                     "不支持",
@@ -85,14 +86,22 @@ impl ScoreSyncApp {
             }
         }
 
-        // 工程文件优先单独打开 (取最后一个)
         if let Some(proj) = projects.pop() {
             self.open_project_path(proj, cx);
-            if projects.is_empty() && images.is_empty() && pdfs.is_empty() {
+            if projects.is_empty() && openables.is_empty() {
                 return;
             }
         }
 
+        if !openables.is_empty() {
+            self.import_dialog_add_paths(openables, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn add_image_files(&mut self, images: Vec<PathBuf>, cx: &mut Context<Self>) -> usize {
         let mut added = 0usize;
         for path in images {
             match image::open(&path) {
@@ -122,39 +131,46 @@ impl ScoreSyncApp {
                 }
             }
         }
-        if added > 0 {
-            self.refresh_render(cx);
-            self.status = format!("已添加 {added} 页, 共 {} 页.", self.doc.pages.len()).into();
-            self.hint = self.status.clone();
-        }
-
-        if !pdfs.is_empty() {
-            self.start_pdf_load(pdfs, cx);
-        } else {
-            cx.notify();
-        }
+        added
     }
 
+    #[allow(dead_code)]
     pub(super) fn start_pdf_load(&mut self, pdfs: Vec<PathBuf>, cx: &mut Context<Self>) {
-        crate::trace::log(&format!(
-            "ui: 开始导入 {} 个 PDF: {}",
-            pdfs.len(),
-            pdfs.iter()
-                .filter_map(|p| p.file_name()?.to_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        self.start_import_jobs(
+            pdfs.into_iter()
+                .map(|path| ImportJob::Pdf {
+                    path,
+                    scales: Vec::new(),
+                })
+                .collect(),
+            true,
+            cx,
+        );
+    }
+
+    pub(super) fn start_import_jobs(
+        &mut self,
+        jobs: Vec<ImportJob>,
+        record_undo: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if record_undo && !jobs.is_empty() {
+            self.push_crop_undo_page_structure();
+        }
+        let summary = jobs
+            .iter()
+            .filter_map(|j| match j {
+                ImportJob::Pdf { path, .. } | ImportJob::Image { path, .. } => {
+                    path.file_name()?.to_str()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        crate::trace::log(&format!("ui: 开始导入 {} 项: {summary}", jobs.len()));
         let gen = self.pdf_load_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let token = Arc::clone(&self.pdf_load_gen);
         self.pdf_importing = true;
-        self.status = format!(
-            "PDF 后台渲染中… ({})",
-            pdfs.first()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                .unwrap_or("pdf")
-        )
-        .into();
+        self.status = format!("后台导入中… ({summary})").into();
         self.hint = self.status.clone();
         cx.notify();
 
@@ -162,45 +178,53 @@ impl ScoreSyncApp {
         let ink = self.doc.ink_threshold;
         let margin = self.doc.margin;
         std::thread::spawn(move || {
-            for pdf in pdfs {
+            for job in jobs {
                 if token.load(Ordering::SeqCst) != gen {
                     break;
                 }
-                let name = pdf
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("pdf")
-                    .to_string();
-                let token_loop = Arc::clone(&token);
-                let result = pdf::pdf_pages_to_tmp_images_streaming(
-                    &pdf,
-                    ink,
-                    margin,
-                    move || token_loop.load(Ordering::SeqCst) == gen,
-                    |i, total, path| {
-                        let _ = tx.send_blocking(PdfLoadMsg::Page {
-                            path,
-                            index: i,
-                            total,
-                            pdf_name: name.clone(),
-                        });
-                    },
-                );
-                if token.load(Ordering::SeqCst) != gen {
-                    break;
-                }
-                match result {
-                    Ok(n) => {
-                        let _ = tx.send_blocking(PdfLoadMsg::Done {
-                            pdf_name: name,
-                            pages: n,
-                        });
+                match job {
+                    ImportJob::Image { path, target } => {
+                        let _ = tx.send_blocking(PdfLoadMsg::Image { path, target });
                     }
-                    Err(e) => {
-                        let _ = tx.send_blocking(PdfLoadMsg::Err {
-                            pdf_name: name,
-                            message: e.to_string(),
-                        });
+                    ImportJob::Pdf { path: pdf, scales } => {
+                        let name = pdf
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("pdf")
+                            .to_string();
+                        let token_loop = Arc::clone(&token);
+                        let result = pdf::pdf_pages_to_tmp_images_streaming(
+                            &pdf,
+                            ink,
+                            margin,
+                            &scales,
+                            move || token_loop.load(Ordering::SeqCst) == gen,
+                            |i, total, path| {
+                                let _ = tx.send_blocking(PdfLoadMsg::Page {
+                                    path,
+                                    index: i,
+                                    total,
+                                    pdf_name: name.clone(),
+                                });
+                            },
+                        );
+                        if token.load(Ordering::SeqCst) != gen {
+                            break;
+                        }
+                        match result {
+                            Ok(n) => {
+                                let _ = tx.send_blocking(PdfLoadMsg::Done {
+                                    pdf_name: name,
+                                    pages: n,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send_blocking(PdfLoadMsg::Err {
+                                    pdf_name: name,
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -230,7 +254,6 @@ impl ScoreSyncApp {
                                 "{pdf_name}_p{:03}.png",
                                 index + 1
                             ));
-                            // 导入只登记磁盘 PNG, 不在 UI 线程逐页识别 (几百页会卡死)
                             crate::trace::log(&format!(
                                 "ui: 登记 PDF 页 {}/{total} (run_detect=false)",
                                 index + 1
@@ -267,6 +290,9 @@ impl ScoreSyncApp {
                                 }
                             }
                         }
+                        PdfLoadMsg::Image { path, target } => {
+                            view.import_one_image(path, target, cx);
+                        }
                         PdfLoadMsg::Done { pdf_name, pages } => {
                             view.status =
                                 format!("PDF {pdf_name} 完成: {pages} 页已载入.").into();
@@ -281,7 +307,7 @@ impl ScoreSyncApp {
                             );
                         }
                         PdfLoadMsg::AllFinished => {
-                            crate::trace::log("ui: PDF 全部登记完成 (识别已写入 sidecar)");
+                            crate::trace::log("ui: 导入全部登记完成 (识别已写入 sidecar)");
                             view.pdf_importing = false;
                             view.refresh_render(cx);
                             view.start_hydrate_all(true, cx);
@@ -305,6 +331,58 @@ impl ScoreSyncApp {
         .detach();
     }
 
+    fn import_one_image(
+        &mut self,
+        path: PathBuf,
+        target: Option<(u32, u32, bool)>,
+        cx: &mut Context<Self>,
+    ) {
+        match image::open(&path) {
+            Ok(im) => {
+                let mut rgb = im.to_rgb8();
+                if let Some((tw, th, lock)) = target {
+                    rgb = if lock {
+                        crate::pdf::scale_rgb_to_width(rgb, tw)
+                    } else {
+                        crate::pdf::scale_rgb_to_size(rgb, tw, th)
+                    };
+                }
+                let was_empty = self.doc.pages.is_empty();
+                match self.doc.add_page(path.clone(), rgb, was_empty) {
+                    Ok(_) => {
+                        self.mark_dirty();
+                        self.mark_video_pool_dirty_all();
+                        self.status = format!(
+                            "已导入图片 {} (共 {} 页)",
+                            path.file_name().and_then(|s| s.to_str()).unwrap_or("img"),
+                            self.doc.pages.len()
+                        )
+                        .into();
+                        self.hint = self.status.clone();
+                        if was_empty {
+                            self.refresh_render(cx);
+                        }
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        self.show_error(
+                            "打开失败",
+                            crate::error::Error::msg(format!("{}: {e}", path.display())),
+                            cx,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                self.show_error(
+                    "打开失败",
+                    crate::error::Error::image_open(&path, e),
+                    cx,
+                );
+            }
+        }
+    }
+
     pub(super) fn spawn_native_dialog<T, F, A>(cx: &mut Context<Self>, work: F, apply: A)
     where
         T: Send + 'static,
@@ -324,25 +402,7 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        Self::spawn_native_dialog(
-            cx,
-            || {
-                rfd::FileDialog::new()
-                    .set_title("打开图片 / PDF (可多选)")
-                    .add_filter(
-                        "Images / PDF",
-                        &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "pdf"],
-                    )
-                    .add_filter("PDF", &["pdf"])
-                    .add_filter("Images", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"])
-                    .pick_files()
-            },
-            |this, files, cx| {
-                if let Some(paths) = files {
-                    this.load_paths(paths, cx);
-                }
-            },
-        );
+        self.open_import_dialog(cx);
     }
 
     pub(super) fn open_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -371,6 +431,9 @@ impl ScoreSyncApp {
         }
         self.flush_mask_to_doc(cx);
         self.opening = true;
+        if self.pdf_import.is_some() {
+            self.close_import_dialog(cx);
+        }
         self.abandon_pdf_import();
         let name = path
             .file_name()
@@ -481,6 +544,9 @@ impl ScoreSyncApp {
     /// 清空当前文档/视频/蒙版状态, 回到可重新导入的空白工程.
     pub(super) fn do_new_project(&mut self, cx: &mut Context<Self>) {
         self.abandon_pdf_import();
+        if self.pdf_import.is_some() {
+            self.close_import_dialog(cx);
+        }
         let mask_prefs = self.doc.mask_prefs.clone();
         self.flush_mask_to_doc(cx);
         self.doc = DocState::new();

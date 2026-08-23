@@ -29,6 +29,7 @@ actions!(
         Paste,
         Cut,
         Copy,
+        Confirm,
     ]
 );
 
@@ -188,12 +189,18 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
+    fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
+        self.blur_commit_pending = true;
+        cx.notify();
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.focus_handle.focus(window);
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -201,6 +208,7 @@ impl TextInput {
         } else {
             self.move_to(self.index_for_mouse_position(event.position), cx)
         }
+        cx.stop_propagation();
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _: &mut Context<Self>) {
@@ -712,6 +720,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::confirm))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -757,6 +766,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, None),
         KeyBinding::new("home", Home, None),
         KeyBinding::new("end", End, None),
+        KeyBinding::new("enter", Confirm, Some("TextInput")),
     ]);
     cx.bind_keys(crate::bind_primary("a", SelectAll, None));
     cx.bind_keys(crate::bind_primary("v", Paste, None));

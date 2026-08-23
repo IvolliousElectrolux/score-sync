@@ -41,7 +41,7 @@ impl ScoreSyncApp {
             return;
         }
         self.doc.current_page_index = index;
-        self.scroll_page_tabs_to_index(index);
+        // 点选页签只激活, 不改栏内滚动 (与蒙版页签一致; 切入分块面板时再定位).
         if self.doc.pages[index].image.is_some() {
             self.request_page_window(cx);
             if self.pending_redetect {
@@ -214,24 +214,16 @@ impl ScoreSyncApp {
         let view_w = f32::from(self.tab_scroll.bounds().size.width);
         let view_w = if view_w < 32.0 { 960.0 } else { view_w };
         let off = (-f32::from(self.tab_scroll.offset().x)).max(0.0);
-        let mut start = ((off / slot).floor() as usize).saturating_sub(8);
-        let mut end = (((off + view_w) / slot).ceil() as usize)
+        // 只按当前滚动窗口虚拟化, 不因「当前页」扩范围 (点选页签会跳).
+        let start = ((off / slot).floor() as usize).saturating_sub(8);
+        let end = (((off + view_w) / slot).ceil() as usize)
             .saturating_add(8)
             .min(n);
-        let cur = self.doc.current_page_index.min(n.saturating_sub(1));
-        let vis = ((view_w / slot).ceil() as usize).saturating_add(16);
-        // 只把窗口扩到刚能看见当前页, 不要 start=min(cur) 一下子画出 0..n.
-        if cur < start {
-            start = cur;
-            end = end.max((start + vis).min(n));
-        } else if cur >= end {
-            end = (cur + 1).min(n);
-            start = start.min(end.saturating_sub(vis));
-        }
         let start = start.min(n);
         (start, end.max(start).min(n))
     }
 
+    /// 将分块页签滚到指定页. 仅在切入分块/工程面板时用, 点选页签本身不要滚.
     pub(super) fn scroll_page_tabs_to_index(&self, ix: usize) {
         let n = self.doc.pages.len();
         if n == 0 {

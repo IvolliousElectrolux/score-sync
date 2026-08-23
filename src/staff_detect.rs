@@ -2,7 +2,7 @@
 //!
 //! 只把上下两核之间真正挨着的像素当成连通 (含对角). 贴着页面四边的墨迹
 //! 以及和它们连在一起的像素不参与. 剩下的连通域若没有内部孔洞 (实心边条
-//! 等单连通块), 也不参与连通.
+//! 等单连通块), 或包围盒宽度过小 (扫描件模糊竖边), 也不参与连通.
 
 use std::collections::VecDeque;
 
@@ -359,7 +359,8 @@ fn strip_border_components(ink: &[Vec<bool>]) -> Vec<Vec<bool>> {
     out
 }
 
-/// 丢掉没有内部孔洞的连通域 (实心边条、污点). 谱表被小节线封住后行间是孔.
+/// 丢掉没有内部孔洞的连通域 (实心边条、污点), 以及包围盒过窄的连通域
+/// (扫描件模糊竖边常带噪点孔, 但远窄于谱表). 谱表被小节线封住后行间是孔.
 fn keep_ccs_with_holes(ink: &[Vec<bool>]) -> Vec<Vec<bool>> {
     if ink.is_empty() || ink[0].is_empty() {
         return Vec::new();
@@ -407,9 +408,13 @@ fn keep_ccs_with_holes(ink: &[Vec<bool>]) -> Vec<Vec<bool>> {
             boxes.push((x0, y0, x1, y1));
         }
     }
+    let min_w = ((w as i32) / 8).max(16);
     let mut keep = vec![false; next_id as usize];
     for (i, &(x0, y0, x1, y1)) in boxes.iter().enumerate() {
         let id = (i + 1) as i32;
+        if x1 - x0 + 1 < min_w {
+            continue;
+        }
         if cc_has_enclosed_hole(&label, id, x0, y0, x1, y1, w, h) {
             keep[id as usize] = true;
         }
@@ -583,7 +588,7 @@ fn dedup_overlapping_cores(cores: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     dedup
 }
 
-/// 全页 (已去掉贴边、无孔连通域) 上, 上核底边和下核顶边是否被同一块墨迹 8 连通连上.
+/// 全页 (已去掉贴边、无孔、过窄连通域) 上, 上核底边和下核顶边是否被同一块墨迹 8 连通连上.
 /// 只走像素邻接 (含对角), 不把「这一行有墨」当成连通.
 fn left_ink_connects(ink: &[Vec<bool>], y_upper: i32, y_lower: i32, pad: i32) -> bool {
     if ink.is_empty() || ink[0].is_empty() {
@@ -1169,7 +1174,7 @@ pub fn detect_bands(
         return Vec::new();
     }
 
-    // 五线谱表 → 去掉贴边 / 无孔连通域 → 全页连通收成谱行 → 扩边界后再切开
+    // 五线谱表 → 去掉贴边 / 无孔 / 过窄连通域 → 全页连通收成谱行 → 扩边界后再切开
     let interior = strip_border_components(&ink);
     let connectors = keep_ccs_with_holes(&interior);
     let cores = collect_system_cores(&ink, &connectors);
@@ -1658,6 +1663,39 @@ mod tests {
         assert_eq!(
             n, 2,
             "solid margin bar without holes must not glue systems, got {bands:?}"
+        );
+    }
+
+    fn paint_hollow_strip(img: &mut RgbImage, x0: u32, x1: u32, y0: u32, y1: u32) {
+        let h = img.height();
+        let w = img.width();
+        let x1 = x1.min(w.saturating_sub(1));
+        let y1 = y1.min(h.saturating_sub(1));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let on_edge = x <= x0 + 1 || x >= x1.saturating_sub(1) || y <= y0 + 1 || y >= y1.saturating_sub(1);
+                if on_edge {
+                    img.put_pixel(x, y, Rgb([0, 0, 0]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_holey_edge_does_not_glue() {
+        let mut img = RgbImage::from_pixel(400, 600, Rgb([255, 255, 255]));
+        paint_staff(&mut img, 80);
+        paint_staff(&mut img, 140);
+        paint_staff(&mut img, 280);
+        paint_staff(&mut img, 340);
+        paint_staff_frame(&mut img, 80, 173);
+        paint_staff_frame(&mut img, 280, 373);
+        // 不贴页边的窄竖框, 有孔且贯通两行高度, 模拟扫描模糊黑边
+        paint_hollow_strip(&mut img, 4, 18, 80, 380);
+        let (n, bands) = system_count(&img);
+        assert_eq!(
+            n, 2,
+            "narrow holey edge must not glue systems, got {bands:?}"
         );
     }
 

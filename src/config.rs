@@ -16,6 +16,20 @@ pub struct Config {
     /// 蒙版/画笔颜色与透明度偏好 (新工程默认从此读取).
     #[serde(default)]
     pub mask_prefs: MaskColorPrefs,
+    /// 上次 PDF 导入倍率 (标记 pt × 此值 = 像素).
+    #[serde(default = "default_pdf_import_scale")]
+    pub pdf_import_scale: f32,
+    /// 上次 PDF 导入是否锁定宽高比.
+    #[serde(default = "default_true")]
+    pub pdf_import_lock_aspect: bool,
+}
+
+fn default_pdf_import_scale() -> f32 {
+    3.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -23,6 +37,8 @@ impl Default for Config {
         Self {
             last_project: String::new(),
             mask_prefs: MaskColorPrefs::default(),
+            pdf_import_scale: default_pdf_import_scale(),
+            pdf_import_lock_aspect: true,
         }
     }
 }
@@ -108,6 +124,14 @@ pub fn save(cfg: &Config) {
 pub fn remember_last_project(path: &std::path::Path) {
     let mut cfg = load();
     cfg.last_project = path.display().to_string();
+    save(&cfg);
+}
+
+/// 记住本次 PDF 导入倍率与是否锁定宽高比.
+pub fn remember_pdf_import(scale: f32, lock_aspect: bool) {
+    let mut cfg = load();
+    cfg.pdf_import_scale = crate::pdf::clamp_pdf_scale(scale);
+    cfg.pdf_import_lock_aspect = lock_aspect;
     save(&cfg);
 }
 

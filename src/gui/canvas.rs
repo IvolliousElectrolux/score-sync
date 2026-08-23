@@ -527,7 +527,12 @@ impl ScoreSyncApp {
                     .filter(|p| is_open_path(p) || is_project_path(p))
                     .cloned()
                     .collect();
-                if !list.is_empty() {
+                if list.is_empty() {
+                    return;
+                }
+                if this.pdf_import.is_some() {
+                    this.import_dialog_add_paths(list, cx);
+                } else {
                     this.load_paths(list, cx);
                 }
             }))

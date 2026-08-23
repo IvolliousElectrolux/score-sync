@@ -135,8 +135,11 @@ impl ScoreSyncApp {
                 }
             }
         }
-        // 2) 删页等结构撤重
+        // 2) 删页 / 导入等结构撤重
         if let Some(prev) = self.page_struct_history.undo.pop() {
+            if self.pdf_importing {
+                self.abandon_pdf_import();
+            }
             let now = self.capture_crop_snap_pages();
             self.page_struct_history.redo.push(now);
             self.apply_crop_snap(prev);

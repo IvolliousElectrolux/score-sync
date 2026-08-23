@@ -24,7 +24,8 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn has_modal_overlay(&self, cx: &App) -> bool {
-        self.dialog.is_some()
+        self.pdf_import.is_some()
+            || self.dialog.is_some()
             || self.apply_bg.read(cx).is_error_open()
             || self.score_video.read(cx).is_error_open()
             || self.score_video.read(cx).is_export_open()
@@ -746,13 +747,16 @@ impl ScoreSyncApp {
         self.mask_target = None;
         self.sync_mask_image(cx);
     }
-    pub(super) fn dialog_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn dialog_overlay(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         // 关窗/新建确认必须盖过子面板错误, 否则「确定」被挡住也退不出.
         if matches!(self.dialog, Some(DialogKind::UnsavedExit)) {
             return self.unsaved_exit_dialog(cx).into_any_element();
         }
         if matches!(self.dialog, Some(DialogKind::UnsavedNew)) {
             return self.unsaved_new_dialog(cx).into_any_element();
+        }
+        if self.pdf_import.is_some() {
+            return self.pdf_import_overlay(cx).into_any_element();
         }
         if self.score_video.read(cx).is_export_open() {
             return self

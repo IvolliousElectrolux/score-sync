@@ -17,6 +17,7 @@ mod crop;
 mod history;
 mod host;
 mod io;
+mod pdf_import;
 mod lists;
 mod sync;
 mod tabs;
@@ -127,6 +128,11 @@ pub(crate) struct ScoreSyncApp {
     /// 边距 / 墨迹阈值 点按编辑
     param_input: Entity<TextInput>,
     param_edit: Option<ParamEdit>,
+    /// PDF 导入弹窗
+    pdf_import: Option<pdf_import::PdfImportState>,
+    pdf_w_input: Entity<TextInput>,
+    pdf_h_input: Entity<TextInput>,
+    pdf_scale_input: Entity<TextInput>,
     /// 画布悬停光标 (边缘/分割)
     hover_cursor: CursorStyle,
     region_scroll: ScrollHandle,
@@ -188,6 +194,9 @@ impl ScoreSyncApp {
         let mask_prefs = cfg.mask_prefs.clone();
         let edit_y_input = cx.new(|cx| TextInput::new(cx, "", "例如 94-371"));
         let param_input = cx.new(|cx| TextInput::new(cx, "", "数字"));
+        let pdf_w_input = cx.new(|cx| TextInput::new(cx, "", "宽").with_compact(true));
+        let pdf_h_input = cx.new(|cx| TextInput::new(cx, "", "高").with_compact(true));
+        let pdf_scale_input = cx.new(|cx| TextInput::new(cx, "", "倍率").with_compact(true));
         let mask_tool = cx.new(|cx| {
             let mut m = MaskToolApp::new(cx, None);
             m.apply_color_prefs(mask_prefs.clone());
@@ -249,6 +258,10 @@ impl ScoreSyncApp {
             region_y_edit: None,
             param_input,
             param_edit: None,
+            pdf_import: None,
+            pdf_w_input,
+            pdf_h_input,
+            pdf_scale_input,
             hover_cursor: CursorStyle::Arrow,
             region_scroll: ScrollHandle::new(),
             group_scroll: ScrollHandle::new(),
@@ -467,14 +480,18 @@ impl Render for ScoreSyncApp {
                 this.ungroup_active(cx)
             }))
             .on_action(cx.listener(|this, _: &ConfirmParamEdit, window, cx| {
-                if this.param_edit.is_some() {
+                if this.pdf_import.is_some() {
+                    this.on_pdf_import_enter(window, cx);
+                } else if this.param_edit.is_some() {
                     this.apply_param_edit(window, cx);
                 } else if this.region_y_edit.is_some() {
                     this.apply_edit_y(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CancelParamEdit, window, cx| {
-                if this.param_edit.is_some() {
+                if this.pdf_import.is_some() {
+                    this.close_import_dialog(cx);
+                } else if this.param_edit.is_some() {
                     this.cancel_param_edit(window, cx);
                 } else if this.region_y_edit.is_some() {
                     this.cancel_edit_y(window, cx);
@@ -575,7 +592,12 @@ impl Render for ScoreSyncApp {
                     .filter(|p| is_open_path(p) || is_project_path(p))
                     .cloned()
                     .collect();
-                if !list.is_empty() {
+                if list.is_empty() {
+                    return;
+                }
+                if this.pdf_import.is_some() {
+                    this.import_dialog_add_paths(list, cx);
+                } else {
                     this.load_paths(list, cx);
                 }
             }))
@@ -603,11 +625,21 @@ impl Render for ScoreSyncApp {
                             .gap_2()
                             .child(
                                 div()
-                                    .w(px(18.))
-                                    .h(px(18.))
-                                    .flex_shrink_0()
-                                    .when(saving, |d| {
-                                        d.child(
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x0f172a))
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(title_core),
+                            )
+                            .when(saving, |d| {
+                                d.child(
+                                    div()
+                                        .w(px(18.))
+                                        .h(px(18.))
+                                        .flex_shrink_0()
+                                        .child(
                                             canvas(
                                                 |_, _, _| {},
                                                 move |bounds, _, window, _| {
@@ -619,28 +651,19 @@ impl Render for ScoreSyncApp {
                                                 },
                                             )
                                             .size_full(),
-                                        )
-                                    })
-                                    .when(!saving && dirty, |d| {
-                                        d.flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_lg()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(rgb(0xdc2626))
-                                            .child("*")
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0x0f172a))
-                                    .min_w(px(0.))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(title_core),
-                            )
+                                        ),
+                                )
+                            })
+                            .when(!saving && dirty, |d| {
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_lg()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xdc2626))
+                                        .child("*"),
+                                )
+                            })
                             .child(div().flex_1().min_w(px(8.)))
                             .child(
                                 div()

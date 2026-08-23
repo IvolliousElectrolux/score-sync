@@ -64,7 +64,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 2. {m}S 保存为单个 .staffcrop 工程包 (zip), 下次可用 {ms}O 继续; {ms}N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
-   识别先找五线谱表, 再看相邻谱表是否有墨迹像素直接 8 连通 (贴边分量、无内部孔洞的连通域不计).\n\
+   识别先找五线谱表, 再看相邻谱表是否有墨迹像素直接 8 连通 (贴边分量、无内部孔洞或过窄的连通域不计).\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
    新块按上边线 y 插入「输出组合」(本页自上而下), 不会丢到列表末尾.\n\
 6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
@@ -98,6 +98,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
   「工程」面板可「清除视频缓存」删除旁路 `.staffcrop.cache`.\n\
   启动时若已联网会检查 GitHub 更新, 有新版本则弹出当前到最新之间的版本摘要.\n\
+  PDF 导入会先弹出分辨率框 (默认按标记尺寸×3 光栅化; 扫描件若页内图像更大则按图像像素预填). 导出组合使用导入后的像素, 不会再放大.\n\
   PDF 导入依赖 pdfium、视频导出依赖 ffmpeg, 需把对应文件放在程序所在目录 (或系统 PATH) 下.";
 
 pub(crate) fn help_text() -> String {
@@ -289,12 +290,28 @@ pub(crate) enum ParamEdit {
     Threshold,
 }
 
+pub(crate) enum ImportJob {
+    Pdf {
+        path: PathBuf,
+        scales: Vec<(f32, f32)>,
+    },
+    Image {
+        path: PathBuf,
+        /// `(宽, 高, 锁定宽高比)`; None 表示按原像素.
+        target: Option<(u32, u32, bool)>,
+    },
+}
+
 pub(crate) enum PdfLoadMsg {
     Page {
         path: PathBuf,
         index: usize,
         total: usize,
         pdf_name: String,
+    },
+    Image {
+        path: PathBuf,
+        target: Option<(u32, u32, bool)>,
     },
     Done {
         pdf_name: String,
