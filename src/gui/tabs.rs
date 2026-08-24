@@ -5,6 +5,16 @@ use super::*;
 use super::ScoreSyncApp;
 
 impl ScoreSyncApp {
+    /// 页签水平滚动条拖拽用的 handle: 蒙版面板用独立的 `mask_tab_scroll`,
+    /// 其余面板 (分块/工程) 用 `tab_scroll`; 两者互不干扰, 切面板不抽搐.
+    pub(super) fn tab_hscroll_handle(&self) -> ScrollHandle {
+        if self.side_tool == SideTool::Mask {
+            self.mask_tab_scroll.clone()
+        } else {
+            self.tab_scroll.clone()
+        }
+    }
+
     pub(super) fn resolve_tab_drop(
         &self,
         from: usize,
@@ -253,7 +263,7 @@ impl ScoreSyncApp {
             .mask_target
             .clone()
             .or_else(|| self.doc.active_group_id.clone());
-        let handle = &self.tab_scroll;
+        let handle = &self.mask_tab_scroll;
         let max_x = f32::from(handle.max_offset().width);
         let bounds = handle.bounds();
         let track_w = f32::from(bounds.size.width).max(1.0);
@@ -353,7 +363,7 @@ impl ScoreSyncApp {
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                             let x = f32::from(ev.position.x);
-                            let handle = this.tab_scroll.clone();
+                            let handle = this.tab_hscroll_handle();
                             let b = handle.bounds();
                             let tw = f32::from(b.size.width).max(1.0);
                             let max = f32::from(handle.max_offset().width);
@@ -386,7 +396,7 @@ impl ScoreSyncApp {
                                 MouseButton::Left,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                                     let x = f32::from(ev.position.x);
-                                    let handle = this.tab_scroll.clone();
+                                    let handle = this.tab_hscroll_handle();
                                     let b = handle.bounds();
                                     let tw = f32::from(b.size.width).max(1.0);
                                     let max = f32::from(handle.max_offset().width);

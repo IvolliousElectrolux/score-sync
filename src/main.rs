@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bg_fill;
 mod config;
 mod detect_cache;
 mod error;

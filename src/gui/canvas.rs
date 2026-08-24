@@ -66,12 +66,19 @@ impl ViewXform {
     }
 }
 
+/// `scene_x`/`img_w`: 只在鼠标真正悬浮于页面宽度范围内 (含 `tol` 容差) 才允许
+/// 命中边界线; 页面左右之外即便同一高度也不应选中/拖动.
 pub fn hit_edge(
     regions: &[(String, i32, i32)],
     selected: &std::collections::HashSet<String>,
+    scene_x: f32,
     scene_y: f32,
+    img_w: f32,
     tol: f32,
 ) -> Option<(String, &'static str)> {
+    if scene_x < -tol || scene_x > img_w + tol {
+        return None;
+    }
     let mut candidates: Vec<(String, &'static str, f32, bool)> = Vec::new();
     for (rid, y0, y1) in regions {
         let d_top = (scene_y - *y0 as f32).abs();
@@ -94,11 +101,17 @@ pub fn hit_edge(
     Some((candidates[0].0.clone(), candidates[0].1))
 }
 
+/// 同 `hit_edge`: 只在页面宽度范围内才算命中块本体.
 pub fn region_at(
     regions: &[(String, i32, i32)],
     selected: &std::collections::HashSet<String>,
+    scene_x: f32,
     scene_y: f32,
+    img_w: f32,
 ) -> Option<String> {
+    if scene_x < 0.0 || scene_x > img_w {
+        return None;
+    }
     let mut hits: Vec<&(String, i32, i32)> = regions
         .iter()
         .filter(|(_, y0, y1)| *y0 as f32 <= scene_y && scene_y <= *y1 as f32)
@@ -131,6 +144,36 @@ impl ScoreSyncApp {
             self.pan,
             self.user_zoomed,
         )
+    }
+
+    /// 限制平移: 页面拖出视口后, 上下左右最多再露出一个页面尺寸的空白,
+    /// 不能无限拖走.
+    pub(super) fn clamp_pan(&mut self) {
+        let vw = f32::from(self.view_bounds.size.width);
+        let vh = f32::from(self.view_bounds.size.height);
+        if vw < 1.0 || vh < 1.0 || self.img_w == 0 || self.img_h == 0 {
+            return;
+        }
+        let fit = (vw / self.img_w as f32)
+            .min(vh / self.img_h as f32)
+            .max(0.0001);
+        let scale = if self.user_zoomed {
+            (fit * self.zoom).max(0.0001)
+        } else {
+            fit
+        };
+        let drawn_w = self.img_w as f32 * scale;
+        let drawn_h = self.img_h as f32 * scale;
+        let centered_x = (vw - drawn_w) * 0.5;
+        let centered_y = (vh - drawn_h) * 0.5;
+        // 页面左上角屏幕坐标 origin = centered + pan; 允许页面整体移出视口
+        // 后再多露出一个页面尺寸的空白 (不能无限远).
+        let pan_x_min = -2.0 * drawn_w - centered_x;
+        let pan_x_max = vw + drawn_w - centered_x;
+        let pan_y_min = -2.0 * drawn_h - centered_y;
+        let pan_y_max = vh + drawn_h - centered_y;
+        self.pan.x = self.pan.x.clamp(pan_x_min.min(pan_x_max), pan_x_max.max(pan_x_min));
+        self.pan.y = self.pan.y.clamp(pan_y_min.min(pan_y_max), pan_y_max.max(pan_y_min));
     }
 
     pub(super) fn screen_in_view(&self, pos: Point<Pixels>) -> (f32, f32) {
@@ -167,7 +210,7 @@ impl ScoreSyncApp {
         }
         let (sx, sy) = self.screen_in_view(event.position);
         let xform = self.xform();
-        let (_ix, iy) = xform.screen_to_image(sx, sy);
+        let (ix, iy) = xform.screen_to_image(sx, sy);
         let ctrl = is_primary_mod(&event.modifiers);
 
         if self.canvas_tool == CanvasTool::SplitBlock {
@@ -196,7 +239,10 @@ impl ScoreSyncApp {
 
         let regions = self.current_regions_hitlist();
         let tol = xform.edge_tol();
-        if let Some((rid, edge)) = hit_edge(&regions, &self.doc.selected_region_ids, iy, tol) {
+        let img_w = self.img_w as f32;
+        if let Some((rid, edge)) =
+            hit_edge(&regions, &self.doc.selected_region_ids, ix, iy, img_w, tol)
+        {
             self.doc.click_region(&rid, ctrl);
             self.scroll_group_list_to_active();
             self.drag = Some(DragKind::Edge {
@@ -207,7 +253,7 @@ impl ScoreSyncApp {
             self.after_doc_change(cx);
             return;
         }
-        if let Some(rid) = region_at(&regions, &self.doc.selected_region_ids, iy) {
+        if let Some(rid) = region_at(&regions, &self.doc.selected_region_ids, ix, iy, img_w) {
             self.doc.click_region(&rid, ctrl);
             self.scroll_group_list_to_active();
             self.after_doc_change(cx);
@@ -235,7 +281,7 @@ impl ScoreSyncApp {
         }
         let (sx, sy) = self.screen_in_view(event.position);
         let xform = self.xform();
-        let (_ix, iy) = xform.screen_to_image(sx, sy);
+        let (ix, iy) = xform.screen_to_image(sx, sy);
 
         let drag = self.drag.take();
         match drag {
@@ -299,6 +345,7 @@ impl ScoreSyncApp {
                 self.pan.x += dx;
                 self.pan.y += dy;
                 self.user_zoomed = true;
+                self.clamp_pan();
                 self.drag = Some(DragKind::PagePan {
                     last: event.position,
                 });
@@ -325,7 +372,8 @@ impl ScoreSyncApp {
         } else {
             let regions = self.current_regions_hitlist();
             let tol = xform.edge_tol();
-            if hit_edge(&regions, &self.doc.selected_region_ids, iy, tol).is_some() {
+            let img_w = self.img_w as f32;
+            if hit_edge(&regions, &self.doc.selected_region_ids, ix, iy, img_w, tol).is_some() {
                 self.hover_cursor = CursorStyle::ResizeUpDown;
             } else {
                 self.hover_cursor = CursorStyle::Arrow;
@@ -421,6 +469,7 @@ impl ScoreSyncApp {
             let new_scale = fit * self.zoom;
             self.pan.x = sx - (vw - self.img_w as f32 * new_scale) * 0.5 - ix * new_scale;
             self.pan.y = sy - (vh - self.img_h as f32 * new_scale) * 0.5 - iy * new_scale;
+            self.clamp_pan();
             cx.notify();
         } else {
             // 与蒙版一致: 滚轮的 x/y 都平移画布. Shift+滚轮在 Windows 上常把
@@ -433,6 +482,7 @@ impl ScoreSyncApp {
                 self.pan.y += delta_y;
             }
             self.user_zoomed = true;
+            self.clamp_pan();
             cx.notify();
         }
     }
@@ -443,11 +493,12 @@ impl ScoreSyncApp {
         }
         let (sx, sy) = self.screen_in_view(event.position);
         let xform = self.xform();
-        let (_ix, iy) = xform.screen_to_image(sx, sy);
+        let (ix, iy) = xform.screen_to_image(sx, sy);
         let regions = self.current_regions_hitlist();
         let tol = xform.edge_tol();
-        if hit_edge(&regions, &self.doc.selected_region_ids, iy, tol).is_some()
-            || region_at(&regions, &self.doc.selected_region_ids, iy).is_some()
+        let img_w = self.img_w as f32;
+        if hit_edge(&regions, &self.doc.selected_region_ids, ix, iy, img_w, tol).is_some()
+            || region_at(&regions, &self.doc.selected_region_ids, ix, iy, img_w).is_some()
         {
             return;
         }
@@ -667,5 +718,39 @@ impl ScoreSyncApp {
                         .child("加载中…"),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn regions() -> Vec<(String, i32, i32)> {
+        vec![("r0".into(), 0, 99), ("r1".into(), 100, 199)]
+    }
+
+    #[test]
+    fn hit_edge_ignores_points_left_or_right_of_page() {
+        let regs = regions();
+        let sel = HashSet::new();
+        let img_w = 800.0;
+        // 同一高度 (边界线 y=100 附近), 但 x 在页面之外.
+        assert!(hit_edge(&regs, &sel, -20.0, 100.0, img_w, 8.0).is_none());
+        assert!(hit_edge(&regs, &sel, img_w + 20.0, 100.0, img_w, 8.0).is_none());
+        // 页面内同一高度应正常命中.
+        assert!(hit_edge(&regs, &sel, img_w * 0.5, 100.0, img_w, 8.0).is_some());
+        // 容差范围内的页边刚好还能命中 (悬浮在边界线上, 只是稍微出界一点点).
+        assert!(hit_edge(&regs, &sel, -4.0, 100.0, img_w, 8.0).is_some());
+    }
+
+    #[test]
+    fn region_at_ignores_points_left_or_right_of_page() {
+        let regs = regions();
+        let sel = HashSet::new();
+        let img_w = 800.0;
+        assert!(region_at(&regs, &sel, -5.0, 50.0, img_w).is_none());
+        assert!(region_at(&regs, &sel, img_w + 5.0, 50.0, img_w).is_none());
+        assert!(region_at(&regs, &sel, img_w * 0.5, 50.0, img_w).is_some());
     }
 }

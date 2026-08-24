@@ -25,7 +25,8 @@ pub(crate) const TAB_LABEL_NAME_COLS: usize = 11;
 pub(crate) const GROUP_LIST_VIRTUAL_THRESHOLD: usize = 80;
 pub(crate) const GROUP_ROW_PX: f32 = 30.0;
 pub(crate) const MASK_TAB_SLOT_PX: f32 = 96.0;
-pub(crate) const MASK_PICKER_ROW_PX: f32 = 28.0;
+/// 「组合分块」列表每行估高.
+pub(crate) const MASK_BLOCK_ROW_PX: f32 = 28.0;
 pub(crate) const HELP_TEMPLATE: &str = "\
 【分块】快捷键:\n\
   {m}O 打开图片/PDF | {ms}N 新建工程 | {ms}O 打开工程 | {m}S 保存工程 | {ms}S 另存工程\n\
@@ -242,8 +243,8 @@ pub(crate) enum ScrollList {
     Region,
     Group,
     Member,
-    /// 蒙版面板: 组合选择列表
-    MaskGroup,
+    /// 蒙版面板: 当前编辑目标内的「组合分块」列表
+    MaskBlock,
     /// 操作说明对话框正文
     Help,
     /// 更新提示里的版本摘要

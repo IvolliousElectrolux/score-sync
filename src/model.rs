@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use image::RgbImage;
 
+use crate::bg_fill;
 use crate::staff_detect::{detect_bands, Band, StaffGrouping};
 use mask_tool::color_prefs::MaskColorPrefs;
 use mask_tool::mask::MaskRect;
@@ -191,6 +192,37 @@ pub fn parse_color_hex(s: &str) -> u32 {
     u32::from_str_radix(s, 16).unwrap_or(0x3498db)
 }
 
+/// 蒙版编辑时对组合内某个分块位置/尺寸的微调, 只影响该组合的拼合图
+/// (蒙版预览/终稿导出/视频素材), 不改变分块面板中的原始 `Region.y0/y1`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlockAdjust {
+    pub region_id: String,
+    /// 顶边调整: 负值向内裁掉该数值像素 (裁进图内容), 正值向外扩展该数值
+    /// 像素 (背景色模式填充).
+    pub extra_top: i32,
+    /// 底边调整: 同上, 作用于底边.
+    pub extra_bottom: i32,
+    /// 与上一个块之间的额外间距 (像素, 背景色模式填充); 组合首块忽略该值.
+    pub gap_before: i32,
+}
+
+impl BlockAdjust {
+    pub fn is_noop(&self) -> bool {
+        self.extra_top == 0 && self.extra_bottom == 0 && self.gap_before == 0
+    }
+}
+
+/// FNV-1a: 把字符串稳定映射到一个 u64 种子, 供背景填充的伪随机噪声使用
+/// (同一块/同一条边多次重算都得到一样的噪点, 不会闪烁).
+fn seed_from(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
+}
+
 /// 应用级文档状态 (页 / 组 / 选中).
 #[derive(Clone, Default)]
 pub struct DocState {
@@ -205,6 +237,9 @@ pub struct DocState {
     pub staff_grouping: StaffGrouping,
     /// 组合蒙版: key = group_id, 坐标相对该组竖向拼合图
     pub group_masks: HashMap<String, Vec<MaskRect>>,
+    /// 组合内分块的位置/尺寸微调 (蒙版编辑用, 只影响拼合图): key = group_id,
+    /// value 与该组 `region_ids` 一一对应 (缺省即视为无调整).
+    pub group_block_layout: HashMap<String, Vec<BlockAdjust>>,
     /// 蒙版/画笔默认色、透明度与最近使用色
     pub mask_prefs: MaskColorPrefs,
     /// 用户已手动拖拽调序「输出组合」; 为 true 时不再自动按页/y 排序
@@ -260,6 +295,7 @@ impl DocState {
             ink_threshold: self.ink_threshold,
             staff_grouping: self.staff_grouping,
             group_masks: self.group_masks.clone(),
+            group_block_layout: self.group_block_layout.clone(),
             mask_prefs: self.mask_prefs.clone(),
             groups_manual_order: self.groups_manual_order,
             bg_enabled: self.bg_enabled,
@@ -284,6 +320,22 @@ impl DocState {
             self.group_masks.remove(group_id);
         } else {
             self.group_masks.insert(group_id.to_string(), masks);
+        }
+    }
+
+    pub fn get_block_layout(&self, group_id: &str) -> &[BlockAdjust] {
+        self.group_block_layout
+            .get(group_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// 全为无操作的调整视为未设置, 及时清理避免工程文件里堆积空数据.
+    pub fn set_block_layout(&mut self, group_id: &str, layout: Vec<BlockAdjust>) {
+        if layout.iter().all(BlockAdjust::is_noop) {
+            self.group_block_layout.remove(group_id);
+        } else {
+            self.group_block_layout.insert(group_id.to_string(), layout);
         }
     }
 
@@ -374,39 +426,174 @@ impl DocState {
         Some(image::imageops::crop_imm(img, 0, y0, w, y1 - y0 + 1).to_image())
     }
 
-    /// 按组内成员顺序竖向拼合 (与导出一致, 不含蒙版).
+    /// 按组内成员顺序竖向拼合 (与导出一致, 不含蒙版). 若该组存在蒙版编辑时
+    /// 的分块位置/尺寸微调 (`group_block_layout`), 在此一并应用; 否则走原
+    /// 有的纯拼接快速路径 (性能/结果与旧版本完全一致).
     pub fn compose_group(&self, group_id: &str) -> Option<image::RgbImage> {
         let g = self.groups.iter().find(|g| g.id == group_id)?;
-        let mut parts: Vec<image::RgbImage> = Vec::new();
+        let mut parts: Vec<(String, image::RgbImage)> = Vec::new();
         for rid in &g.region_ids {
             if let Some(crop) = self.crop_region(rid) {
-                parts.push(crop);
+                parts.push((rid.clone(), crop));
             }
         }
         if parts.is_empty() {
             return None;
         }
-        let max_w = parts.iter().map(|p| p.width()).max().unwrap_or(1);
-        if parts.len() == 1 && parts[0].width() == max_w {
-            return Some(parts.remove(0));
+        let layout = self.get_block_layout(group_id);
+        if layout.is_empty() {
+            let mut parts: Vec<image::RgbImage> = parts.into_iter().map(|(_, p)| p).collect();
+            let max_w = parts.iter().map(|p| p.width()).max().unwrap_or(1);
+            if parts.len() == 1 && parts[0].width() == max_w {
+                return Some(parts.remove(0));
+            }
+            let total_h: u32 = parts.iter().map(|p| p.height()).sum();
+            let mut combined =
+                image::RgbImage::from_pixel(max_w, total_h, image::Rgb([255, 255, 255]));
+            let mut yy = 0u32;
+            for p in &parts {
+                let src = if p.width() != max_w {
+                    let mut canvas = image::RgbImage::from_pixel(
+                        max_w,
+                        p.height(),
+                        image::Rgb([255, 255, 255]),
+                    );
+                    image::imageops::replace(&mut canvas, p, 0, 0);
+                    canvas
+                } else {
+                    p.clone()
+                };
+                image::imageops::replace(&mut combined, &src, 0, yy as i64);
+                yy += p.height();
+            }
+            return Some(combined);
         }
-        let total_h: u32 = parts.iter().map(|p| p.height()).sum();
+        Some(self.stitch_with_layout(parts, layout, self.ink_threshold))
+    }
+
+    /// 应用 `BlockAdjust` 后的拼接: 每块自身裁剪/扩展上下边, 块间插入间距,
+    /// 新增区域用该块自身背景色统计合成填充 (见 `bg_fill`).
+    fn stitch_with_layout(
+        &self,
+        parts: Vec<(String, image::RgbImage)>,
+        layout: &[BlockAdjust],
+        ink_threshold: i32,
+    ) -> image::RgbImage {
+        const SAMPLE_ROWS: u32 = 32;
+        struct Piece {
+            gap_before: u32,
+            gap_seed: u64,
+            gap_stats: ([f32; 3], [f32; 3]),
+            ext_top: u32,
+            ext_bottom: u32,
+            top_seed: u64,
+            top_stats: ([f32; 3], [f32; 3]),
+            bottom_seed: u64,
+            bottom_stats: ([f32; 3], [f32; 3]),
+            content: image::RgbImage,
+        }
+        let find_adjust = |rid: &str| layout.iter().find(|a| a.region_id == rid);
+        let mut pieces: Vec<Piece> = Vec::with_capacity(parts.len());
+        for (i, (rid, img)) in parts.iter().enumerate() {
+            let adj = find_adjust(rid).cloned().unwrap_or_default();
+            let h = img.height() as i32;
+            let max_trim = (h - 1).max(0);
+            let trim_top = (-adj.extra_top).clamp(0, max_trim) as u32;
+            let remaining = max_trim - trim_top as i32;
+            let trim_bottom = (-adj.extra_bottom).clamp(0, remaining) as u32;
+            let ext_top = adj.extra_top.max(0) as u32;
+            let ext_bottom = adj.extra_bottom.max(0) as u32;
+            let gap_before = if i == 0 { 0 } else { adj.gap_before.max(0) as u32 };
+            let content = if trim_top > 0 || trim_bottom > 0 {
+                image::imageops::crop_imm(
+                    img,
+                    0,
+                    trim_top,
+                    img.width(),
+                    img.height() - trim_top - trim_bottom,
+                )
+                .to_image()
+            } else {
+                img.clone()
+            };
+            let top_stats = bg_fill::sample_bg_stats(
+                &bg_fill::edge_sample(&content, true, SAMPLE_ROWS),
+                ink_threshold,
+            );
+            let bottom_stats = bg_fill::sample_bg_stats(
+                &bg_fill::edge_sample(&content, false, SAMPLE_ROWS),
+                ink_threshold,
+            );
+            pieces.push(Piece {
+                gap_before,
+                gap_seed: seed_from(&format!("{rid}:gap")),
+                gap_stats: top_stats,
+                ext_top,
+                ext_bottom,
+                top_seed: seed_from(&format!("{rid}:top")),
+                top_stats,
+                bottom_seed: seed_from(&format!("{rid}:bottom")),
+                bottom_stats,
+                content,
+            });
+        }
+        let max_w = pieces.iter().map(|p| p.content.width()).max().unwrap_or(1);
+        let total_h: u32 = pieces
+            .iter()
+            .map(|p| p.gap_before + p.ext_top + p.content.height() + p.ext_bottom)
+            .sum();
         let mut combined =
-            image::RgbImage::from_pixel(max_w, total_h, image::Rgb([255, 255, 255]));
-        let mut yy = 0u32;
-        for p in &parts {
-            let src = if p.width() != max_w {
-                let mut canvas =
-                    image::RgbImage::from_pixel(max_w, p.height(), image::Rgb([255, 255, 255]));
-                image::imageops::replace(&mut canvas, p, 0, 0);
+            image::RgbImage::from_pixel(max_w, total_h.max(1), image::Rgb([255, 255, 255]));
+        let mut yy: i64 = 0;
+        for p in &pieces {
+            if p.gap_before > 0 {
+                let fill = bg_fill::synth_fill(
+                    max_w,
+                    p.gap_before,
+                    p.gap_stats.0,
+                    p.gap_stats.1,
+                    p.gap_seed,
+                );
+                image::imageops::replace(&mut combined, &fill, 0, yy);
+                yy += p.gap_before as i64;
+            }
+            if p.ext_top > 0 {
+                let fill = bg_fill::synth_fill(
+                    max_w,
+                    p.ext_top,
+                    p.top_stats.0,
+                    p.top_stats.1,
+                    p.top_seed,
+                );
+                image::imageops::replace(&mut combined, &fill, 0, yy);
+                yy += p.ext_top as i64;
+            }
+            let src = if p.content.width() != max_w {
+                let mut canvas = image::RgbImage::from_pixel(
+                    max_w,
+                    p.content.height(),
+                    image::Rgb([255, 255, 255]),
+                );
+                image::imageops::replace(&mut canvas, &p.content, 0, 0);
                 canvas
             } else {
-                p.clone()
+                p.content.clone()
             };
-            image::imageops::replace(&mut combined, &src, 0, yy as i64);
-            yy += p.height();
+            image::imageops::replace(&mut combined, &src, 0, yy);
+            yy += p.content.height() as i64;
+            if p.ext_bottom > 0 {
+                let fill = bg_fill::synth_fill(
+                    max_w,
+                    p.ext_bottom,
+                    p.bottom_stats.0,
+                    p.bottom_stats.1,
+                    p.bottom_seed,
+                );
+                image::imageops::replace(&mut combined, &fill, 0, yy);
+                yy += p.ext_bottom as i64;
+            }
         }
-        Some(combined)
+        combined
     }
 
     /// 启用工程底色层 (底层). 不修改页图 / 蒙版.
@@ -2174,5 +2361,100 @@ mod tests {
         seed_bands(&mut doc, 1, &[(10, 20)]);
         doc.prune_dangling_groups_if_hydrated();
         assert!(!doc.groups.iter().any(|g| g.id == "pending"));
+    }
+
+    #[test]
+    fn compose_group_with_layout_applies_gap_and_extend() {
+        let mut doc = DocState::new();
+        let mut page = stub_page(100);
+        page.image = Some(image::RgbImage::from_pixel(
+            80,
+            100,
+            image::Rgb([250, 250, 250]),
+        ));
+        let page_id = page.id.clone();
+        doc.pages.push(page);
+        let r0 = Region {
+            id: "r0".into(),
+            page_id: page_id.clone(),
+            y0: 0,
+            y1: 29,
+            kind: "system".into(),
+            color: "#e74c3c".into(),
+        };
+        let r1 = Region {
+            id: "r1".into(),
+            page_id: page_id.clone(),
+            y0: 30,
+            y1: 59,
+            kind: "system".into(),
+            color: "#3498db".into(),
+        };
+        doc.pages[0].regions.insert(r0.id.clone(), r0);
+        doc.pages[0].regions.insert(r1.id.clone(), r1);
+        doc.rebuild_rid_index();
+        doc.groups.push(Group {
+            id: "g1".into(),
+            region_ids: vec!["r0".into(), "r1".into()],
+            name: String::new(),
+        });
+
+        // 无调整: 高度应等于两块之和 (各 30px).
+        let plain = doc.compose_group("g1").unwrap();
+        assert_eq!(plain.height(), 60);
+
+        // r1 前插入 10px 间距, r1 底边再向外扩 5px.
+        doc.set_block_layout(
+            "g1",
+            vec![
+                BlockAdjust {
+                    region_id: "r0".into(),
+                    ..Default::default()
+                },
+                BlockAdjust {
+                    region_id: "r1".into(),
+                    extra_top: 0,
+                    extra_bottom: 5,
+                    gap_before: 10,
+                },
+            ],
+        );
+        let adjusted = doc.compose_group("g1").unwrap();
+        assert_eq!(adjusted.height(), 60 + 10 + 5);
+        assert_eq!(adjusted.width(), plain.width());
+
+        // 顶边向内裁掉 8px 应减小总高.
+        doc.set_block_layout(
+            "g1",
+            vec![
+                BlockAdjust {
+                    region_id: "r0".into(),
+                    extra_top: -8,
+                    ..Default::default()
+                },
+                BlockAdjust {
+                    region_id: "r1".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        let trimmed = doc.compose_group("g1").unwrap();
+        assert_eq!(trimmed.height(), 60 - 8);
+
+        // 全 0 调整应自动回退到「未设置」状态 (不占工程文件空间).
+        doc.set_block_layout(
+            "g1",
+            vec![
+                BlockAdjust {
+                    region_id: "r0".into(),
+                    ..Default::default()
+                },
+                BlockAdjust {
+                    region_id: "r1".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert!(doc.group_block_layout.get("g1").is_none());
     }
 }

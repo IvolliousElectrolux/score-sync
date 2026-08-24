@@ -84,7 +84,7 @@ impl ScoreSyncApp {
                 self.apply_side_resize(x, cx);
             }
             Some(DragKind::TabHScroll { grab }) => {
-                let handle = self.tab_scroll.clone();
+                let handle = self.tab_hscroll_handle();
                 let b = handle.bounds();
                 let max = f32::from(handle.max_offset().width);
                 if max > 0.5 {

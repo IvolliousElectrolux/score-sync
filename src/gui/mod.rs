@@ -138,10 +138,16 @@ pub(crate) struct ScoreSyncApp {
     region_scroll: ScrollHandle,
     group_scroll: ScrollHandle,
     member_scroll: ScrollHandle,
-    mask_group_scroll: ScrollHandle,
+    /// 「组合分块」列表滚动状态 (当前蒙版编辑目标内, 自上而下的成员分块).
+    mask_block_scroll: ScrollHandle,
+    /// 当前在「组合分块」列表/蒙版画布中选中的分块 (region_id).
+    mask_active_block_id: Option<String>,
     help_scroll: ScrollHandle,
     update_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
+    /// 蒙版组合页签独立滚动状态; 与分块页签的 `tab_scroll` 分开, 避免切换
+    /// 面板时共用同一 handle 导致上一帧 max_offset 对不上, 滚动条抽搐一下.
+    mask_tab_scroll: ScrollHandle,
     /// 标签页条目屏幕 bounds (供拖拽虚影锚点)
     tab_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 组合内成员条目屏幕 bounds
@@ -266,10 +272,12 @@ impl ScoreSyncApp {
             region_scroll: ScrollHandle::new(),
             group_scroll: ScrollHandle::new(),
             member_scroll: ScrollHandle::new(),
-            mask_group_scroll: ScrollHandle::new(),
+            mask_block_scroll: ScrollHandle::new(),
+            mask_active_block_id: None,
             help_scroll: ScrollHandle::new(),
             update_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
+            mask_tab_scroll: ScrollHandle::new(),
             tab_bounds: HashMap::new(),
             member_bounds: HashMap::new(),
             group_bounds: HashMap::new(),

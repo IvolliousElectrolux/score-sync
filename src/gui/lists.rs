@@ -21,6 +21,7 @@ pub struct TabInfo {
 
 use super::*;
 use super::ScoreSyncApp;
+use crate::model::Group;
 
 impl ScoreSyncApp {
     pub(super) fn measure_item_bounds(
@@ -158,15 +159,77 @@ impl ScoreSyncApp {
         self.doc.groups.iter().position(|g| &g.id == gid)
     }
 
-    /// 将蒙版侧「编辑目标」列表滚到当前组合.
-    pub(super) fn scroll_mask_picker_to_active(&self) {
-        let Some(ix) = self.mask_active_group_index() else {
+    pub(super) fn mask_active_group(&self) -> Option<&Group> {
+        let gid = self
+            .mask_target
+            .as_ref()
+            .or(self.doc.active_group_id.as_ref())?;
+        self.doc.groups.iter().find(|g| &g.id == gid)
+    }
+
+    /// 当前「组合分块」选中项失效 (换了编辑目标 / 块被删掉) 时, 回落到第一块.
+    pub(super) fn ensure_mask_active_block(&mut self) {
+        let members = self
+            .mask_active_group()
+            .map(|g| g.region_ids.clone())
+            .unwrap_or_default();
+        let ok = self
+            .mask_active_block_id
+            .as_ref()
+            .is_some_and(|id| members.contains(id));
+        if !ok {
+            self.mask_active_block_id = members.into_iter().next();
+        }
+    }
+
+    /// 「组合分块」列表: 当前编辑目标内各成员, 自上而下 (拼合图顺序).
+    pub(super) fn mask_block_rows(&self) -> Vec<ListRow> {
+        let Some(g) = self.mask_active_group() else {
+            return Vec::new();
+        };
+        let mut yy: i64 = 0;
+        g.region_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, rid)| {
+                let (pi, r) = self.doc.find_region(rid)?;
+                let h = (r.y1 - r.y0 + 1).max(0) as i64;
+                let comp_y0 = yy;
+                let comp_y1 = yy + h - 1;
+                yy += h;
+                let label = format!(
+                    "{}. P{} {}  h={h}  拼合 y={comp_y0}-{comp_y1}",
+                    i + 1,
+                    pi + 1,
+                    r.kind,
+                );
+                Some(ListRow {
+                    id: rid.clone(),
+                    label: label.into(),
+                    color: parse_color_hex(&r.color),
+                    selected: self.mask_active_block_id.as_deref() == Some(rid.as_str()),
+                    src_index: i,
+                })
+            })
+            .collect()
+    }
+
+    /// 将「组合分块」列表滚到当前选中的分块. 仅在切换编辑目标/切入蒙版面板
+    /// 时用; 直接点列表内某一行本身不要滚.
+    pub(super) fn scroll_mask_block_list_to_active(&self) {
+        let Some(g) = self.mask_active_group() else {
             return;
         };
-        let picker_h = f32::from(self.mask_group_scroll.bounds().size.height).max(80.0);
-        let picker_target = (ix as f32 * MASK_PICKER_ROW_PX - picker_h * 0.35).max(0.0);
-        self.mask_group_scroll
-            .set_offset(point(px(0.), px(-picker_target)));
+        let Some(id) = self.mask_active_block_id.as_ref() else {
+            return;
+        };
+        let Some(ix) = g.region_ids.iter().position(|r| r == id) else {
+            return;
+        };
+        let list_h = f32::from(self.mask_block_scroll.bounds().size.height).max(80.0);
+        let target = (ix as f32 * MASK_BLOCK_ROW_PX - list_h * 0.35).max(0.0);
+        self.mask_block_scroll
+            .set_offset(point(px(0.), px(-target)));
     }
 
     /// 将顶部组合页签滚到当前组合. 仅在切入蒙版面板时用, 点选页签本身不要滚.
@@ -174,15 +237,15 @@ impl ScoreSyncApp {
         let Some(ix) = self.mask_active_group_index() else {
             return;
         };
-        let view_w = f32::from(self.tab_scroll.bounds().size.width).max(400.0);
+        let view_w = f32::from(self.mask_tab_scroll.bounds().size.width).max(400.0);
         let tab_target = (ix as f32 * MASK_TAB_SLOT_PX - view_w * 0.35).max(0.0);
-        self.tab_scroll
+        self.mask_tab_scroll
             .set_offset(point(px(-tab_target), px(0.)));
     }
 
-    /// 切入蒙版面板时, 侧栏与页签栏都定位到当前组合.
+    /// 切入蒙版面板时, 分块列表与页签栏都定位到当前组合/分块.
     pub(super) fn scroll_mask_lists_to_active(&self) {
-        self.scroll_mask_picker_to_active();
+        self.scroll_mask_block_list_to_active();
         self.scroll_mask_tabs_to_active();
     }
     pub(super) fn region_list_rows(&self) -> Vec<ListRow> {
@@ -279,30 +342,11 @@ impl ScoreSyncApp {
         if n <= TAB_VIRTUAL_THRESHOLD {
             return (0, n);
         }
-        let view_w = f32::from(self.tab_scroll.bounds().size.width);
+        let view_w = f32::from(self.mask_tab_scroll.bounds().size.width);
         let view_w = if view_w < 8.0 { 960.0 } else { view_w };
-        let off = (-f32::from(self.tab_scroll.offset().x)).max(0.0);
+        let off = (-f32::from(self.mask_tab_scroll.offset().x)).max(0.0);
         let start = ((off / MASK_TAB_SLOT_PX).floor() as usize).saturating_sub(8);
         let end = (((off + view_w) / MASK_TAB_SLOT_PX).ceil() as usize)
-            .saturating_add(8)
-            .min(n);
-        let start = start.min(n);
-        (start, end.max(start))
-    }
-
-    pub(super) fn visible_mask_picker_range(&self) -> (usize, usize) {
-        let n = self.doc.groups.len();
-        if n == 0 {
-            return (0, 0);
-        }
-        if n <= GROUP_LIST_VIRTUAL_THRESHOLD {
-            return (0, n);
-        }
-        let view_h = f32::from(self.mask_group_scroll.bounds().size.height);
-        let view_h = if view_h < 8.0 { 168.0 } else { view_h };
-        let off = (-f32::from(self.mask_group_scroll.offset().y)).max(0.0);
-        let start = ((off / MASK_PICKER_ROW_PX).floor() as usize).saturating_sub(8);
-        let end = (((off + view_h) / MASK_PICKER_ROW_PX).ceil() as usize)
             .saturating_add(8)
             .min(n);
         let start = start.min(n);
@@ -413,7 +457,7 @@ impl ScoreSyncApp {
             ScrollList::Region => &self.region_scroll,
             ScrollList::Group => &self.group_scroll,
             ScrollList::Member => &self.member_scroll,
-            ScrollList::MaskGroup => &self.mask_group_scroll,
+            ScrollList::MaskBlock => &self.mask_block_scroll,
             ScrollList::Help => &self.help_scroll,
             ScrollList::Update => &self.update_scroll,
         }

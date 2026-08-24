@@ -402,6 +402,7 @@ impl ScoreSyncApp {
         let side_w = self.side_width;
         let target = self.resolve_mask_target();
         self.mask_target = target.clone();
+        self.ensure_mask_active_block();
         let Some(gid) = target else {
             self.mask_tool.update(cx, |m, cx| {
                 m.set_embed_side_width(side_w);
@@ -497,7 +498,7 @@ impl ScoreSyncApp {
         self.mask_target = None;
         self.sync_mask_image(cx);
         if scroll_other {
-            self.scroll_mask_picker_to_active();
+            self.scroll_mask_block_list_to_active();
         }
         cx.notify();
     }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::model::{DocState, Group, Page, Region};
+use crate::model::{BlockAdjust, DocState, Group, Page, Region};
 use crate::staff_detect::StaffGrouping;
 
 pub const PROJECT_EXT: &str = "staffcrop";
@@ -36,6 +36,9 @@ struct ProjectFile {
     groups: Vec<ProjectGroup>,
     /// group_id -> masks
     group_masks: HashMap<String, Vec<MaskRect>>,
+    /// group_id -> 分块位置/尺寸微调 (蒙版编辑); 旧工程文件没有该字段.
+    #[serde(default)]
+    group_block_layout: HashMap<String, Vec<ProjectBlockAdjust>>,
     /// 用户手动调过输出组合顺序
     #[serde(default)]
     groups_manual_order: bool,
@@ -126,6 +129,39 @@ struct ProjectGroup {
     id: String,
     name: String,
     region_ids: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ProjectBlockAdjust {
+    region_id: String,
+    #[serde(default)]
+    extra_top: i32,
+    #[serde(default)]
+    extra_bottom: i32,
+    #[serde(default)]
+    gap_before: i32,
+}
+
+impl From<&BlockAdjust> for ProjectBlockAdjust {
+    fn from(a: &BlockAdjust) -> Self {
+        Self {
+            region_id: a.region_id.clone(),
+            extra_top: a.extra_top,
+            extra_bottom: a.extra_bottom,
+            gap_before: a.gap_before,
+        }
+    }
+}
+
+impl From<ProjectBlockAdjust> for BlockAdjust {
+    fn from(a: ProjectBlockAdjust) -> Self {
+        Self {
+            region_id: a.region_id,
+            extra_top: a.extra_top,
+            extra_bottom: a.extra_bottom,
+            gap_before: a.gap_before,
+        }
+    }
 }
 
 pub fn is_project_path(path: &Path) -> bool {
@@ -272,6 +308,11 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         pages,
         groups,
         group_masks: doc.group_masks.clone(),
+        group_block_layout: doc
+            .group_block_layout
+            .iter()
+            .map(|(gid, v)| (gid.clone(), v.iter().map(ProjectBlockAdjust::from).collect()))
+            .collect(),
         groups_manual_order: doc.groups_manual_order,
         bg: bg_meta,
         video,
@@ -424,6 +465,11 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         ink_threshold: meta.ink_threshold,
         staff_grouping: meta.staff_grouping,
         group_masks: meta.group_masks,
+        group_block_layout: meta
+            .group_block_layout
+            .into_iter()
+            .map(|(gid, v)| (gid, v.into_iter().map(BlockAdjust::from).collect()))
+            .collect(),
         mask_prefs: meta
             .mask_prefs
             .unwrap_or_else(|| mask_tool::color_prefs::MaskColorPrefs {

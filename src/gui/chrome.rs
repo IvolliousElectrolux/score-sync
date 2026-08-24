@@ -310,16 +310,15 @@ impl ScoreSyncApp {
             .into_any_element()
     }
 
-    pub(super) fn mask_target_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_gid = self.mask_target.clone().or_else(|| self.doc.active_group_id.clone());
-        let n = self.doc.groups.len();
-        let virtualize = n > GROUP_LIST_VIRTUAL_THRESHOLD;
-        let (start, end) = self.visible_mask_picker_range();
+    /// 「组合分块」面板: 显示当前蒙版编辑目标 (组合拼合图) 内自上而下的
+    /// 各成员分块, 供选中/后续拖动调整. 与顶部组合页签栏不同, 这里列的是
+    /// 「块」而非「组合」, 不再重复.
+    pub(super) fn mask_block_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.mask_block_rows();
         let mut list = div()
-            .id("mask_group_list")
+            .id("mask_block_list")
             .flex()
-            .when(virtualize, |d| d.flex_col())
-            .when(!virtualize, |d| d.flex_row().flex_wrap())
+            .flex_col()
             .gap_1()
             .p_1()
             .bg(rgb(0xffffff))
@@ -327,21 +326,19 @@ impl ScoreSyncApp {
             .border_color(rgb(0xcbd5e1))
             .rounded_md()
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
-        if virtualize && start > 0 {
+        if rows.is_empty() {
             list = list.child(
                 div()
-                    .h(px(start as f32 * MASK_PICKER_ROW_PX))
-                    .w_full()
-                    .flex_shrink_0(),
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .child("当前组合内没有分块"),
             );
         }
-        for i in start..end {
-            let Some(g) = self.doc.groups.get(i) else {
-                continue;
-            };
-            let gid = g.id.clone();
-            let active = active_gid.as_ref() == Some(&gid);
-            let label = self.doc.group_crop_label(i);
+        for row in &rows {
+            let rid = row.id.clone();
+            let active = row.selected;
             let bg = if active {
                 rgb(0x2563eb)
             } else {
@@ -354,7 +351,7 @@ impl ScoreSyncApp {
             };
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("mask-g-{gid}")))
+                    .id(SharedString::from(format!("mask-blk-{rid}")))
                     .px_2()
                     .py_1()
                     .rounded_sm()
@@ -362,27 +359,20 @@ impl ScoreSyncApp {
                     .text_color(fg)
                     .text_xs()
                     .cursor_pointer()
-                    .flex_shrink_0()
-                    .child(label)
+                    .w_full()
+                    .child(row.label.clone())
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            this.set_mask_target(gid.clone(), false, cx);
+                            this.mask_active_block_id = Some(rid.clone());
+                            cx.notify();
                         }),
                     ),
             );
         }
-        if virtualize && end < n {
-            list = list.child(
-                div()
-                    .h(px((n - end) as f32 * MASK_PICKER_ROW_PX))
-                    .w_full()
-                    .flex_shrink_0(),
-            );
-        }
 
         div()
-            .id("mask_target_picker")
+            .id("mask_block_panel")
             .flex_shrink_0()
             .h(px(168.))
             .max_h(px(168.))
@@ -402,13 +392,13 @@ impl ScoreSyncApp {
                     .text_color(rgb(0x334155))
                     .mb_1()
                     .flex_shrink_0()
-                    .child("编辑目标 (组合拼合图)"),
+                    .child("组合分块 (自上而下)"),
             )
             .child(
                 self.attach_scrollbars(
-                    "mask_group_scroll_wrap".into(),
-                    ScrollList::MaskGroup,
-                    &self.mask_group_scroll,
+                    "mask_block_scroll_wrap".into(),
+                    ScrollList::MaskBlock,
+                    &self.mask_block_scroll,
                     list,
                     cx,
                 )
@@ -421,7 +411,7 @@ impl ScoreSyncApp {
         let body = match self.side_tool {
             SideTool::Crop => self.side_panel(cx).into_any_element(),
             SideTool::Mask => {
-                let picker = self.mask_target_picker(cx).into_any_element();
+                let picker = self.mask_block_panel(cx).into_any_element();
                 let side_w = self.side_width;
                 let mask_body = self.mask_tool.update(cx, |m, cx| {
                     m.set_embed_side_width(side_w);
