@@ -8,6 +8,7 @@
 //! - `canvas` 画布交互
 //! - `chrome` 工具栏与侧栏
 
+mod blocks;
 mod canvas;
 mod chrome;
 mod io;
@@ -15,6 +16,7 @@ mod picker;
 mod tools;
 mod types;
 
+pub(crate) use blocks::BlockHitZone;
 pub(crate) use types::*;
 
 pub(crate) use std::collections::HashSet;
@@ -34,6 +36,7 @@ pub(crate) use smallvec::smallvec;
 pub(crate) use crate::color_prefs::{
     hsv_to_rgb, rgb_to_hsv, MaskColorPrefs, DEFAULT_BRUSH_OPACITY, RECENT_COLORS_MAX,
 };
+pub(crate) use crate::layout::BlockAdjust;
 pub(crate) use crate::mask::{
     default_export_path, export_masked, first_image_in_paths, is_image_path, new_id, MaskRect,
     DEFAULT_MASK_OPACITY,
@@ -52,6 +55,7 @@ actions!(
         TogglePanMode,
         ToggleBrushMode,
         TogglePolyMode,
+        ToggleMoveBlocksMode,
         CancelPolyDraft,
         Undo,
         Redo
@@ -133,6 +137,14 @@ pub struct MaskToolApp {
     session_key: Option<String>,
     /// 偏好变更回调标记: 宿主可在 notify 后 flush 到 doc/appdata
     prefs_dirty: bool,
+    /// 「组合分块」原始裁切片段 (未应用位置/尺寸微调), 供块拖动即时重拼.
+    pub(crate) block_pieces: Vec<(String, image::RgbImage)>,
+    /// 当前块位置/尺寸微调 (拖动时实时更新; 宿主按需 pull 持久化).
+    pub(crate) block_layout: Vec<BlockAdjust>,
+    /// 拼接背景色填充用的墨迹阈值 (来自宿主 `DocState.ink_threshold`).
+    block_ink_threshold: i32,
+    /// 「移动分块」模式下当前选中/拖动的块.
+    pub(crate) block_selected: Option<String>,
 }
 
 
@@ -209,6 +221,10 @@ impl MaskToolApp {
             embed_side_width: 0.0,
             session_key: None,
             prefs_dirty: false,
+            block_pieces: Vec::new(),
+            block_layout: Vec::new(),
+            block_ink_threshold: 200,
+            block_selected: None,
         };
         app.rebuild_hue_image();
         app.rebuild_sb_image();
@@ -320,6 +336,9 @@ impl Render for MaskToolApp {
             .on_action(cx.listener(|this, _: &TogglePolyMode, _, cx| {
                 this.toggle_poly_mode(cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleMoveBlocksMode, _, cx| {
+                this.toggle_move_blocks_mode(cx)
+            }))
             .on_action(cx.listener(|this, _: &CancelPolyDraft, _, cx| {
                 this.cancel_poly_draft(cx)
             }))
@@ -372,6 +391,7 @@ pub fn run_gui(initial: Option<PathBuf>) {
             KeyBinding::new("b", ToggleDrawMode, Some("MaskTool")),
             KeyBinding::new("l", TogglePolyMode, Some("MaskTool")),
             KeyBinding::new("p", TogglePanMode, Some("MaskTool")),
+            KeyBinding::new("m", ToggleMoveBlocksMode, Some("MaskTool")),
             KeyBinding::new("escape", CancelPolyDraft, Some("MaskTool")),
         ]);
         cx.bind_keys(apply_bg::bind_primary("o", OpenFile, Some("MaskTool")));

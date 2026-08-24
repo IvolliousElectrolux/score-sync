@@ -844,7 +844,17 @@ impl MaskToolApp {
                                 true,
                                 |this, _, cx| this.toggle_pan_mode(cx),
                                 cx,
-                            )),
+                            ))
+                            .when(self.has_block_pieces(), |d| {
+                                d.child(self.btn(
+                                    "mode_move_blocks",
+                                    "移动分块 (M)",
+                                    self.mode == ToolMode::MoveBlocks,
+                                    true,
+                                    |this, _, cx| this.toggle_move_blocks_mode(cx),
+                                    cx,
+                                ))
+                            }),
                     )
                     .when(!embedded, |d| {
                         d.child(self.btn(

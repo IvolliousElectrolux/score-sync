@@ -1,4 +1,4 @@
-//! 蒙版「组合分块」拖动调整用的背景色模式识别与快速填充.
+//! 「组合分块」拖动调整用的背景色模式识别与快速填充.
 //!
 //! 设计目标: 扫描件背景往往不是纯白, 而是类似 250±3 的轻微噪点; 用统计
 //! (均值/标准差, 排除疑似墨迹像素) 加简单伪随机噪声还原, 比纯色填充更
@@ -76,6 +76,17 @@ pub fn edge_sample(img: &RgbImage, from_top: bool, sample_rows: u32) -> RgbImage
     image::imageops::crop_imm(img, 0, y0, w, rows).to_image()
 }
 
+/// FNV-1a: 把字符串稳定映射到一个 u64 种子, 供背景填充的伪随机噪声使用
+/// (同一块/同一条边多次重算都得到一样的噪点, 不会闪烁).
+pub fn seed_from(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,7 +95,6 @@ mod tests {
     #[test]
     fn sample_stats_ignore_dark_ink_pixels() {
         let mut img = RgbImage::from_pixel(20, 20, Rgb([250, 250, 250]));
-        // 画一条明显的墨迹线, 不应拉低背景均值.
         for x in 0..20 {
             img.put_pixel(x, 10, Rgb([10, 10, 10]));
         }

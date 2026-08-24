@@ -444,10 +444,14 @@ impl ScoreSyncApp {
             .map(|i| self.doc.group_crop_label(i))
             .unwrap_or_else(|| "组合".into());
         let mask_prefs = self.doc.mask_prefs.clone();
+        let pieces = self.doc.group_member_pieces(&gid);
+        let block_layout = self.doc.get_block_layout(&gid).to_vec();
+        let ink_threshold = self.doc.ink_threshold;
         self.mask_tool.update(cx, |m, cx| {
             m.set_embed_side_width(side_w);
             m.load_rgb(rgb, gid, masks, &label, cx);
             m.apply_color_prefs(mask_prefs);
+            m.set_block_pieces(pieces, block_layout, ink_threshold);
         });
     }
 
@@ -469,9 +473,9 @@ impl ScoreSyncApp {
         let Some(gid) = self.mask_target.clone() else {
             return;
         };
-        let (masks, prefs) = self
-            .mask_tool
-            .update(cx, |m, _| (m.masks_clone(), m.color_prefs()));
+        let (masks, prefs, block_layout) = self.mask_tool.update(cx, |m, _| {
+            (m.masks_clone(), m.color_prefs(), m.block_layout_clone())
+        });
         let (hoff, voff) = (self.mask_preview_hoff, self.mask_preview_voff);
         let masks: Vec<MaskRect> = masks
             .into_iter()
@@ -480,7 +484,11 @@ impl ScoreSyncApp {
                 m
             })
             .collect();
+        let layout_changed = block_layout != self.doc.get_block_layout(&gid);
         self.doc.set_group_masks(&gid, masks);
+        if layout_changed {
+            self.doc.set_block_layout(&gid, block_layout);
+        }
         self.doc.mask_prefs = prefs.clone();
         config::remember_mask_prefs(&prefs);
         self.mark_dirty();

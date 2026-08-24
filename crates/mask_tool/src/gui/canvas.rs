@@ -161,6 +161,15 @@ impl MaskToolApp {
                     self.apply_selection_click(hit, control);
                 }
             }
+            ToolMode::MoveBlocks => {
+                let tol = xform.edge_tol();
+                match self.hit_block_at(iy, tol) {
+                    Some((rid, BlockHitZone::Top)) => self.begin_block_resize_top(rid, iy),
+                    Some((rid, BlockHitZone::Bottom)) => self.begin_block_resize_bottom(rid, iy),
+                    Some((rid, BlockHitZone::Body)) => self.begin_block_move(rid, iy),
+                    None => self.block_selected = None,
+                }
+            }
         }
         cx.notify();
     }
@@ -345,6 +354,55 @@ impl MaskToolApp {
                     wiping,
                 });
             }
+            Some(DragKind::BlockMove {
+                region_id,
+                start_iy,
+                start_gap_before,
+            }) => {
+                let xform = self.xform();
+                let (_, iy) = xform.screen_to_image(sx, sy);
+                self.apply_block_move(&region_id, start_iy, start_gap_before, iy);
+                self.drag = Some(DragKind::BlockMove {
+                    region_id,
+                    start_iy,
+                    start_gap_before,
+                });
+                cx.notify();
+            }
+            Some(DragKind::BlockResizeTop {
+                region_id,
+                start_iy,
+                start_extra_top,
+                max_trim,
+            }) => {
+                let xform = self.xform();
+                let (_, iy) = xform.screen_to_image(sx, sy);
+                self.apply_block_resize_top(&region_id, start_iy, start_extra_top, max_trim, iy);
+                self.drag = Some(DragKind::BlockResizeTop {
+                    region_id,
+                    start_iy,
+                    start_extra_top,
+                    max_trim,
+                });
+                cx.notify();
+            }
+            Some(DragKind::BlockResizeBottom {
+                region_id,
+                start_iy,
+                start_extra_bottom,
+                max_trim,
+            }) => {
+                let xform = self.xform();
+                let (_, iy) = xform.screen_to_image(sx, sy);
+                self.apply_block_resize_bottom(&region_id, start_iy, start_extra_bottom, max_trim, iy);
+                self.drag = Some(DragKind::BlockResizeBottom {
+                    region_id,
+                    start_iy,
+                    start_extra_bottom,
+                    max_trim,
+                });
+                cx.notify();
+            }
             None => {
                 if self.mode == ToolMode::Poly && self.poly_draft.is_some() {
                     let xform = self.xform();
@@ -451,6 +509,15 @@ impl MaskToolApp {
             | Some(DragKind::PaletteOpacity)
             | None => {
                 self.opacity_undid = false;
+                cx.notify();
+            }
+            Some(DragKind::BlockMove { region_id, .. }) => {
+                self.status = format!("已移动分块 {region_id}").into();
+                cx.notify();
+            }
+            Some(DragKind::BlockResizeTop { region_id, .. })
+            | Some(DragKind::BlockResizeBottom { region_id, .. }) => {
+                self.status = format!("已调整分块 {region_id} 边界").into();
                 cx.notify();
             }
             Some(DragKind::PaletteSb) | Some(DragKind::PaletteHue) => {
@@ -566,6 +633,9 @@ impl MaskToolApp {
         let brush_color = self.brush_color;
         let brush_opacity = self.brush_opacity;
         let mask_color = self.mask_color;
+        let show_blocks = self.mode == ToolMode::MoveBlocks;
+        let block_spans = if show_blocks { self.block_spans() } else { Vec::new() };
+        let block_selected = self.block_selected.clone();
         let cursor = if self.eyedropper_armed {
             CursorStyle::Crosshair
         } else {
@@ -574,6 +644,7 @@ impl MaskToolApp {
                 ToolMode::Draw | ToolMode::Poly | ToolMode::Eraser => CursorStyle::Crosshair,
                 ToolMode::Pan => CursorStyle::OpenHand,
                 ToolMode::Select => CursorStyle::Arrow,
+                ToolMode::MoveBlocks => CursorStyle::ResizeUpDown,
             }
         };
 
@@ -646,6 +717,46 @@ impl MaskToolApp {
                                 0,
                                 false,
                             );
+                        }
+
+                        if show_blocks {
+                            for (rid, y0, y1) in &block_spans {
+                                let is_sel = block_selected.as_deref() == Some(rid.as_str());
+                                let line_color = if is_sel {
+                                    rgb(0xf97316)
+                                } else {
+                                    rgb(0x38bdf8)
+                                };
+                                if is_sel {
+                                    let mut b =
+                                        xform.image_rect_to_screen(0, *y0 as i32, img_w as i32 - 1, *y1 as i32);
+                                    b.origin.x = bounds.origin.x + b.origin.x;
+                                    b.origin.y = bounds.origin.y + b.origin.y;
+                                    let mut fill_c = rgb(0xf97316);
+                                    fill_c.a = 0.10;
+                                    window.paint_quad(quad(
+                                        b,
+                                        px(0.),
+                                        fill_c,
+                                        px(0.),
+                                        fill_c,
+                                        Default::default(),
+                                    ));
+                                }
+                                for &y in &[*y0, *y1] {
+                                    let sy = bounds.origin.y + px(xform.origin_y + y as f32 * xform.scale);
+                                    let mut line = PathBuilder::stroke(if is_sel { px(2.) } else { px(1.) });
+                                    line = line.dash_array(&[px(6.), px(4.)]);
+                                    line.move_to(point(bounds.origin.x, sy));
+                                    line.line_to(point(
+                                        bounds.origin.x + px(img_w as f32 * xform.scale),
+                                        sy,
+                                    ));
+                                    if let Ok(path) = line.build() {
+                                        window.paint_path(path, line_color);
+                                    }
+                                }
+                            }
                         }
 
                         for m in &masks {

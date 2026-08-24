@@ -169,6 +169,20 @@ impl MaskToolApp {
         cx.notify();
     }
 
+    pub fn toggle_move_blocks_mode(&mut self, cx: &mut Context<Self>) {
+        self.mode = if self.mode == ToolMode::MoveBlocks {
+            ToolMode::Select
+        } else {
+            ToolMode::MoveBlocks
+        };
+        self.drag = None;
+        self.color_picker_open = false;
+        self.poly_draft = None;
+        self.poly_cursor = None;
+        self.status = Self::mode_status(self.mode);
+        cx.notify();
+    }
+
     pub(super) fn mode_status(mode: ToolMode) -> SharedString {
         match mode {
             ToolMode::Draw => "框选".into(),
@@ -177,6 +191,7 @@ impl MaskToolApp {
             ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光".into(),
             ToolMode::Select => format!("选择 (可 {}多选 / Shift 拖选)", apply_bg::primary_mod()).into(),
             ToolMode::Pan => "平移".into(),
+            ToolMode::MoveBlocks => "移动分块: 拖动块本体上下移动, 拖动上下边界裁剪/扩展 (仅上下, 慢拖更精细)".into(),
         }
     }
 

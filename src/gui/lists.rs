@@ -182,21 +182,22 @@ impl ScoreSyncApp {
         }
     }
 
-    /// 「组合分块」列表: 当前编辑目标内各成员, 自上而下 (拼合图顺序).
+    /// 「组合分块」列表: 当前编辑目标内各成员, 自上而下 (拼合图顺序,
+    /// 已应用位置/尺寸微调).
     pub(super) fn mask_block_rows(&self) -> Vec<ListRow> {
         let Some(g) = self.mask_active_group() else {
             return Vec::new();
         };
-        let mut yy: i64 = 0;
+        let gid = g.id.clone();
+        let spans = self.doc.group_member_spans(&gid);
+        let span_of = |rid: &str| spans.iter().find(|(id, ..)| id == rid).map(|(_, y0, y1)| (*y0, *y1));
         g.region_ids
             .iter()
             .enumerate()
             .filter_map(|(i, rid)| {
                 let (pi, r) = self.doc.find_region(rid)?;
-                let h = (r.y1 - r.y0 + 1).max(0) as i64;
-                let comp_y0 = yy;
-                let comp_y1 = yy + h - 1;
-                yy += h;
+                let h = (r.y1 - r.y0 + 1).max(0);
+                let (comp_y0, comp_y1) = span_of(rid).unwrap_or((0, 0));
                 let label = format!(
                     "{}. P{} {}  h={h}  拼合 y={comp_y0}-{comp_y1}",
                     i + 1,

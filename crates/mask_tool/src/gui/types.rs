@@ -11,6 +11,8 @@ pub(crate) const BRUSH_SIZE_DEFAULT: f32 = 16.0;
 pub(crate) const POLY_SNAP_SCREEN_PX: f32 = 12.0;
 /// 橡皮: 超过此图像像素位移才视为拖擦 (否则为单击擦顶层).
 pub(crate) const ERASE_DRAG_SLOP_IMG: f32 = 3.0;
+/// 「移动分块」模式下, 命中块上下边界线的容差 (屏幕像素).
+pub(crate) const BLOCK_EDGE_HIT_PX: f32 = 8.0;
 /// 选色盘 SB 区边长 (屏幕像素).
 pub(crate) const SB_SIZE: f32 = 168.0;
 pub(crate) const HUE_BAR_W: f32 = 18.0;
@@ -213,6 +215,10 @@ impl ViewXform {
         )
     }
 
+    pub(crate) fn edge_tol(&self) -> f32 {
+        (BLOCK_EDGE_HIT_PX / self.scale).max(1.0)
+    }
+
     pub(crate) fn image_rect_to_screen(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> Bounds<Pixels> {
         let left = self.origin_x + x0 as f32 * self.scale;
         let top = self.origin_y + y0 as f32 * self.scale;
@@ -267,6 +273,26 @@ pub(crate) enum DragKind {
         undid: bool,
         wiping: bool,
     },
+    /// 「移动分块」: 整体拖动一个块上下移动 (只改它自己的 gap_before).
+    BlockMove {
+        region_id: String,
+        start_iy: f32,
+        start_gap_before: i32,
+    },
+    /// 「移动分块」: 拖动块的上边界 (裁剪/扩展).
+    BlockResizeTop {
+        region_id: String,
+        start_iy: f32,
+        start_extra_top: i32,
+        max_trim: i32,
+    },
+    /// 「移动分块」: 拖动块的下边界 (裁剪/扩展).
+    BlockResizeBottom {
+        region_id: String,
+        start_iy: f32,
+        start_extra_bottom: i32,
+        max_trim: i32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,6 +309,9 @@ pub(crate) enum ToolMode {
     Eraser,
     /// 空白拖动画布; 点在已选蒙版上则拖动蒙版
     Pan,
+    /// 移动/拉伸「组合分块」: 拖动块本体上下移动, 拖动上下边界裁剪/扩展;
+    /// 该模式下只能上下操作, 不能左右移动, 也不响应蒙版绘制/选中.
+    MoveBlocks,
 }
 
 #[derive(Clone, Default)]
