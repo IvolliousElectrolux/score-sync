@@ -36,8 +36,18 @@ impl MaskToolApp {
         self.masks.clone()
     }
 
+    pub fn guides_clone(&self) -> GuideState {
+        self.guides.clone()
+    }
+
     pub fn session_key(&self) -> Option<&str> {
         self.session_key.as_deref()
+    }
+
+    /// 让下一次 `load_rgb` 不再因 session_key 相同而跳过, 供宿主在改完
+    /// 其它组合的辅助线/布局后强制重载当前页.
+    pub fn invalidate_session(&mut self) {
+        self.session_key = None;
     }
 
     /// 从内存 RGB 载入 (组内成员裁切图); 坐标相对该裁切图.
@@ -46,6 +56,7 @@ impl MaskToolApp {
         rgb: image::RgbImage,
         session_key: String,
         masks: Vec<MaskRect>,
+        guides: GuideState,
         label: &str,
         cx: &mut Context<Self>,
     ) {
@@ -69,6 +80,8 @@ impl MaskToolApp {
         self.img_w = w;
         self.img_h = h;
         self.masks = masks;
+        self.guides = guides;
+        self.guide_selected.clear();
         self.selected.clear();
         self.restore_history_for(&session_key);
         self.zoom = 1.0;
@@ -94,13 +107,52 @@ impl MaskToolApp {
         self.img_w = 0;
         self.img_h = 0;
         self.masks.clear();
+        self.guides = GuideState::default();
+        self.guide_selected.clear();
         self.selected.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.drag = None;
         self.poly_draft = None;
         self.poly_cursor = None;
+        self.block_heights.clear();
+        self.block_layout.clear();
+        self.block_tiles.clear();
+        self.block_bg = None;
+        self.piece_staff_ys.clear();
+        self.block_hoff = 0;
+        self.block_voff = 0;
+        self.block_bg_left = 0;
+        self.block_bg_top = 0;
+        self.block_shows_bg = false;
         self.status = message.into();
+        cx.notify();
+    }
+
+    /// 更新当前会话预览图 (对齐/全局撤重后), 不碰撤重栈、缩放和平移.
+    pub fn replace_session_image(
+        &mut self,
+        rgb: image::RgbImage,
+        masks: Vec<MaskRect>,
+        guides: GuideState,
+        cx: &mut Context<Self>,
+    ) {
+        let (w, h) = rgb.dimensions();
+        let mut rgba: RgbaImage = ImageBuffer::from_fn(w, h, |x, y| {
+            let p = rgb.get_pixel(x, y);
+            image::Rgba([p[0], p[1], p[2], 255])
+        });
+        for px in rgba.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        let render = Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]));
+        self.rgb_image = Some(rgb);
+        self.render_image = Some(render);
+        self.img_w = w;
+        self.img_h = h;
+        self.masks = masks;
+        self.guides = guides;
+        self.guide_selected.clear();
         cx.notify();
     }
 
@@ -140,6 +192,8 @@ impl MaskToolApp {
                 self.img_w = w;
                 self.img_h = h;
                 self.masks = restored;
+                self.guides = GuideState::default();
+                self.guide_selected.clear();
                 self.selected.clear();
                 self.restore_history_for(&path.display().to_string());
                 self.zoom = 1.0;

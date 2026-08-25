@@ -17,16 +17,23 @@ pub fn sample_bg_stats(img: &RgbImage, ink_threshold: i32) -> ([f32; 3], [f32; 3
 }
 
 fn stats_filtered(img: &RgbImage, ink_threshold: i32) -> Option<([f32; 3], [f32; 3])> {
-    let mut sum = [0f64; 3];
+    // 取"众数" (每个通道里出现次数最多的那个值) 而不是算术平均: 采样区域
+    // 边缘常混入抗锯齿的过渡灰色像素 (没深到被当作墨迹排除, 但也不是纯
+    // 背景), 平均值会被这些过渡像素拉偏 (比如输出 247 而不是纸张真正的
+    // 250+); 众数就是背景里占比最大的那一种颜色, 更接近"这张纸真正的
+    // 底色", 也不受少数异常样本影响.
+    let mut hist = [[0u32; 256]; 3];
     let mut sum_sq = [0f64; 3];
+    let mut sum = [0f64; 3];
     let mut n = 0u64;
     for p in img.pixels() {
         let gray = 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
         if gray as i32 >= ink_threshold {
             for c in 0..3 {
-                let v = p[c] as f64;
-                sum[c] += v;
-                sum_sq[c] += v * v;
+                let v = p[c];
+                hist[c][v as usize] += 1;
+                sum[c] += v as f64;
+                sum_sq[c] += v as f64 * v as f64;
             }
             n += 1;
         }
@@ -34,16 +41,21 @@ fn stats_filtered(img: &RgbImage, ink_threshold: i32) -> Option<([f32; 3], [f32;
     if n < 16 {
         return None;
     }
-    let mut mean = [0f32; 3];
+    let mut mode = [0f32; 3];
     let mut std = [0f32; 3];
     for c in 0..3 {
+        let (peak, _) = hist[c]
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, &count)| count)
+            .unwrap_or((245, &0));
+        mode[c] = peak as f32;
         let m = sum[c] / n as f64;
         let var = (sum_sq[c] / n as f64 - m * m).max(0.0);
-        mean[c] = m as f32;
         // 限制噪声幅度, 避免个别异常样本 (残留墨点漏检等) 导致花斑.
         std[c] = (var.sqrt() as f32).min(18.0);
     }
-    Some((mean, std))
+    Some((mode, std))
 }
 
 /// 生成 `width x height` 的背景填充图块. `seed` 保证同一参数下结果稳定
@@ -65,6 +77,20 @@ pub fn synth_fill(width: u32, height: u32, mean: [f32; 3], std: [f32; 3], seed: 
         }
     }
     img
+}
+
+/// 纯色填充 (取统计均值, 不加噪声): 比 `synth_fill` 快得多 (只是
+/// `memset` 级别的整块填色, 没有逐像素随机数), 供拖动分块这类每帧都要
+/// 重新生成填充区域、且区域可能很大的场景使用.
+pub fn flat_fill(width: u32, height: u32, mean: [f32; 3]) -> RgbImage {
+    let w = width.max(1);
+    let h = height.max(1);
+    let px = image::Rgb([
+        mean[0].round().clamp(0.0, 255.0) as u8,
+        mean[1].round().clamp(0.0, 255.0) as u8,
+        mean[2].round().clamp(0.0, 255.0) as u8,
+    ]);
+    RgbImage::from_pixel(w, h, px)
 }
 
 /// 从图像边缘 (顶部或底部) 取 `sample_rows` 行作为背景采样区域; 若图像

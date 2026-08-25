@@ -15,6 +15,46 @@ impl ScoreSyncApp {
         }
     }
 
+    /// 页签拖拽跟手. 每个页签都有 `block_mouse_except_scroll`, 父级
+    /// `tab_bar_row` 在页签上方时 `is_hovered` 为 false, 必须像「输出组合」
+    /// 那样在命中的那一项上更新, 否则拖到其他页签只会触发 hover 整页重绘、虚影卡住.
+    pub(super) fn apply_tab_reorder_at(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let Some(DragKind::TabReorder {
+            from,
+            start_x,
+            start_y,
+            origin_x,
+            origin_y,
+            mut armed,
+            ..
+        }) = self.drag.take()
+        else {
+            return;
+        };
+        if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
+            armed = true;
+        }
+        let (to, line_at, line_after) = if armed {
+            self.resolve_tab_drop(from, x, y)
+        } else {
+            (from, None, false)
+        };
+        self.drag = Some(DragKind::TabReorder {
+            from,
+            to,
+            line_at,
+            line_after,
+            start_x,
+            start_y,
+            origin_x,
+            origin_y,
+            x,
+            y,
+            armed,
+        });
+        cx.notify();
+    }
+
     pub(super) fn resolve_tab_drop(
         &self,
         from: usize,
@@ -25,7 +65,11 @@ impl ScoreSyncApp {
         if n == 0 {
             return (from, None, false);
         }
-        for i in 0..n {
+        // 只扫当前虚拟化渲染出来的可见范围: 范围外的下标本来就不在
+        // `tab_bounds` 里, 大工程 (几百页) 拖动排序时每帧全量扫一遍 `0..n`
+        // 会白白浪费大量无意义的 HashMap 查找, 是页签拖拽卡顿的根因之一.
+        let (start, end) = self.visible_tab_range();
+        for i in start..end {
             let Some(b) = self.tab_bounds.get(&i) else {
                 continue;
             };
@@ -435,20 +479,12 @@ impl ScoreSyncApp {
         let bounds = handle.bounds();
         let track_w = f32::from(bounds.size.width).max(1.0);
         let show_h = max_x > 1.0 && track_w > 1.0;
+        let tab_reordering = matches!(self.drag, Some(DragKind::TabReorder { .. }));
         let drag_from = match &self.drag {
             Some(DragKind::TabReorder {
                 from, armed: true, ..
             }) => Some(*from),
             _ => None,
-        };
-        let (line_at, line_after) = match &self.drag {
-            Some(DragKind::TabReorder {
-                line_at,
-                line_after,
-                armed: true,
-                ..
-            }) => (*line_at, *line_after),
-            _ => (None, false),
         };
 
         let mut row = div()
@@ -481,7 +517,6 @@ impl ScoreSyncApp {
             let idx = tab.index;
             let active = tab.active;
             let dragging = drag_from == Some(idx);
-            let show_line = line_at == Some(idx);
             let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
             let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
             row = row.child(
@@ -498,24 +533,20 @@ impl ScoreSyncApp {
                     .bg(bg)
                     .text_color(fg)
                     .text_sm()
-                    .cursor_pointer()
+                    .when(!tab_reordering, |d| d.cursor_pointer())
                     .block_mouse_except_scroll()
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .when(dragging, |d| d.opacity(0.35))
-                    .when(show_line && !line_after, |d| {
-                        d.border_l_2().border_color(rgb(0xf59e0b))
+                    .when(!tab_reordering, |d| {
+                        d.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                this.note_tab_hover(idx, cx);
+                            } else if this.tab_hover_idx == Some(idx) {
+                                this.clear_tab_hover(cx);
+                            }
+                        }))
                     })
-                    .when(show_line && line_after, |d| {
-                        d.border_r_2().border_color(rgb(0xf59e0b))
-                    })
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.note_tab_hover(idx, cx);
-                        } else if this.tab_hover_idx == Some(idx) {
-                            this.clear_tab_hover(cx);
-                        }
-                    }))
                     .child(Self::measure_item_bounds(cx.entity(), idx, "tab"))
                     .child(tab.label.clone())
                     .child(
@@ -523,12 +554,15 @@ impl ScoreSyncApp {
                             .id(SharedString::from(format!("tab-close-{idx}")))
                             .px_1()
                             .rounded_sm()
-                            .hover(|s| s.bg(rgb(0x94a3b8)))
-                            .block_mouse_except_scroll()
+                            .when(!tab_reordering, |d| {
+                                d.hover(|s| s.bg(rgb(0x94a3b8)))
+                                    .block_mouse_except_scroll()
+                            })
                             .child("×")
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|_, _, _, cx| {
+                                cx.listener(move |this, _, _, cx| {
+                                    this.tab_close_press = Some(idx);
                                     cx.stop_propagation();
                                 }),
                             )
@@ -536,7 +570,11 @@ impl ScoreSyncApp {
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    // 拖拽排序松手落在叉上时不关页
+                                    let press = this.tab_close_press.take();
+                                    // 必须按下就在这一叉上: 从别的页签拖过来松手不算关闭.
+                                    if press != Some(idx) {
+                                        return;
+                                    }
                                     if matches!(this.drag, Some(DragKind::TabReorder { .. })) {
                                         return;
                                     }
@@ -560,6 +598,7 @@ impl ScoreSyncApp {
                                 my,
                             );
                             this.tab_add_press = false;
+                            this.tab_close_press = None;
                             this.drag = Some(DragKind::TabReorder {
                                 from: idx,
                                 to: idx,
@@ -576,6 +615,19 @@ impl ScoreSyncApp {
                             cx.notify();
                         }),
                     )
+                    // 页签挡住了父级 hover, 必须在自身上跟手 (同输出组合每一行).
+                    .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                        let x = f32::from(ev.position.x);
+                        let y = f32::from(ev.position.y);
+                        if this.forward_capture_drags(x, y, cx) {
+                            return;
+                        }
+                        if !matches!(this.drag, Some(DragKind::TabReorder { .. })) {
+                            return;
+                        }
+                        this.apply_tab_reorder_at(x, y, cx);
+                        cx.stop_propagation();
+                    }))
                     .on_mouse_up(
                         MouseButton::Right,
                         cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
@@ -645,42 +697,9 @@ impl ScoreSyncApp {
                 if !matches!(this.drag, Some(DragKind::TabReorder { .. })) {
                     return;
                 }
-                this.clear_tab_hover(cx);
-                if let Some(DragKind::TabReorder {
-                    from,
-                    start_x,
-                    start_y,
-                    origin_x,
-                    origin_y,
-                    mut armed,
-                    ..
-                }) = this.drag.take()
-                {
-                    let x = f32::from(ev.position.x);
-                    let y = f32::from(ev.position.y);
-                    if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
-                        armed = true;
-                    }
-                    let (to, line_at, line_after) = if armed {
-                        this.resolve_tab_drop(from, x, y)
-                    } else {
-                        (from, None, false)
-                    };
-                    this.drag = Some(DragKind::TabReorder {
-                        from,
-                        to,
-                        line_at,
-                        line_after,
-                        start_x,
-                        start_y,
-                        origin_x,
-                        origin_y,
-                        x,
-                        y,
-                        armed,
-                    });
-                    cx.notify();
-                }
+                this.apply_tab_reorder_at(x, y, cx);
+                // 页签间隙仍由本行处理; 阻止再冒泡到根节点重复扫 resolve_tab_drop.
+                cx.stop_propagation();
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -791,6 +810,37 @@ impl ScoreSyncApp {
             );
         }
         wrap
+    }
+
+    /// 插入位置指示: 绝对定位细线, 不改页签宽度, 避免拖过其他页签时整栏回流.
+    pub(super) fn tab_drop_line_overlay(&self) -> impl IntoElement {
+        let Some(DragKind::TabReorder {
+            line_at: Some(i),
+            line_after,
+            armed: true,
+            ..
+        }) = &self.drag
+        else {
+            return div().into_any_element();
+        };
+        let Some(b) = self.tab_bounds.get(i) else {
+            return div().into_any_element();
+        };
+        let left = f32::from(b.origin.x);
+        let x = if *line_after {
+            left + f32::from(b.size.width)
+        } else {
+            left
+        };
+        div()
+            .id("tab-drop-line")
+            .absolute()
+            .left(px(x - 1.0))
+            .top(px(f32::from(b.origin.y)))
+            .w(px(2.))
+            .h(px(f32::from(b.size.height)))
+            .bg(rgb(0xf59e0b))
+            .into_any_element()
     }
 
     pub(super) fn tab_drag_ghost(&self) -> impl IntoElement {

@@ -8,6 +8,7 @@ use image::RgbImage;
 use crate::staff_detect::{detect_bands, Band, StaffGrouping};
 pub use mask_tool::layout::BlockAdjust;
 use mask_tool::color_prefs::MaskColorPrefs;
+pub use mask_tool::guide::GuideState;
 use mask_tool::mask::MaskRect;
 use score_video::model::TimelineSnapshot;
 
@@ -209,6 +210,24 @@ pub struct DocState {
     /// 组合内分块的位置/尺寸微调 (蒙版编辑用, 只影响拼合图): key = group_id,
     /// value 与该组 `region_ids` 一一对应 (缺省即视为无调整).
     pub group_block_layout: HashMap<String, Vec<BlockAdjust>>,
+    /// 组合拼合图在底色画布中相对默认居中位置的纵向手动偏移 (像素, 负值
+    /// 表示比默认居中更靠上): key = group_id, 缺省 (0) 即维持原有的自动
+    /// 居中. 蒙版编辑把居中留白折进第一块 `gap_before` (页面绝对坐标)
+    /// 后, 此偏移会写成 `-natural_voff`, 让拼合图顶对齐到页顶.
+    pub group_voff_shift: HashMap<String, i64>,
+    /// 组合内的辅助线 (蒙版画布内的固定参考线, 仅用于手动对齐, 不参与
+    /// 导出/合成): key = group_id.
+    pub group_guides: HashMap<String, GuideState>,
+    /// 蒙版「辅助线」左键开关是否作用到全部组合.
+    pub guides_global: bool,
+    /// 同样根数辅助线的组合是否同步位置.
+    pub guides_sync_positions: bool,
+    /// 按块数 + 画布几何预计算的默认辅助线 (导入/建组时写入, 不含用户
+    /// 拖动). 不进工程文件, 随时可从几何重算. 全局开启时拷到 `group_guides`.
+    pub group_guide_defaults: HashMap<String, GuideState>,
+    /// 各分块条带的谱表锚点 (相对条带顶, `None` = 已判定非谱表).
+    /// 导入/识别时写入, 不进工程文件. 缺 key 表示还没算过.
+    pub region_staff_anchors: HashMap<String, Option<i32>>,
     /// 蒙版/画笔默认色、透明度与最近使用色
     pub mask_prefs: MaskColorPrefs,
     /// 用户已手动拖拽调序「输出组合」; 为 true 时不再自动按页/y 排序
@@ -265,6 +284,12 @@ impl DocState {
             staff_grouping: self.staff_grouping,
             group_masks: self.group_masks.clone(),
             group_block_layout: self.group_block_layout.clone(),
+            group_voff_shift: self.group_voff_shift.clone(),
+            group_guides: self.group_guides.clone(),
+            guides_global: self.guides_global,
+            guides_sync_positions: self.guides_sync_positions,
+            group_guide_defaults: self.group_guide_defaults.clone(),
+            region_staff_anchors: self.region_staff_anchors.clone(),
             mask_prefs: self.mask_prefs.clone(),
             groups_manual_order: self.groups_manual_order,
             bg_enabled: self.bg_enabled,
@@ -306,6 +331,230 @@ impl DocState {
         } else {
             self.group_block_layout.insert(group_id.to_string(), layout);
         }
+    }
+
+    pub fn get_group_voff_shift(&self, group_id: &str) -> i64 {
+        self.group_voff_shift.get(group_id).copied().unwrap_or(0)
+    }
+
+    pub fn set_group_voff_shift(&mut self, group_id: &str, shift: i64) {
+        if shift == 0 {
+            self.group_voff_shift.remove(group_id);
+        } else {
+            self.group_voff_shift.insert(group_id.to_string(), shift);
+        }
+    }
+
+    pub fn get_group_guides(&self, group_id: &str) -> GuideState {
+        self.group_guides.get(group_id).cloned().unwrap_or_default()
+    }
+
+    pub fn set_group_guides(&mut self, group_id: &str, guides: GuideState) {
+        if guides.is_default() {
+            self.group_guides.remove(group_id);
+        } else {
+            self.group_guides.insert(group_id.to_string(), guides);
+        }
+    }
+
+    /// 组内各成员原始高度 (region y0/y1, 不需要像素).
+    pub fn group_member_heights(&self, group_id: &str) -> Vec<(String, u32)> {
+        let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
+            return Vec::new();
+        };
+        g.region_ids
+            .iter()
+            .filter_map(|rid| {
+                let (_, r) = self.find_region(rid)?;
+                Some((rid.clone(), (r.y1 - r.y0 + 1).max(0) as u32))
+            })
+            .collect()
+    }
+
+    /// 拼合图宽: 取成员所在页宽的最大值.
+    pub fn group_sheet_width(&self, group_id: &str) -> u32 {
+        let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
+            return 1;
+        };
+        g.region_ids
+            .iter()
+            .filter_map(|rid| {
+                let (pi, _) = self.find_region(rid)?;
+                Some(self.pages.get(pi)?.width().max(1))
+            })
+            .max()
+            .unwrap_or(1)
+    }
+
+    /// 预览画布几何 (不含像素). 无底色时画布就是拼合图.
+    pub fn group_preview_frame(&self, group_id: &str) -> Option<apply_bg::process::PreviewFrame> {
+        let heights = self.group_member_heights(group_id);
+        if heights.is_empty() {
+            return None;
+        }
+        let sw = self.group_sheet_width(group_id);
+        let sh = mask_tool::layout::sheet_height(&heights, self.get_block_layout(group_id));
+        if !self.bg_enabled {
+            return Some(apply_bg::process::PreviewFrame {
+                canvas_w: sw,
+                canvas_h: sh,
+                hoff: 0,
+                voff: 0,
+                bg_left: 0,
+                bg_top: 0,
+                shows_bg: false,
+                content_scale: 1.0,
+            });
+        }
+        let bg = self.bg_image.as_ref()?;
+        Some(apply_bg::process::preview_frame(
+            sw,
+            sh,
+            bg.width(),
+            bg.height(),
+            self.bg_aspect_w,
+            self.bg_aspect_h,
+            self.get_group_voff_shift(group_id),
+        ))
+    }
+
+    /// 按组内五线谱块数 (有预计算锚点则只数认得出谱表的; 否则退回总块数)
+    /// 和预览画布高生成默认辅助线, 不读像素. 一根时落在两端中点 (比页心
+    /// 略偏下). 文字/脚注默认不占线, 需手动加根数才纳入对齐.
+    pub fn compute_default_guides(&self, group_id: &str) -> GuideState {
+        let n = self.group_staff_block_count(group_id);
+        let h = self
+            .group_preview_frame(group_id)
+            .map(|f| f.canvas_h as i32)
+            .unwrap_or(0);
+        let mut g = GuideState::default();
+        g.set_staff_slots(n, h);
+        g
+    }
+
+    fn group_staff_block_count(&self, group_id: &str) -> u32 {
+        let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
+            return 0;
+        };
+        let known = g
+            .region_ids
+            .iter()
+            .filter(|id| self.region_staff_anchors.contains_key(*id))
+            .count();
+        if known == 0 {
+            return g.region_ids.len() as u32;
+        }
+        g.region_ids
+            .iter()
+            .filter(|id| matches!(self.region_staff_anchors.get(*id), Some(Some(_))))
+            .count() as u32
+    }
+
+    /// 为指定组合写入默认辅助线. `guides_global` 时若该组还没有显示用的
+    /// 线, 一并拷过去.
+    pub fn seed_guide_defaults_for(&mut self, gids: &[String]) {
+        for gid in gids {
+            let d = self.compute_default_guides(gid);
+            if d.lines.is_empty() {
+                self.group_guide_defaults.remove(gid);
+            } else {
+                self.group_guide_defaults.insert(gid.clone(), d.clone());
+            }
+            if self.guides_global
+                && self.get_group_guides(gid).lines.is_empty()
+                && !d.lines.is_empty()
+            {
+                self.set_group_guides(gid, d);
+            }
+        }
+    }
+
+    /// 刷新全部组合的默认辅助线 (建组/改底色后).
+    pub fn seed_guide_defaults(&mut self) {
+        let valid: HashSet<String> = self.groups.iter().map(|g| g.id.clone()).collect();
+        self.group_guide_defaults.retain(|k, _| valid.contains(k));
+        let gids: Vec<String> = self.groups.iter().map(|g| g.id.clone()).collect();
+        self.seed_guide_defaults_for(&gids);
+    }
+
+    pub fn ingest_region_staff_anchors(&mut self, items: impl IntoIterator<Item = (String, Option<i32>)>) {
+        for (id, y) in items {
+            self.region_staff_anchors.insert(id, y);
+        }
+    }
+
+    /// 当前页图已在内存时, 给尚未预算的分块补谱表锚点 (不读磁盘).
+    pub fn seed_region_anchors_for_page(&mut self, page_idx: usize) {
+        let Some(page) = self.pages.get(page_idx) else {
+            return;
+        };
+        let Some(img) = page.image.as_ref() else {
+            return;
+        };
+        let thr = self.ink_threshold;
+        let bands: Vec<(String, i32, i32)> = page
+            .regions
+            .values()
+            .filter(|r| !self.region_staff_anchors.contains_key(&r.id))
+            .map(|r| (r.id.clone(), r.y0, r.y1))
+            .collect();
+        if bands.is_empty() {
+            return;
+        }
+        let computed: Vec<(String, Option<i32>)> = bands
+            .into_iter()
+            .map(|(id, y0, y1)| {
+                (id, mask_tool::staff::band_staff_anchor(img, y0, y1, thr))
+            })
+            .collect();
+        self.ingest_region_staff_anchors(computed);
+    }
+
+    pub fn guided_groups_anchors_ready(&self) -> bool {
+        self.groups.iter().all(|g| {
+            if self.get_group_guides(&g.id).lines.is_empty() {
+                return true;
+            }
+            g.region_ids
+                .iter()
+                .all(|rid| self.region_staff_anchors.contains_key(rid))
+        })
+    }
+
+    pub fn block_align_anchors_for_group(
+        &self,
+        group_id: &str,
+    ) -> Option<Vec<mask_tool::staff::BlockAlignAnchor>> {
+        let heights = self.group_member_heights(group_id);
+        if heights.is_empty() {
+            return None;
+        }
+        let layout = self.get_block_layout(group_id);
+        let spans = mask_tool::layout::compute_spans(&heights, layout);
+        let mut out = Vec::with_capacity(spans.len());
+        for (rid, y0, y1) in spans {
+            let piece_y = self.region_staff_anchors.get(&rid).copied().flatten();
+            let extra = mask_tool::layout::BlockAdjust::find(layout, &rid)
+                .map(|a| a.extra_top)
+                .unwrap_or(0);
+            let span_h = (y1 - y0 + 1) as i32;
+            out.push(mask_tool::staff::block_anchor_from_piece_y(
+                rid, piece_y, extra, span_h,
+            ));
+        }
+        Some(out)
+    }
+
+    /// 全局开启: 缺线的组合用预计算默认值填上. 不读页图.
+    pub fn apply_guides_global_on(&mut self) {
+        self.guides_global = true;
+        self.seed_guide_defaults();
+    }
+
+    /// 全局关闭: 清掉显示用的线, 默认值保留以便再开.
+    pub fn apply_guides_global_off(&mut self) {
+        self.guides_global = false;
+        self.group_guides.clear();
     }
 
     /// 同步确保某页像素在内存中.
@@ -397,7 +646,8 @@ impl DocState {
 
     /// 组内各成员的原始裁切片段 (未应用 `group_block_layout` 微调), 与
     /// `region_ids` 顺序一致; 调用前须 `ensure_group_pages`. 供蒙版编辑
-    /// 里的「移动分块」拖动使用 (画布本地即时重拼, 不必每帧回读磁盘).
+    /// 里拖动「组合分块」使用: 已在内存中, 不必每帧回读磁盘, 只是重新
+    /// 拼接 (含底色合成) 交回蒙版画布显示.
     pub fn group_member_pieces(&self, group_id: &str) -> Vec<(String, image::RgbImage)> {
         let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
             return Vec::new();
@@ -413,21 +663,43 @@ impl DocState {
     /// 有的纯拼接快速路径 (性能/结果与旧版本完全一致).
     pub fn compose_group(&self, group_id: &str) -> Option<image::RgbImage> {
         let parts = self.group_member_pieces(group_id);
+        self.compose_group_impl(group_id, &parts, None)
+    }
+
+    /// 同 `compose_group`, 但各块裁切片段与背景色统计都由调用方预先准备
+    /// 并缓存好 (`parts` 须与 `group_member_pieces` 同序; `stats` 为
+    /// `region_id` -> 统计量). 拖动分块时宿主每帧都要重新拼合预览图,
+    /// 用这个版本可以避免每帧重新从页图裁切 + 重新扫描像素算统计 (这两步
+    /// 才是真正耗时的部分, 拼接本身只是内存搬运).
+    pub fn compose_group_with_parts_and_stats(
+        &self,
+        group_id: &str,
+        parts: &[(String, image::RgbImage)],
+        stats: &std::collections::HashMap<String, mask_tool::layout::PieceStats>,
+    ) -> Option<image::RgbImage> {
+        self.compose_group_impl(group_id, parts, Some(stats))
+    }
+
+    fn compose_group_impl(
+        &self,
+        group_id: &str,
+        parts: &[(String, image::RgbImage)],
+        stats: Option<&std::collections::HashMap<String, mask_tool::layout::PieceStats>>,
+    ) -> Option<image::RgbImage> {
         if parts.is_empty() {
             return None;
         }
         let layout = self.get_block_layout(group_id);
         if layout.is_empty() {
-            let mut parts: Vec<image::RgbImage> = parts.into_iter().map(|(_, p)| p).collect();
-            let max_w = parts.iter().map(|p| p.width()).max().unwrap_or(1);
-            if parts.len() == 1 && parts[0].width() == max_w {
-                return Some(parts.remove(0));
+            let max_w = parts.iter().map(|(_, p)| p.width()).max().unwrap_or(1);
+            if parts.len() == 1 && parts[0].1.width() == max_w {
+                return Some(parts[0].1.clone());
             }
-            let total_h: u32 = parts.iter().map(|p| p.height()).sum();
+            let total_h: u32 = parts.iter().map(|(_, p)| p.height()).sum();
             let mut combined =
                 image::RgbImage::from_pixel(max_w, total_h, image::Rgb([255, 255, 255]));
             let mut yy = 0u32;
-            for p in &parts {
+            for (_, p) in parts {
                 let src = if p.width() != max_w {
                     let mut canvas = image::RgbImage::from_pixel(
                         max_w,
@@ -444,11 +716,49 @@ impl DocState {
             }
             return Some(combined);
         }
-        Some(mask_tool::layout::stitch_with_layout(
-            &parts,
+        let piece_stats: Vec<mask_tool::layout::PieceStats> = parts
+            .iter()
+            .map(|(rid, img)| {
+                stats
+                    .and_then(|cache| cache.get(rid).copied())
+                    .unwrap_or_else(|| mask_tool::layout::compute_piece_stats(img, self.ink_threshold))
+            })
+            .collect();
+        Some(mask_tool::layout::stitch_with_stats(
+            parts,
+            &piece_stats,
             layout,
-            self.ink_threshold,
         ))
+    }
+
+    /// 组合最前面那个块自己的 `gap_before` (人为拖动第一块腾出的、没有
+    /// 真实内容的顶端留白). 启用底色层时合成阶段要跳过贴这一段, 让底色
+    /// 直接透出来, 见 [`Self::compose_group_preview_from`] 与
+    /// [`Self::render_group_final`].
+    pub fn group_leading_gap(&self, group_id: &str) -> u32 {
+        let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
+            return 0;
+        };
+        let Some(first_rid) = g.region_ids.first() else {
+            return 0;
+        };
+        mask_tool::layout::BlockAdjust::find(self.get_block_layout(group_id), first_rid)
+            .map(|a| a.gap_before.max(0) as u32)
+            .unwrap_or(0)
+    }
+
+    /// 组合最后一块后面的末端留白 (旧版向上拖过页顶后缩小内部块用;
+    /// 现已改为碰到页顶即停, 此字段多为工程兼容).
+    pub fn group_trailing_gap(&self, group_id: &str) -> u32 {
+        let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
+            return 0;
+        };
+        let Some(last_rid) = g.region_ids.last() else {
+            return 0;
+        };
+        mask_tool::layout::BlockAdjust::find(self.get_block_layout(group_id), last_rid)
+            .map(|a| a.gap_after.max(0) as u32)
+            .unwrap_or(0)
     }
 
     /// 组合内各块在拼合图中的纵向范围 (`(region_id, comp_y0, comp_y1)`),
@@ -484,6 +794,7 @@ impl DocState {
         self.bg_aspect_w = aspect_w;
         self.bg_aspect_h = aspect_h;
         self.bg_enabled = true;
+        self.seed_guide_defaults();
         Ok(())
     }
 
@@ -492,21 +803,55 @@ impl DocState {
         self.bg_enabled = false;
         self.bg_image = None;
         self.bg_source_path = None;
+        self.seed_guide_defaults();
     }
 
     /// 拼合图预览 (供蒙版/视频面板显示): 若已启用工程底色, 叠加底色预览
     /// (contain: 上下或左右补边, 不烧入蒙版). 返回 (预览图, 谱面在预览图
     /// 中的横向/纵向偏移, 供调用方换算蒙版坐标).
     pub fn compose_group_preview(&self, group_id: &str) -> Option<(RgbImage, i64, i64)> {
-        let sheet = self.compose_group(group_id)?;
+        self.compose_group_preview_from(group_id, self.compose_group(group_id))
+    }
+
+    /// 同 `compose_group_preview`, 但拼合图用调用方预先缓存好裁切片段与
+    /// 背景色统计的 `compose_group_with_parts_and_stats` 算出 (拖动分块
+    /// 时每帧调用, 避免卡顿).
+    pub fn compose_group_preview_with_parts_and_stats(
+        &self,
+        group_id: &str,
+        parts: &[(String, image::RgbImage)],
+        stats: &std::collections::HashMap<String, mask_tool::layout::PieceStats>,
+    ) -> Option<(RgbImage, i64, i64)> {
+        self.compose_group_preview_from(
+            group_id,
+            self.compose_group_with_parts_and_stats(group_id, parts, stats),
+        )
+    }
+
+    fn compose_group_preview_from(
+        &self,
+        group_id: &str,
+        sheet: Option<RgbImage>,
+    ) -> Option<(RgbImage, i64, i64)> {
+        let sheet = sheet?;
         if !self.bg_enabled {
             return Some((sheet, 0, 0));
         }
         let Some(bg) = self.bg_image.as_ref() else {
             return Some((sheet, 0, 0));
         };
-        match apply_bg::process::composite_preview(&sheet, bg, self.bg_aspect_w, self.bg_aspect_h)
-        {
+        let voff_shift = self.get_group_voff_shift(group_id);
+        let top_transparent = self.group_leading_gap(group_id);
+        let bottom_transparent = self.group_trailing_gap(group_id);
+        match apply_bg::process::composite_preview(
+            &sheet,
+            bg,
+            self.bg_aspect_w,
+            self.bg_aspect_h,
+            voff_shift,
+            top_transparent,
+            bottom_transparent,
+        ) {
             Ok((canvas, hoff, voff)) => Some((canvas, hoff, voff)),
             Err(_) => Some((sheet, 0, 0)),
         }
@@ -530,6 +875,9 @@ impl DocState {
                 bg,
                 self.bg_aspect_w,
                 self.bg_aspect_h,
+                self.get_group_voff_shift(group_id),
+                self.group_leading_gap(group_id),
+                self.group_trailing_gap(group_id),
             )?;
         }
         Ok(Some(combined))
@@ -795,6 +1143,15 @@ impl DocState {
     fn prune_orphan_masks(&mut self) {
         let valid: HashSet<String> = self.groups.iter().map(|g| g.id.clone()).collect();
         self.group_masks.retain(|k, _| valid.contains(k));
+        self.group_guides.retain(|k, _| valid.contains(k));
+        self.group_guide_defaults.retain(|k, _| valid.contains(k));
+        let valid_rids: HashSet<String> = self
+            .pages
+            .iter()
+            .flat_map(|p| p.regions.keys().cloned())
+            .chain(self.groups.iter().flat_map(|g| g.region_ids.iter().cloned()))
+            .collect();
+        self.region_staff_anchors.retain(|k, _| valid_rids.contains(k));
     }
 
     /// 去掉已经找不到 region 的组合和残留 rid.
@@ -929,6 +1286,7 @@ impl DocState {
             page.regions = regions;
         }
         self.rebuild_rid_index();
+        self.seed_region_anchors_for_page(page_idx);
         self.save_detect_sidecar(page_idx);
         if reset_groups {
             let page_regions: Vec<Region> = self.pages[page_idx]
@@ -971,6 +1329,7 @@ impl DocState {
             self.sort_groups();
             self.prune_dangling_groups_if_hydrated();
             self.ensure_active_group();
+            self.seed_guide_defaults();
         }
     }
 
@@ -1005,6 +1364,12 @@ impl DocState {
             page.regions = regions;
         }
         self.rebuild_rid_index();
+        for r in &file.regions {
+            if let Some(a) = &r.staff_anchor {
+                self.region_staff_anchors.insert(r.id.clone(), a.y);
+            }
+        }
+        self.seed_region_anchors_for_page(page_idx);
     }
 
     pub fn load_detect_sidecar(&mut self, page_idx: usize) -> bool {
@@ -1033,10 +1398,13 @@ impl DocState {
             regions: regions
                 .into_iter()
                 .map(|r| crate::detect_cache::CachedRegion {
-                    id: r.id,
+                    id: r.id.clone(),
                     y0: r.y0,
                     y1: r.y1,
                     kind: r.kind,
+                    staff_anchor: self.region_staff_anchors.get(&r.id).map(|y| {
+                        crate::detect_cache::CachedStaffAnchor { y: *y }
+                    }),
                 })
                 .collect(),
         };
@@ -1085,6 +1453,7 @@ impl DocState {
                 name: String::new(),
             })
             .collect();
+        let new_ids: Vec<String> = new_groups.iter().map(|g| g.id.clone()).collect();
         let insert_at = {
             let mut at = self.groups.len();
             for (i, g) in self.groups.iter().enumerate().rev() {
@@ -1099,6 +1468,7 @@ impl DocState {
         for (i, g) in new_groups.into_iter().enumerate() {
             self.groups.insert(insert_at + i, g);
         }
+        self.seed_guide_defaults_for(&new_ids);
         self.ensure_active_group();
     }
 
@@ -1108,6 +1478,7 @@ impl DocState {
         }
         self.prune_dangling_groups_if_hydrated();
         self.ensure_active_group();
+        self.seed_guide_defaults();
     }
 
     /// 把磁盘 sidecar 灌进尚未有 regions 的页. 返回灌入页数. 不改 groups.
@@ -1194,6 +1565,7 @@ impl DocState {
         for (i, g) in new_groups.into_iter().enumerate() {
             self.groups.insert(insert_at + i, g);
         }
+        self.seed_guide_defaults();
         self.ensure_active_group();
     }
 
@@ -1217,6 +1589,7 @@ impl DocState {
         self.groups_manual_order = false;
         self.sort_groups();
         self.ensure_active_group();
+        self.seed_guide_defaults();
     }
 
     #[allow(dead_code)]
@@ -1370,6 +1743,7 @@ impl DocState {
         self.groups = new_groups;
         self.sort_groups();
         self.active_group_id = Some(gid);
+        self.seed_guide_defaults();
         Ok(ids.len())
     }
 
@@ -1457,6 +1831,7 @@ impl DocState {
             return Ok(0);
         }
         self.sort_groups();
+        self.seed_guide_defaults();
         Ok(added)
     }
 
@@ -1483,6 +1858,7 @@ impl DocState {
         self.groups.splice(idx..=idx, singles);
         self.sort_groups();
         self.active_group_id = Some(first_id);
+        self.seed_guide_defaults();
         Ok(())
     }
 
@@ -1558,6 +1934,7 @@ impl DocState {
         }
         self.selected_region_ids = created.into_iter().collect();
         self.rebuild_rid_index();
+        self.seed_guide_defaults();
         format!("P{page_no} 已在 y={y} 切开 {n} 块.")
     }
 
@@ -1599,6 +1976,7 @@ impl DocState {
             self.sort_groups();
         }
         self.selected_region_ids = HashSet::from([rid]);
+        self.seed_guide_defaults();
         format!("P{page_no} 新建手动块 y={a}-{b} h={}.", b - a + 1)
     }
 
@@ -1698,11 +2076,41 @@ impl DocState {
     }
 
     pub fn close_page_at(&mut self, index: usize) -> bool {
-        if index >= self.pages.len() {
-            return false;
+        !self.close_pages_at(&[index]).is_empty()
+    }
+
+    /// 按原下标批量关页 (可乱序/重复). 返回被删页 id.
+    pub fn close_pages_at(&mut self, indices: &[usize]) -> Vec<String> {
+        let n = self.pages.len();
+        if n == 0 {
+            return Vec::new();
         }
-        let page = self.pages.remove(index);
-        let dead: HashSet<String> = page.regions.keys().cloned().collect();
+        let drop: HashSet<usize> = indices.iter().copied().filter(|&i| i < n).collect();
+        if drop.is_empty() {
+            return Vec::new();
+        }
+        let cur = self.current_page_index.min(n - 1);
+        let keep_id = if drop.contains(&cur) {
+            None
+        } else {
+            Some(self.pages[cur].id.clone())
+        };
+        let fallback_old = (cur + 1..n)
+            .find(|i| !drop.contains(i))
+            .or_else(|| (0..cur).rev().find(|i| !drop.contains(i)));
+
+        let mut kept = Vec::with_capacity(n - drop.len());
+        let mut dead_rids = HashSet::new();
+        let mut dead_pids = Vec::with_capacity(drop.len());
+        for (i, page) in self.pages.drain(..).enumerate() {
+            if drop.contains(&i) {
+                dead_rids.extend(page.regions.keys().cloned());
+                dead_pids.push(page.id);
+            } else {
+                kept.push(page);
+            }
+        }
+        self.pages = kept;
         self.groups = self
             .groups
             .iter()
@@ -1710,7 +2118,7 @@ impl DocState {
                 let remain: Vec<String> = g
                     .region_ids
                     .iter()
-                    .filter(|x| !dead.contains(*x))
+                    .filter(|x| !dead_rids.contains(*x))
                     .cloned()
                     .collect();
                 if remain.is_empty() {
@@ -1726,21 +2134,28 @@ impl DocState {
             .collect();
         self.selected_region_ids = self
             .selected_region_ids
-            .difference(&dead)
+            .difference(&dead_rids)
             .cloned()
             .collect();
         self.sort_groups();
         self.ensure_active_group();
         if self.pages.is_empty() {
             self.current_page_index = 0;
-        } else if self.current_page_index >= self.pages.len() {
-            self.current_page_index = self.pages.len() - 1;
-        } else if index < self.current_page_index {
-            self.current_page_index -= 1;
+        } else if let Some(id) = keep_id {
+            self.current_page_index = self
+                .pages
+                .iter()
+                .position(|p| p.id == id)
+                .unwrap_or(0);
+        } else if let Some(old) = fallback_old {
+            let new_idx = (0..old).filter(|i| !drop.contains(i)).count();
+            self.current_page_index = new_idx.min(self.pages.len() - 1);
+        } else {
+            self.current_page_index = 0;
         }
         self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
         self.rebuild_rid_index();
-        true
+        dead_pids
     }
 
     pub fn move_page(&mut self, from: usize, to: usize) {
@@ -1755,6 +2170,50 @@ impl DocState {
             self.current_page_index -= 1;
         } else if from > self.current_page_index && to <= self.current_page_index {
             self.current_page_index += 1;
+        }
+        self.sort_groups();
+        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.rebuild_rid_index();
+    }
+
+    /// 将 `moving` 整块 (保持相对顺序) 插到 `anchor` 之前/之后.
+    pub fn move_pages_block(&mut self, moving: &[usize], anchor: usize, after: bool) {
+        let n = self.pages.len();
+        if n == 0 || moving.is_empty() || anchor >= n {
+            return;
+        }
+        let moving_set: HashSet<usize> = moving.iter().copied().filter(|&i| i < n).collect();
+        if moving_set.is_empty() || moving_set.contains(&anchor) {
+            return;
+        }
+        let cur_id = self.pages.get(self.current_page_index).map(|p| p.id.clone());
+        let raw_insert = if after { anchor + 1 } else { anchor };
+        let insert_in_remaining =
+            raw_insert - moving_set.iter().filter(|&&i| i < raw_insert).count();
+
+        let mut remaining = Vec::with_capacity(n - moving_set.len());
+        let mut block = Vec::with_capacity(moving_set.len());
+        // 按原序抽出, 不按 moving 切片的乱序
+        for (i, p) in self.pages.drain(..).enumerate() {
+            if moving_set.contains(&i) {
+                block.push(p);
+            } else {
+                remaining.push(p);
+            }
+        }
+        let insert_at = insert_in_remaining.min(remaining.len());
+        for (j, p) in block.into_iter().enumerate() {
+            remaining.insert(insert_at + j, p);
+        }
+        self.pages = remaining;
+        if let Some(id) = cur_id {
+            if let Some(idx) = self.pages.iter().position(|p| p.id == id) {
+                self.current_page_index = idx;
+            } else if !self.pages.is_empty() {
+                self.current_page_index = self.current_page_index.min(self.pages.len() - 1);
+            } else {
+                self.current_page_index = 0;
+            }
         }
         self.sort_groups();
         self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
@@ -2288,6 +2747,7 @@ mod tests {
                     extra_top: 0,
                     extra_bottom: 5,
                     gap_before: 10,
+                    ..Default::default()
                 },
             ],
         );
@@ -2328,5 +2788,99 @@ mod tests {
             ],
         );
         assert!(doc.group_block_layout.get("g1").is_none());
+    }
+
+    fn named_stub(name: &str) -> Page {
+        let mut p = stub_page(80);
+        p.path = PathBuf::from(name);
+        p
+    }
+
+    fn page_names(doc: &DocState) -> Vec<String> {
+        doc.pages
+            .iter()
+            .map(|p| p.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn move_pages_block_inserts_after_anchor() {
+        let mut doc = DocState::new();
+        for i in 0..6 {
+            doc.pages.push(named_stub(&format!("{i}.png")));
+        }
+        doc.current_page_index = 2;
+        let cur_id = doc.pages[2].id.clone();
+        doc.move_pages_block(&[1, 2, 3], 5, true);
+        assert_eq!(page_names(&doc), vec!["0.png", "4.png", "5.png", "1.png", "2.png", "3.png"]);
+        assert_eq!(doc.pages.iter().position(|p| p.id == cur_id), Some(4));
+    }
+
+    #[test]
+    fn move_pages_block_inserts_before_anchor() {
+        let mut doc = DocState::new();
+        for i in 0..5 {
+            doc.pages.push(named_stub(&format!("{i}.png")));
+        }
+        doc.move_pages_block(&[3, 4], 0, false);
+        assert_eq!(page_names(&doc), vec!["3.png", "4.png", "0.png", "1.png", "2.png"]);
+        assert_eq!(doc.current_page_index, 2);
+    }
+
+    #[test]
+    fn close_pages_at_prefers_next_then_prev() {
+        let mut doc = DocState::new();
+        for i in 0..6 {
+            doc.pages.push(named_stub(&format!("{i}.png")));
+        }
+        seed_bands(&mut doc, 2, &[(10, 20)]);
+        seed_bands(&mut doc, 4, &[(10, 20)]);
+        doc.current_page_index = 2;
+        let dead = doc.close_pages_at(&[2, 3]);
+        assert_eq!(dead.len(), 2);
+        assert_eq!(page_names(&doc), vec!["0.png", "1.png", "4.png", "5.png"]);
+        assert_eq!(doc.pages[doc.current_page_index].path.file_name().unwrap(), "4.png");
+        assert_eq!(doc.groups.len(), 1);
+
+        doc.current_page_index = 3;
+        let dead = doc.close_pages_at(&[3]);
+        assert_eq!(dead.len(), 1);
+        assert_eq!(page_names(&doc), vec!["0.png", "1.png", "4.png"]);
+        assert_eq!(doc.pages[doc.current_page_index].path.file_name().unwrap(), "4.png");
+    }
+
+    #[test]
+    fn close_page_at_matches_batch() {
+        let mut doc = DocState::new();
+        for i in 0..3 {
+            doc.pages.push(named_stub(&format!("{i}.png")));
+        }
+        doc.current_page_index = 1;
+        assert!(doc.close_page_at(1));
+        assert_eq!(page_names(&doc), vec!["0.png", "2.png"]);
+        assert_eq!(doc.current_page_index, 1);
+    }
+
+    #[test]
+    fn global_guides_switch_uses_precomputed_defaults_and_can_turn_off() {
+        let mut doc = DocState::new();
+        doc.pages.push(stub_page(1440));
+        seed_bands(&mut doc, 0, &[(10, 200), (300, 490)]);
+        doc.seed_guide_defaults();
+        assert_eq!(doc.group_guide_defaults.len(), 2);
+        doc.apply_guides_global_on();
+        assert!(doc.guides_global);
+        let gid = doc.groups[0].id.clone();
+        let g = doc.get_group_guides(&gid);
+        assert_eq!(g.lines.len(), 1);
+        let h = doc.group_preview_frame(&gid).unwrap().canvas_h as i32;
+        let mid = h / 2;
+        assert!(g.lines[0] > mid, "单根应略低于画布中线: y={} mid={}", g.lines[0], mid);
+        doc.apply_guides_global_off();
+        assert!(!doc.guides_global);
+        assert!(doc.get_group_guides(&gid).lines.is_empty());
+        assert!(!doc.group_guide_defaults.is_empty());
+        doc.apply_guides_global_on();
+        assert_eq!(doc.get_group_guides(&gid).lines.len(), 1);
     }
 }

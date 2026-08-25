@@ -46,8 +46,11 @@ pub struct TextInput {
     /// 水平滚动: 内容左缘相对视口左缘的偏移 (像素, ≥0).
     scroll_offset: Pixels,
     _blur_subscription: Option<Subscription>,
+    _focus_subscription: Option<Subscription>,
     /// 刚失焦, 供外部一次性提交/校正.
     blur_commit_pending: bool,
+    /// 刚获得焦点, 供外部一次性响应 (如导入列表切到该文件).
+    focus_commit_pending: bool,
     /// 紧凑样式 (色盘 RGB 等窄行).
     compact: bool,
 }
@@ -68,7 +71,9 @@ impl TextInput {
             is_selecting: false,
             scroll_offset: px(0.),
             _blur_subscription: None,
+            _focus_subscription: None,
             blur_commit_pending: false,
+            focus_commit_pending: false,
             compact: false,
         }
     }
@@ -83,6 +88,18 @@ impl TextInput {
         let v = self.blur_commit_pending;
         self.blur_commit_pending = false;
         v
+    }
+
+    /// 取出并清除「刚获得焦点」标记.
+    pub fn take_focus_commit(&mut self) -> bool {
+        let v = self.focus_commit_pending;
+        self.focus_commit_pending = false;
+        v
+    }
+
+    fn on_focus_mark(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_commit_pending = true;
+        cx.notify();
     }
 
     /// 失焦: 收起选区到末尾, 并 notify 让外部提交.
@@ -201,6 +218,7 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window);
+        self.focus_commit_pending = true;
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -695,6 +713,10 @@ impl Render for TextInput {
         if self._blur_subscription.is_none() {
             let handle = self.focus_handle.clone();
             self._blur_subscription = Some(cx.on_blur(&handle, window, Self::on_blur_clear_selection));
+        }
+        if self._focus_subscription.is_none() {
+            let handle = self.focus_handle.clone();
+            self._focus_subscription = Some(cx.on_focus(&handle, window, Self::on_focus_mark));
         }
         let compact = self.compact;
         let (inner_h, text_size, line_h) = if compact {

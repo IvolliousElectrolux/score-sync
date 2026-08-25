@@ -146,8 +146,9 @@ impl ScoreSyncApp {
         )
     }
 
-    /// 限制平移: 页面拖出视口后, 上下左右最多再露出一个页面尺寸的空白,
-    /// 不能无限拖走.
+    /// 限制平移: 画布边界就是页面边界, 页面填不满视口的方向强制居中,
+    /// 填得满的方向最多平移到页面边缘贴视口边缘, 不允许露出页面之外的
+    /// 空白, 也不能无限拖走.
     pub(super) fn clamp_pan(&mut self) {
         let vw = f32::from(self.view_bounds.size.width);
         let vh = f32::from(self.view_bounds.size.height);
@@ -166,14 +167,18 @@ impl ScoreSyncApp {
         let drawn_h = self.img_h as f32 * scale;
         let centered_x = (vw - drawn_w) * 0.5;
         let centered_y = (vh - drawn_h) * 0.5;
-        // 页面左上角屏幕坐标 origin = centered + pan; 允许页面整体移出视口
-        // 后再多露出一个页面尺寸的空白 (不能无限远).
-        let pan_x_min = -2.0 * drawn_w - centered_x;
-        let pan_x_max = vw + drawn_w - centered_x;
-        let pan_y_min = -2.0 * drawn_h - centered_y;
-        let pan_y_max = vh + drawn_h - centered_y;
-        self.pan.x = self.pan.x.clamp(pan_x_min.min(pan_x_max), pan_x_max.max(pan_x_min));
-        self.pan.y = self.pan.y.clamp(pan_y_min.min(pan_y_max), pan_y_max.max(pan_y_min));
+        let (pan_x_min, pan_x_max) = if drawn_w <= vw {
+            (0.0, 0.0)
+        } else {
+            (vw - drawn_w - centered_x, -centered_x)
+        };
+        let (pan_y_min, pan_y_max) = if drawn_h <= vh {
+            (0.0, 0.0)
+        } else {
+            (vh - drawn_h - centered_y, -centered_y)
+        };
+        self.pan.x = self.pan.x.clamp(pan_x_min, pan_x_max);
+        self.pan.y = self.pan.y.clamp(pan_y_min, pan_y_max);
     }
 
     pub(super) fn screen_in_view(&self, pos: Point<Pixels>) -> (f32, f32) {

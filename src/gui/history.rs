@@ -21,6 +21,10 @@ impl ScoreSyncApp {
             active_group_id: self.doc.active_group_id.clone(),
             groups_manual_order: self.doc.groups_manual_order,
             staff_grouping: self.doc.staff_grouping,
+            group_guides: self.doc.group_guides.clone(),
+            group_guide_defaults: self.doc.group_guide_defaults.clone(),
+            guides_global: self.doc.guides_global,
+            guides_sync_positions: self.doc.guides_sync_positions,
         }
     }
 
@@ -46,6 +50,10 @@ impl ScoreSyncApp {
             active_group_id: self.doc.active_group_id.clone(),
             groups_manual_order: self.doc.groups_manual_order,
             staff_grouping: self.doc.staff_grouping,
+            group_guides: self.doc.group_guides.clone(),
+            group_guide_defaults: self.doc.group_guide_defaults.clone(),
+            guides_global: self.doc.guides_global,
+            guides_sync_positions: self.doc.guides_sync_positions,
         }
     }
 
@@ -112,6 +120,10 @@ impl ScoreSyncApp {
         self.doc.active_group_id = snap.active_group_id;
         self.doc.groups_manual_order = snap.groups_manual_order;
         self.doc.staff_grouping = snap.staff_grouping;
+        self.doc.group_guides = snap.group_guides;
+        self.doc.group_guide_defaults = snap.group_guide_defaults;
+        self.doc.guides_global = snap.guides_global;
+        self.doc.guides_sync_positions = snap.guides_sync_positions;
         self.doc.ensure_active_group();
         self.mark_dirty();
         self.mark_video_pool_dirty_all();

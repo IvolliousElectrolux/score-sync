@@ -69,6 +69,7 @@ impl MaskToolApp {
             return;
         }
         let mid = new_id();
+        let bound_block = self.resolve_bound_block(draft[0].1, draft.last().unwrap().1);
         let mut m = MaskRect {
             id: mid.clone(),
             x0: 0,
@@ -80,6 +81,7 @@ impl MaskToolApp {
             color: self.mask_color,
             poly_points: dedup,
             opacity: self.mask_opacity,
+            bound_block,
         };
         m.refresh_poly_bounds();
         self.push_undo();
@@ -169,29 +171,18 @@ impl MaskToolApp {
         cx.notify();
     }
 
-    pub fn toggle_move_blocks_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = if self.mode == ToolMode::MoveBlocks {
-            ToolMode::Select
-        } else {
-            ToolMode::MoveBlocks
-        };
-        self.drag = None;
-        self.color_picker_open = false;
-        self.poly_draft = None;
-        self.poly_cursor = None;
-        self.status = Self::mode_status(self.mode);
-        cx.notify();
-    }
-
     pub(super) fn mode_status(mode: ToolMode) -> SharedString {
         match mode {
             ToolMode::Draw => "框选".into(),
             ToolMode::Poly => "折线: 逐点连线, 靠近首点吸附闭环 (右键取消)".into(),
             ToolMode::Brush => "画笔 (拖动画布涂抹; 可改颜色/粗细)".into(),
             ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光".into(),
-            ToolMode::Select => format!("选择 (可 {}多选 / Shift 拖选)", apply_bg::primary_mod()).into(),
+            ToolMode::Select => format!(
+                "选择 (可 {}多选 / Shift 拖选); 未选中任何蒙版时可直接拖动/拉伸分块",
+                apply_bg::primary_mod()
+            )
+            .into(),
             ToolMode::Pan => "平移".into(),
-            ToolMode::MoveBlocks => "移动分块: 拖动块本体上下移动, 拖动上下边界裁剪/扩展 (仅上下, 慢拖更精细)".into(),
         }
     }
 
@@ -324,40 +315,105 @@ impl MaskToolApp {
         (dx, dy)
     }
 
+    fn snapshot(&self) -> UndoSnapshot {
+        UndoSnapshot {
+            masks: self.masks.clone(),
+            block_layout: self.block_layout.clone(),
+            voff_target: self.voff_target,
+            guides: self.guides.clone(),
+            host_guide_token: None,
+        }
+    }
+
+    /// 蒙版与「组合分块」调整共用同一条撤重时间线, 调哪个改哪个都先
+    /// `push_undo` 存一份两者的快照.
     pub(super) fn push_undo(&mut self) {
-        self.undo_stack.push(self.masks.clone());
+        self.undo_stack.push(self.snapshot());
         if self.undo_stack.len() > HISTORY_LIMIT {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
     }
 
+    /// 宿主全局辅助线操作: 把当前页状态压入撤重, 并带上宿主令牌, 使
+    /// Ctrl+Z/Y 能连同全部组合一起回滚.
+    pub fn push_undo_with_host_token(&mut self, token: u64) {
+        let mut snap = self.snapshot();
+        snap.host_guide_token = Some(token);
+        self.undo_stack.push(snap);
+        if self.undo_stack.len() > HISTORY_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// 从其它页撤回全局操作时, 丢掉本会话里对应令牌及其后的快照, 避免
+    /// 再撤一次把已经回滚的全局状态冲乱.
+    pub fn purge_host_token(&mut self, token: u64) {
+        fn strip(stack: &mut Vec<UndoSnapshot>, token: u64) {
+            if let Some(i) = stack
+                .iter()
+                .position(|s| s.host_guide_token == Some(token))
+            {
+                stack.truncate(i);
+            }
+        }
+        strip(&mut self.undo_stack, token);
+        strip(&mut self.redo_stack, token);
+        for h in self.histories.values_mut() {
+            strip(&mut h.undo, token);
+            strip(&mut h.redo, token);
+        }
+    }
+
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         let Some(prev) = self.undo_stack.pop() else {
+            self.guide_host_cmd = Some(GuideHostCmd::UndoGlobalFallback);
             self.status = "没有可撤回的操作.".into();
             cx.notify();
             return;
         };
-        self.redo_stack.push(self.masks.clone());
-        self.masks = prev;
+        let token = prev.host_guide_token;
+        let mut now = self.snapshot();
+        now.host_guide_token = token;
+        self.redo_stack.push(now);
+        self.masks = prev.masks;
+        self.block_layout = prev.block_layout;
+        self.voff_target = prev.voff_target;
+        self.guides = prev.guides;
+        self.guide_selected.clear();
         self.selected.clear();
         self.status = format!("已撤回. 蒙版 {} 个", self.masks.len()).into();
+        if let Some(t) = token {
+            self.guide_host_cmd = Some(GuideHostCmd::UndoGlobal(t));
+        }
         cx.notify();
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         let Some(next) = self.redo_stack.pop() else {
+            self.guide_host_cmd = Some(GuideHostCmd::RedoGlobalFallback);
             self.status = "没有可重做的操作.".into();
             cx.notify();
             return;
         };
-        self.undo_stack.push(self.masks.clone());
+        let token = next.host_guide_token;
+        let mut now = self.snapshot();
+        now.host_guide_token = token;
+        self.undo_stack.push(now);
         if self.undo_stack.len() > HISTORY_LIMIT {
             self.undo_stack.remove(0);
         }
-        self.masks = next;
+        self.masks = next.masks;
+        self.block_layout = next.block_layout;
+        self.voff_target = next.voff_target;
+        self.guides = next.guides;
+        self.guide_selected.clear();
         self.selected.clear();
         self.status = format!("已重做. 蒙版 {} 个", self.masks.len()).into();
+        if let Some(t) = token {
+            self.guide_host_cmd = Some(GuideHostCmd::RedoGlobal(t));
+        }
         cx.notify();
     }
 

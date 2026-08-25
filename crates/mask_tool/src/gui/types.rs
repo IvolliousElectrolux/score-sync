@@ -11,8 +11,11 @@ pub(crate) const BRUSH_SIZE_DEFAULT: f32 = 16.0;
 pub(crate) const POLY_SNAP_SCREEN_PX: f32 = 12.0;
 /// 橡皮: 超过此图像像素位移才视为拖擦 (否则为单击擦顶层).
 pub(crate) const ERASE_DRAG_SLOP_IMG: f32 = 3.0;
-/// 「移动分块」模式下, 命中块上下边界线的容差 (屏幕像素).
+/// 拖动「组合分块」时, 命中块上下边界线的容差 (屏幕像素).
 pub(crate) const BLOCK_EDGE_HIT_PX: f32 = 8.0;
+/// 拖动「组合分块」边界/间距时, 靠近 0 的吸附容差 (图像像素).
+/// 只吸附正在拖的那一侧, 其它块按守恒保持不动.
+pub(crate) const BLOCK_SNAP_ZERO_IMG: i32 = 6;
 /// 选色盘 SB 区边长 (屏幕像素).
 pub(crate) const SB_SIZE: f32 = 168.0;
 pub(crate) const HUE_BAR_W: f32 = 18.0;
@@ -239,8 +242,11 @@ pub(crate) enum DragKind {
         y1: f32,
     },
     /// 画笔描边: 正在编辑的蒙版 id; `undid` 表示本笔是否已压入撤销栈.
+    /// `start_iy`: 落笔起点的画布纵坐标, 松开时与终点一起判定绑定哪个
+    /// 「组合分块」成员 (见 `MaskToolApp::resolve_bound_block`).
     Brush {
         id: String,
+        start_iy: f32,
         undid: bool,
     },
     /// 平移模式: 空白处拖动画布
@@ -273,25 +279,55 @@ pub(crate) enum DragKind {
         undid: bool,
         wiping: bool,
     },
-    /// 「移动分块」: 整体拖动一个块上下移动 (只改它自己的 gap_before).
+    /// 「移动分块」: 整体拖动一个块上下移动, 优先消耗被拖动块与相邻块
+    /// 之间*已有*的间距, 只有真的撞上了才会继续波及下一个/上一个块, 见
+    /// `crate::layout::redistribute_for_block_move` 文档.
+    ///
+    /// `start_layout` 是拖动起点时的完整快照 (每帧都从这份快照重新分配,
+    /// 不做增量累加, 避免多帧误差累积). `start_voff` 是拖动起点时的
+    /// `block_voff` (画面当前的底色居中纵向偏移); 每帧先折进第一块
+    /// `gap_before` 变成页面绝对坐标 (y=0 = 页顶), 再按绝对坐标分配.
+    /// `undid`: 真正发生位移的第一帧才 push 一次撤销快照 (单击不动不占
+    /// 撤销栈).
     BlockMove {
         region_id: String,
         start_iy: f32,
-        start_gap_before: i32,
+        start_layout: Vec<BlockAdjust>,
+        start_voff: i32,
+        undid: bool,
     },
-    /// 「移动分块」: 拖动块的上边界 (裁剪/扩展).
+    /// 「移动分块」: 拖动块的上边界 (裁剪/扩展). 与下边界不同, 上边界要
+    /// 让"边线跟手"(边线本身跟着鼠标移动), 同时块自己的底边及往后所有
+    /// 块的位置分毫不动 (与下边界"顶边及往前所有块不动"完全镜像) —— 这
+    /// 需要在改 `extra_top` 的同时, 用 `gap_before` 反向同步调整.
+    /// 每帧从 `start_layout` / `start_voff` 折成页面绝对坐标后再算, 最上方
+    /// 块的上边界可以一直拖到页顶 (Y=0), 到顶即停.
     BlockResizeTop {
         region_id: String,
         start_iy: f32,
-        start_extra_top: i32,
+        start_layout: Vec<BlockAdjust>,
+        start_voff: i32,
         max_trim: i32,
+        undid: bool,
     },
-    /// 「移动分块」: 拖动块的下边界 (裁剪/扩展).
+    /// 「移动分块」: 拖动块的下边界. 先消耗与下一块之间的空白 (最后一块
+    /// 则消耗末端留白), 其它块绝对位置不动; 贴住之后才挤开下一块.
     BlockResizeBottom {
         region_id: String,
         start_iy: f32,
-        start_extra_bottom: i32,
+        start_layout: Vec<BlockAdjust>,
+        start_voff: i32,
         max_trim: i32,
+        undid: bool,
+    },
+    /// 拖动辅助线. 始终按「全局按比例联动」: `orig_lines` 是拖动开始时
+    /// 全部辅助线的原始位置快照, 每帧从原始值重新算比例, 避免逐帧复合
+    /// 缩放导致越拖越飘.
+    GuideMove {
+        idx: usize,
+        start_y: i32,
+        orig_lines: Vec<i32>,
+        undid: bool,
     },
 }
 
@@ -309,13 +345,30 @@ pub(crate) enum ToolMode {
     Eraser,
     /// 空白拖动画布; 点在已选蒙版上则拖动蒙版
     Pan,
-    /// 移动/拉伸「组合分块」: 拖动块本体上下移动, 拖动上下边界裁剪/扩展;
-    /// 该模式下只能上下操作, 不能左右移动, 也不响应蒙版绘制/选中.
-    MoveBlocks,
+}
+
+/// 一次撤销/重做快照: 同时包含蒙版、「组合分块」位置/尺寸调整与该组合的
+/// 纵向目标位置 (`voff_target`, 见 `MaskToolApp::voff_target` 字段文档),
+/// 三者共用同一条时间线 (哪个先改就先进撤销栈, `Ctrl+Z`/`Ctrl+Y` 统一
+/// 处理). 把 `voff_target` 也纳入快照是为了让撤销/重做能精确恢复到当时
+/// 的底色居中位置, 不依赖任何"重新推算"——尤其是拼合图高度跨越
+/// `apply_bg::process::frame_size` 的宽高比切换分界点前后, 若不整体
+/// 回滚这个值就可能在撤销后停在与原来不同的居中位置上.
+#[derive(Clone, Default)]
+pub(crate) struct UndoSnapshot {
+    pub(crate) masks: Vec<MaskRect>,
+    pub(crate) block_layout: Vec<BlockAdjust>,
+    pub(crate) voff_target: i64,
+    /// 本组合的辅助线 (位置 + 锁定态), 与蒙版/分块调整共用同一条撤重
+    /// 时间线, 见 `MaskToolApp::snapshot`.
+    pub(crate) guides: GuideState,
+    /// 宿主全局辅助线操作的令牌: 撤/重这条快照时请宿主同步全部组合的
+    /// 线/开关 (以及对齐带来的布局). `None` 表示纯本页编辑.
+    pub(crate) host_guide_token: Option<u64>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct MaskHistory {
-    pub(crate) undo: Vec<Vec<MaskRect>>,
-    pub(crate) redo: Vec<Vec<MaskRect>>,
+    pub(crate) undo: Vec<UndoSnapshot>,
+    pub(crate) redo: Vec<UndoSnapshot>,
 }

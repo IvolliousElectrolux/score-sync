@@ -39,6 +39,19 @@ struct ProjectFile {
     /// group_id -> 分块位置/尺寸微调 (蒙版编辑); 旧工程文件没有该字段.
     #[serde(default)]
     group_block_layout: HashMap<String, Vec<ProjectBlockAdjust>>,
+    /// group_id -> 组合拼合图相对默认居中位置的纵向手动偏移 (蒙版编辑
+    /// 向上拖动分块消耗底色居中留白产生); 旧工程文件没有该字段.
+    #[serde(default)]
+    group_voff_shift: HashMap<String, i64>,
+    /// group_id -> 辅助线 (蒙版画布内固定参考线); 旧工程文件没有该字段.
+    #[serde(default)]
+    group_guides: HashMap<String, mask_tool::guide::GuideState>,
+    /// 辅助线左键是否全局开启; 旧工程没有该字段.
+    #[serde(default)]
+    guides_global: bool,
+    /// 同样根数辅助线的组合是否同步位置; 旧工程没有该字段.
+    #[serde(default)]
+    guides_sync_positions: bool,
     /// 用户手动调过输出组合顺序
     #[serde(default)]
     groups_manual_order: bool,
@@ -140,6 +153,8 @@ struct ProjectBlockAdjust {
     extra_bottom: i32,
     #[serde(default)]
     gap_before: i32,
+    #[serde(default)]
+    gap_after: i32,
 }
 
 impl From<&BlockAdjust> for ProjectBlockAdjust {
@@ -149,6 +164,7 @@ impl From<&BlockAdjust> for ProjectBlockAdjust {
             extra_top: a.extra_top,
             extra_bottom: a.extra_bottom,
             gap_before: a.gap_before,
+            gap_after: a.gap_after,
         }
     }
 }
@@ -160,6 +176,7 @@ impl From<ProjectBlockAdjust> for BlockAdjust {
             extra_top: a.extra_top,
             extra_bottom: a.extra_bottom,
             gap_before: a.gap_before,
+            gap_after: a.gap_after,
         }
     }
 }
@@ -313,6 +330,10 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
             .iter()
             .map(|(gid, v)| (gid.clone(), v.iter().map(ProjectBlockAdjust::from).collect()))
             .collect(),
+        group_voff_shift: doc.group_voff_shift.clone(),
+        group_guides: doc.group_guides.clone(),
+        guides_global: doc.guides_global,
+        guides_sync_positions: doc.guides_sync_positions,
         groups_manual_order: doc.groups_manual_order,
         bg: bg_meta,
         video,
@@ -470,6 +491,12 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             .into_iter()
             .map(|(gid, v)| (gid, v.into_iter().map(BlockAdjust::from).collect()))
             .collect(),
+        group_voff_shift: meta.group_voff_shift,
+        group_guides: meta.group_guides,
+        guides_global: meta.guides_global,
+        guides_sync_positions: meta.guides_sync_positions,
+        group_guide_defaults: HashMap::new(),
+        region_staff_anchors: HashMap::new(),
         mask_prefs: meta
             .mask_prefs
             .unwrap_or_else(|| mask_tool::color_prefs::MaskColorPrefs {
@@ -539,5 +566,6 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         .retain(|id| valid_regions.contains(id));
     doc.retain_window(doc.current_page_index, crate::page_cache::WINDOW_RADIUS);
     doc.rebuild_rid_index();
+    doc.seed_guide_defaults();
     Ok(doc)
 }

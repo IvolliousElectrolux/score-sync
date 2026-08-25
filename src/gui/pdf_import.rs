@@ -3,35 +3,63 @@
 use super::*;
 use super::ScoreSyncApp;
 use crate::pdf::{
-    clamp_pdf_scale, inspect_pdf, px_from_pt, scale_from_target, PdfInspect, PdfSizeGroup,
-    DEFAULT_PDF_SCALE, PDF_MAX_SIDE_PX,
+    clamp_pdf_scale, inspect_pdf, parse_page_selection, px_from_pt, render_pdf_page_preview,
+    scale_from_target, PdfInspect, PdfSizeGroup, DEFAULT_PDF_SCALE, PDF_MAX_SIDE_PX,
 };
+use image::{Frame, ImageBuffer, RgbaImage};
+use smallvec::smallvec;
+use std::path::Path;
 
 pub(super) enum ImportItem {
-    Pdf(PdfInspect),
-    PdfPending { path: PathBuf, name: String },
+    Pdf {
+        info: PdfInspect,
+        page_input: Entity<TextInput>,
+    },
+    PdfPending {
+        path: PathBuf,
+        name: String,
+        page_input: Entity<TextInput>,
+    },
     Image { path: PathBuf, name: String },
 }
 
 impl ImportItem {
     fn path(&self) -> &PathBuf {
         match self {
-            Self::Pdf(f) => &f.path,
+            Self::Pdf { info, .. } => &info.path,
             Self::PdfPending { path, .. } | Self::Image { path, .. } => path,
         }
     }
 
     fn name(&self) -> &str {
         match self {
-            Self::Pdf(f) => f.name.as_str(),
+            Self::Pdf { info, .. } => info.name.as_str(),
             Self::PdfPending { name, .. } | Self::Image { name, .. } => name.as_str(),
         }
     }
 
     fn as_pdf(&self) -> Option<&PdfInspect> {
         match self {
-            Self::Pdf(f) => Some(f),
+            Self::Pdf { info, .. } => Some(info),
             _ => None,
+        }
+    }
+
+    fn page_input(&self) -> Option<&Entity<TextInput>> {
+        match self {
+            Self::Pdf { page_input, .. } | Self::PdfPending { page_input, .. } => Some(page_input),
+            Self::Image { .. } => None,
+        }
+    }
+
+    fn is_pdf(&self) -> bool {
+        !matches!(self, Self::Image { .. })
+    }
+
+    fn page_count(&self) -> u32 {
+        match self {
+            Self::Pdf { info, .. } => (info.page_count as u32).max(1),
+            Self::PdfPending { .. } | Self::Image { .. } => 1,
         }
     }
 }
@@ -51,15 +79,22 @@ pub(super) struct PdfImportState {
     pub loading: bool,
     pub error: Option<String>,
     pub lock_aspect: bool,
-    pub groups_open: bool,
     pub target_w: u32,
     pub target_h: u32,
     pub scale: f32,
     pub inspect_gen: u64,
     pub inspect_inflight: u32,
+    active: Option<usize>,
+    preview_page: u32,
+    preview_image: Option<Arc<RenderImage>>,
+    preview_shown: Option<(PathBuf, u32)>,
+    preview_gen: u64,
+    preview_loading: bool,
     item_bounds: HashMap<usize, Bounds<Pixels>>,
     list_drag: Option<ImportListDrag>,
 }
+
+const PREVIEW_MAX_SIDE: u32 = 512;
 
 impl PdfImportState {
     fn new(lock_aspect: bool, scale: f32) -> Self {
@@ -68,12 +103,17 @@ impl PdfImportState {
             loading: false,
             error: None,
             lock_aspect,
-            groups_open: false,
             target_w: 0,
             target_h: 0,
             scale: clamp_pdf_scale(scale),
             inspect_gen: 0,
             inspect_inflight: 0,
+            active: None,
+            preview_page: 1,
+            preview_image: None,
+            preview_shown: None,
+            preview_gen: 0,
+            preview_loading: false,
             item_bounds: HashMap::new(),
             list_drag: None,
         }
@@ -98,32 +138,11 @@ impl PdfImportState {
     }
 
     fn mode(&self) -> Option<&PdfSizeGroup> {
-        self.pdfs()
-            .flat_map(|f| f.groups.iter())
-            .max_by_key(|g| g.page_count())
-    }
-
-    fn size_key(w_pt: f32, h_pt: f32) -> (i32, i32) {
-        (
-            (w_pt * 2.0).round() as i32,
-            (h_pt * 2.0).round() as i32,
-        )
-    }
-
-    /// 是否有文件内部含多种页面尺寸.
-    fn any_file_mixed_pages(&self) -> bool {
-        self.pdfs().any(|f| f.groups.len() > 1)
-    }
-
-    /// 各文件主尺寸是否彼此不同 (不含「同一文件内混页」).
-    fn files_differ_in_size(&self) -> bool {
-        let mut keys = self.pdfs().filter_map(|f| {
-            f.groups.first().map(|g| Self::size_key(g.w_pt, g.h_pt))
-        });
-        let Some(first) = keys.next() else {
-            return false;
-        };
-        keys.any(|k| k != first)
+        self.active
+            .and_then(|i| self.items.get(i))
+            .and_then(ImportItem::as_pdf)
+            .and_then(|f| f.groups.first())
+            .or_else(|| self.pdfs().next().and_then(|f| f.groups.first()))
     }
 
     /// 按目标像素宽给该文件每一页单独算倍率 (锁定时高度随该页比例).
@@ -149,16 +168,6 @@ impl PdfImportState {
         out
     }
 
-    fn preview_px(&self, w_pt: f32, h_pt: f32) -> (u32, u32) {
-        let tw = self.target_w.max(1).min(PDF_MAX_SIDE_PX);
-        if self.lock_aspect {
-            let sx = scale_from_target(w_pt, tw);
-            (tw, px_from_pt(h_pt, sx))
-        } else {
-            (tw, self.target_h.max(1).min(PDF_MAX_SIDE_PX))
-        }
-    }
-
     fn total_pages(&self) -> usize {
         let pdf_pages: usize = self.pdfs().map(|f| f.page_count).sum();
         let images = self
@@ -167,24 +176,6 @@ impl PdfImportState {
             .filter(|i| matches!(i, ImportItem::Image { .. }))
             .count();
         pdf_pages + images
-    }
-
-    /// 按文件列出尺寸行, 不跨文件合并.
-    fn file_size_rows(&self) -> Vec<(String, f32, f32, Option<(u32, u32)>)> {
-        let pdfs: Vec<&PdfInspect> = self.pdfs().collect();
-        let multi_file = pdfs.len() > 1;
-        let mut out = Vec::new();
-        for f in pdfs {
-            for g in &f.groups {
-                let label = if multi_file {
-                    format!("{}  p{}", f.name, g.ranges_label())
-                } else {
-                    format!("p{}", g.ranges_label())
-                };
-                out.push((label, g.w_pt, g.h_pt, g.image_px));
-            }
-        }
-        out
     }
 
     fn resolve_drop(&self, from: usize, y: f32) -> (usize, Option<usize>, bool) {
@@ -220,6 +211,45 @@ impl PdfImportState {
         let to = to.min(self.items.len());
         self.items.insert(to, item);
         self.item_bounds.clear();
+        if let Some(a) = self.active {
+            self.active = Some(Self::remap_index(a, from, to));
+        }
+    }
+
+    fn remap_index(idx: usize, from: usize, to: usize) -> usize {
+        if idx == from {
+            to
+        } else if from < to && idx > from && idx <= to {
+            idx - 1
+        } else if to < from && idx >= to && idx < from {
+            idx + 1
+        } else {
+            idx
+        }
+    }
+
+    fn clamp_active(&mut self) {
+        if self.items.is_empty() {
+            self.active = None;
+            self.preview_page = 1;
+            self.preview_image = None;
+            self.preview_shown = None;
+            self.preview_loading = false;
+            return;
+        }
+        if let Some(a) = self.active {
+            if a >= self.items.len() {
+                self.active = Some(self.items.len() - 1);
+                self.preview_page = 1;
+            }
+        }
+    }
+
+    fn active_page_count(&self) -> u32 {
+        self.active
+            .and_then(|i| self.items.get(i))
+            .map(ImportItem::page_count)
+            .unwrap_or(1)
     }
 }
 
@@ -243,6 +273,42 @@ fn trim_float(v: f32) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+fn thumbnail_rgb(rgb: image::RgbImage, max_side: u32) -> image::RgbImage {
+    let w = rgb.width().max(1);
+    let h = rgb.height().max(1);
+    let m = w.max(h);
+    if m <= max_side {
+        return rgb;
+    }
+    let tw = ((w as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+    let th = ((h as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+    image::imageops::resize(&rgb, tw, th, image::imageops::FilterType::Triangle)
+}
+
+fn load_image_preview(path: &Path, max_side: u32) -> Result<image::RgbImage, String> {
+    let rgb = image::open(path).map_err(|e| e.to_string())?.to_rgb8();
+    Ok(thumbnail_rgb(rgb, max_side))
+}
+
+fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
+    let (w, h) = rgb.dimensions();
+    let src = rgb.as_raw();
+    let n = src.len() / 3 * 4;
+    let mut buf: Vec<u8> = Vec::with_capacity(n);
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(n);
+    }
+    for (dst, s) in buf.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+        dst[0] = s[2];
+        dst[1] = s[1];
+        dst[2] = s[0];
+        dst[3] = 255;
+    }
+    let rgba: RgbaImage = ImageBuffer::from_raw(w, h, buf).expect("rgba buffer size matches w*h*4");
+    Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]))
+}
+
 impl ScoreSyncApp {
     pub(super) fn open_import_dialog(&mut self, cx: &mut Context<Self>) {
         if self.pdf_import.is_some() {
@@ -255,15 +321,161 @@ impl ScoreSyncApp {
             cfg.pdf_import_scale,
         ));
         self.sync_pdf_import_inputs(cx);
+        self.sync_preview_page_input(cx);
         cx.notify();
     }
 
     pub(super) fn close_import_dialog(&mut self, cx: &mut Context<Self>) {
         if let Some(st) = self.pdf_import.as_mut() {
             st.inspect_gen = st.inspect_gen.wrapping_add(1);
+            st.preview_gen = st.preview_gen.wrapping_add(1);
         }
         self.pdf_import = None;
         cx.notify();
+    }
+
+    fn sync_preview_page_input(&mut self, cx: &mut Context<Self>) {
+        let page = self
+            .pdf_import
+            .as_ref()
+            .map(|st| st.preview_page)
+            .unwrap_or(1);
+        self.pdf_preview_page_input
+            .update(cx, |i, cx| i.set_text(page.to_string(), cx));
+    }
+
+    fn activate_import_item(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(st) = self.pdf_import.as_mut() else {
+            return;
+        };
+        if idx >= st.items.len() {
+            return;
+        }
+        let changed = st.active != Some(idx);
+        st.active = Some(idx);
+        if changed {
+            st.preview_page = 1;
+            self.sync_preview_page_input(cx);
+        }
+        self.request_import_preview(cx);
+    }
+
+    fn nudge_import_preview_page(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(st) = self.pdf_import.as_mut() else {
+            return;
+        };
+        let count = st.active_page_count().max(1);
+        let cur = st.preview_page.max(1);
+        let next = (cur as i32 + delta).clamp(1, count as i32) as u32;
+        if next == cur {
+            return;
+        }
+        st.preview_page = next;
+        self.sync_preview_page_input(cx);
+        self.request_import_preview(cx);
+    }
+
+    fn commit_preview_page_field(&mut self, cx: &mut Context<Self>) {
+        let Some(st) = self.pdf_import.as_ref() else {
+            return;
+        };
+        if st.active.is_none() {
+            return;
+        }
+        let count = st.active_page_count().max(1);
+        let txt = self.pdf_preview_page_input.read(cx).text();
+        let parsed = txt.trim().parse::<u32>().ok().filter(|v| *v > 0);
+        let page = parsed.unwrap_or(st.preview_page).clamp(1, count);
+        let st = self.pdf_import.as_mut().unwrap();
+        if st.preview_page != page {
+            st.preview_page = page;
+        }
+        self.sync_preview_page_input(cx);
+        self.request_import_preview(cx);
+    }
+
+    fn on_import_preview_scroll(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let dy = match ev.delta {
+            ScrollDelta::Pixels(p) => f32::from(p.y),
+            ScrollDelta::Lines(l) => l.y,
+        };
+        cx.stop_propagation();
+        if dy.abs() < 0.01 {
+            return;
+        }
+        let step = if dy < 0.0 { 1 } else { -1 };
+        self.nudge_import_preview_page(step, cx);
+    }
+
+    fn request_import_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(st) = self.pdf_import.as_mut() else {
+            return;
+        };
+        let Some(idx) = st.active else {
+            st.preview_image = None;
+            st.preview_shown = None;
+            st.preview_loading = false;
+            cx.notify();
+            return;
+        };
+        let Some(item) = st.items.get(idx) else {
+            return;
+        };
+        let path = item.path().clone();
+        let is_pdf = item.is_pdf();
+        let count = item.page_count().max(1);
+        let page = st.preview_page.clamp(1, count);
+        if st.preview_page != page {
+            st.preview_page = page;
+        }
+        if st.preview_shown.as_ref() == Some(&(path.clone(), page)) && st.preview_image.is_some() {
+            st.preview_loading = false;
+            cx.notify();
+            return;
+        }
+        let gen = st.preview_gen.wrapping_add(1);
+        st.preview_gen = gen;
+        st.preview_loading = true;
+        if st.preview_shown.as_ref().map(|(p, _)| p != &path).unwrap_or(true) {
+            st.preview_image = None;
+        }
+        cx.notify();
+        let (tx, rx) = async_channel::bounded::<Result<(PathBuf, u32, Arc<RenderImage>), String>>(1);
+        std::thread::spawn(move || {
+            let rgb = if is_pdf {
+                render_pdf_page_preview(&path, page, PREVIEW_MAX_SIDE).map_err(|e| e.to_string())
+            } else {
+                load_image_preview(&path, PREVIEW_MAX_SIDE)
+            };
+            let msg = rgb.map(|img| (path, page, rgb_to_render_image(&img)));
+            let _ = tx.send_blocking(msg);
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(res) = rx.recv().await {
+                this.update(cx, |view, cx| {
+                    let Some(st) = view.pdf_import.as_mut() else {
+                        return;
+                    };
+                    if st.preview_gen != gen {
+                        return;
+                    }
+                    st.preview_loading = false;
+                    match res {
+                        Ok((path, page, img)) => {
+                            st.preview_shown = Some((path, page));
+                            st.preview_image = Some(img);
+                        }
+                        Err(_) => {
+                            st.preview_image = None;
+                            st.preview_shown = None;
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn sync_pdf_import_inputs(&mut self, cx: &mut Context<Self>) {
@@ -337,15 +549,20 @@ impl ScoreSyncApp {
             return;
         };
         let mut pdfs = Vec::new();
+        let start_len = st.items.len();
         for p in paths {
             if st.contains_path(&p) || pdfs.contains(&p) {
                 continue;
             }
             if is_pdf_path(&p) {
                 let name = item_file_name(&p);
+                let page_input = cx.new(|cx| {
+                    TextInput::new(cx, "", "如 1, 3-7").with_compact(true)
+                });
                 st.items.push(ImportItem::PdfPending {
                     path: p.clone(),
                     name,
+                    page_input,
                 });
                 pdfs.push(p);
             } else if is_image_path(&p) {
@@ -353,10 +570,13 @@ impl ScoreSyncApp {
                 st.items.push(ImportItem::Image { path: p, name });
             }
         }
-        if st.items.len() > 1 {
-            st.groups_open = true;
+        if st.active.is_none() && st.items.len() > start_len {
+            st.active = Some(start_len);
+            st.preview_page = 1;
         }
         if pdfs.is_empty() {
+            self.sync_preview_page_input(cx);
+            self.request_import_preview(cx);
             cx.notify();
             return;
         }
@@ -365,6 +585,8 @@ impl ScoreSyncApp {
         st.error = None;
         let gen = st.inspect_gen;
         cx.notify();
+        self.sync_preview_page_input(cx);
+        self.request_import_preview(cx);
         let (tx, rx) = async_channel::unbounded::<Result<PdfInspect, (PathBuf, String)>>();
         std::thread::spawn(move || {
             for p in pdfs {
@@ -396,7 +618,14 @@ impl ScoreSyncApp {
                                 if let Some(slot) = st.items.iter_mut().find(|i| {
                                     matches!(i, ImportItem::PdfPending { path: p, .. } if *p == path)
                                 }) {
-                                    *slot = ImportItem::Pdf(info);
+                                    let page_input = match slot {
+                                        ImportItem::PdfPending { page_input, .. } => {
+                                            page_input.clone()
+                                        }
+                                        ImportItem::Pdf { page_input, .. } => page_input.clone(),
+                                        ImportItem::Image { .. } => unreachable!(),
+                                    };
+                                    *slot = ImportItem::Pdf { info, page_input };
                                 }
                                 st.error = None;
                                 first
@@ -405,6 +634,7 @@ impl ScoreSyncApp {
                                 st.items.retain(|i| {
                                     !matches!(i, ImportItem::PdfPending { path: p, .. } if *p == path)
                                 });
+                                st.clamp_active();
                                 st.error = Some(format!("{}: {msg}", path.display()));
                                 false
                             }
@@ -415,6 +645,7 @@ impl ScoreSyncApp {
                     } else {
                         view.sync_pdf_import_inputs(cx);
                     }
+                    view.request_import_preview(cx);
                     cx.notify();
                 })
                 .ok();
@@ -446,15 +677,26 @@ impl ScoreSyncApp {
     }
 
     fn pdf_import_field_focused(&self, window: &Window, cx: &App) -> bool {
-        self.pdf_w_input.focus_handle(cx).is_focused(window)
+        if self.pdf_w_input.focus_handle(cx).is_focused(window)
             || self.pdf_h_input.focus_handle(cx).is_focused(window)
             || self.pdf_scale_input.focus_handle(cx).is_focused(window)
+            || self.pdf_preview_page_input.focus_handle(cx).is_focused(window)
+        {
+            return true;
+        }
+        self.pdf_import.as_ref().is_some_and(|st| {
+            st.items.iter().any(|i| {
+                i.page_input()
+                    .is_some_and(|inp| inp.focus_handle(cx).is_focused(window))
+            })
+        })
     }
 
     /// 输入框有焦点时 Enter 只提交该框; 失焦后才确认导入.
     pub(super) fn on_pdf_import_enter(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.pdf_import_field_focused(window, cx) {
             self.commit_pdf_import_fields(cx);
+            self.commit_preview_page_field(cx);
         } else {
             self.confirm_pdf_import(cx);
         }
@@ -466,6 +708,7 @@ impl ScoreSyncApp {
         }
         self.focus_handle.focus(window);
         self.commit_pdf_import_fields(cx);
+        self.commit_preview_page_field(cx);
     }
 
     fn commit_pdf_import_fields(&mut self, cx: &mut Context<Self>) {
@@ -563,14 +806,27 @@ impl ScoreSyncApp {
         let th = st.target_h.max(1);
         let lock = st.lock_aspect;
         let scale = st.scale;
+        let mut page_err: Option<String> = None;
         let jobs: Vec<ImportJob> = st
             .items
             .iter()
             .filter_map(|item| match item {
-                ImportItem::Pdf(f) => Some(ImportJob::Pdf {
-                    path: f.path.clone(),
-                    scales: st.scales_for_file(f),
-                }),
+                ImportItem::Pdf { info, page_input } => {
+                    let txt = page_input.read(cx).text();
+                    let pages = parse_page_selection(&txt, info.page_count);
+                    if !txt.trim().is_empty() && pages.is_empty() {
+                        page_err = Some(format!(
+                            "{}: 页码无效, 请用如 1, 3-7 (共 {} 页)",
+                            info.name, info.page_count
+                        ));
+                        return None;
+                    }
+                    Some(ImportJob::Pdf {
+                        path: info.path.clone(),
+                        scales: st.scales_for_file(info),
+                        pages,
+                    })
+                }
                 ImportItem::Image { path, .. } => Some(ImportJob::Image {
                     path: path.clone(),
                     target: if any_pdf && tw > 0 {
@@ -582,6 +838,13 @@ impl ScoreSyncApp {
                 ImportItem::PdfPending { .. } => None,
             })
             .collect();
+        if let Some(msg) = page_err {
+            if let Some(st) = self.pdf_import.as_mut() {
+                st.error = Some(msg);
+            }
+            cx.notify();
+            return;
+        }
         config::remember_pdf_import(scale, lock);
         self.pdf_import = None;
         if jobs.is_empty() {
@@ -600,13 +863,29 @@ impl ScoreSyncApp {
         if idx >= st.items.len() {
             return;
         }
+        let was_active = st.active == Some(idx);
         st.items.remove(idx);
         st.item_bounds.clear();
         st.list_drag = None;
-        if !st.has_pdf() && st.target_w == 0 {
-            // keep
+        if let Some(a) = st.active {
+            if a == idx {
+                st.active = if st.items.is_empty() {
+                    None
+                } else {
+                    Some(idx.min(st.items.len() - 1))
+                };
+                st.preview_page = 1;
+                st.preview_image = None;
+                st.preview_shown = None;
+            } else if a > idx {
+                st.active = Some(a - 1);
+            }
+        }
+        if was_active {
+            self.sync_preview_page_input(cx);
         }
         self.sync_pdf_import_inputs(cx);
+        self.request_import_preview(cx);
         cx.notify();
     }
 
@@ -680,20 +959,43 @@ impl ScoreSyncApp {
             let s_blur = self
                 .pdf_scale_input
                 .update(cx, |i, _| i.take_blur_commit());
+            let p_blur = self
+                .pdf_preview_page_input
+                .update(cx, |i, _| i.take_blur_commit());
             if w_blur || h_blur || s_blur {
                 self.commit_pdf_import_fields(cx);
+            }
+            if p_blur {
+                self.commit_preview_page_field(cx);
+            }
+            let focus_idx = {
+                let inputs: Vec<(usize, Entity<TextInput>)> = self
+                    .pdf_import
+                    .as_ref()
+                    .map(|st| {
+                        st.items
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, item)| {
+                                item.page_input().cloned().map(|e| (i, e))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                inputs.into_iter().find_map(|(i, e)| {
+                    e.update(cx, |t, _| t.take_focus_commit()).then_some(i)
+                })
+            };
+            if let Some(idx) = focus_idx {
+                self.activate_import_item(idx, cx);
             }
         }
         let Some(st) = self.pdf_import.as_ref() else {
             return div().into_any_element();
         };
         let has_pdf = st.has_pdf();
-        let mixed_pages = st.any_file_mixed_pages();
-        let files_differ = st.files_differ_in_size();
         let n_items = st.items.len();
-        let n_pdfs = st.pdfs().count();
         let loading = st.loading;
-        let groups_open = st.groups_open;
         let lock = st.lock_aspect;
         let can_import = !loading && !st.items.is_empty() && !st.has_pending_pdf();
         let w_input = self.pdf_w_input.clone();
@@ -708,13 +1010,18 @@ impl ScoreSyncApp {
             Some(d) if d.armed => (d.line_at, d.line_after),
             _ => (None, false),
         };
-        let item_rows: Vec<(usize, String, String, bool)> = st
+        let active_idx = st.active;
+        let preview_img = st.preview_image.clone();
+        let preview_loading = st.preview_loading;
+        let preview_count = st.active_page_count();
+        let preview_page_input = self.pdf_preview_page_input.clone();
+        let item_rows: Vec<(usize, String, String, bool, bool, Option<Entity<TextInput>>)> = st
             .items
             .iter()
             .enumerate()
             .map(|(i, item)| {
                 let sub = match item {
-                    ImportItem::Pdf(f) => format!("PDF · {} 页", f.page_count),
+                    ImportItem::Pdf { info, .. } => format!("PDF · {} 页", info.page_count),
                     ImportItem::PdfPending { .. } => "PDF · 读取中…".into(),
                     ImportItem::Image { .. } => {
                         if has_pdf && target_w > 0 {
@@ -733,21 +1040,11 @@ impl ScoreSyncApp {
                     item.name().to_string(),
                     sub,
                     matches!(item, ImportItem::PdfPending { .. }),
+                    active_idx == Some(i),
+                    item.page_input().cloned(),
                 )
             })
             .collect();
-        let groups_copy: Vec<(String, f32, f32, Option<(u32, u32)>, u32, u32)> = st
-            .file_size_rows()
-            .into_iter()
-            .map(|(label, w_pt, h_pt, image_px)| {
-                let (tw, th) = st.preview_px(w_pt, h_pt);
-                (label, w_pt, h_pt, image_px, tw, th)
-            })
-            .collect();
-        let max_out_side = groups_copy
-            .iter()
-            .map(|r| r.4.max(r.5))
-            .fold(target_w.max(target_h), u32::max);
         let err = st.error.clone();
         let entity = cx.entity();
 
@@ -763,11 +1060,12 @@ impl ScoreSyncApp {
             .id("pdf_import_items")
             .flex()
             .flex_col()
+            .flex_1()
+            .min_h(px(0.))
             .gap_1()
             .w_full()
-            .max_h(px(180.))
             .overflow_y_scroll();
-        for (idx, name, sub, pending) in item_rows {
+        for (idx, name, sub, pending, is_active, page_input) in item_rows {
             let dragging = drag_from == Some(idx);
             let show_line = line_at == Some(idx);
             list = list.child(
@@ -782,9 +1080,13 @@ impl ScoreSyncApp {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(rgb(0xffffff))
+                    .bg(if is_active { rgb(0xeff6ff) } else { rgb(0xffffff) })
                     .border_1()
-                    .border_color(rgb(0xe2e8f0))
+                    .border_color(if is_active {
+                        rgb(0x3b82f6)
+                    } else {
+                        rgb(0xe2e8f0)
+                    })
                     .cursor_move()
                     .when(dragging, |d| d.opacity(0.35))
                     .when(show_line && !line_after, |d| {
@@ -810,13 +1112,46 @@ impl ScoreSyncApp {
                             )
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(if pending {
-                                        rgb(0xb45309)
-                                    } else {
-                                        rgb(0x64748b)
-                                    })
-                                    .child(sub),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .w_full()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .flex_shrink_0()
+                                            .text_color(if pending {
+                                                rgb(0xb45309)
+                                            } else {
+                                                rgb(0x64748b)
+                                            })
+                                            .child(sub),
+                                    )
+                                    .when_some(page_input, |d, inp| {
+                                        d.child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "pdf_import_pages-{idx}"
+                                                )))
+                                                .flex_1()
+                                                .min_w(px(72.))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        this.activate_import_item(idx, cx);
+                                                        cx.stop_propagation();
+                                                    }),
+                                                )
+                                                .on_mouse_up(
+                                                    MouseButton::Left,
+                                                    cx.listener(|_, _, _, cx| {
+                                                        cx.stop_propagation()
+                                                    }),
+                                                )
+                                                .child(inp),
+                                        )
+                                    }),
                             ),
                     )
                     .child(
@@ -865,7 +1200,7 @@ impl ScoreSyncApp {
                                     armed: false,
                                 });
                             }
-                            cx.notify();
+                            this.activate_import_item(idx, cx);
                         }),
                     ),
             );
@@ -874,6 +1209,8 @@ impl ScoreSyncApp {
         let mut drop = div()
             .id("pdf_import_drop")
             .w_full()
+            .flex_1()
+            .min_h(px(0.))
             .rounded_lg()
             .border_2()
             .border_dashed()
@@ -897,7 +1234,6 @@ impl ScoreSyncApp {
             }));
         if n_items == 0 {
             drop = drop
-                .h(px(148.))
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(0xf1f5f9)).border_color(rgb(0x64748b)))
@@ -909,10 +1245,12 @@ impl ScoreSyncApp {
                 .child(div().text_sm().text_color(rgb(0x475569)).child(drop_hint));
         } else {
             drop = drop
+                .overflow_hidden()
                 .child(
                     div()
                         .id("pdf_import_add_more")
                         .w_full()
+                        .flex_shrink_0()
                         .py_1()
                         .flex()
                         .flex_row()
@@ -933,34 +1271,42 @@ impl ScoreSyncApp {
                 .child(list);
         }
 
-        let mut body = div().flex().flex_col().gap_2().child(drop);
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .min_w(px(0.))
+            .gap_2()
+            .child(drop);
         if let Some(err) = err {
-            body = body.child(div().text_xs().text_color(rgb(0xb91c1c)).child(err));
+            body = body.child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(rgb(0xb91c1c))
+                    .child(err),
+            );
         }
         if let Some(mode) = mode.as_ref() {
-            let src_label = if mixed_pages {
-                "众数尺寸 (只读)"
-            } else if files_differ {
-                "参考尺寸 (只读)"
-            } else {
-                "源尺寸 (只读)"
-            };
             let header = format!("{n_items} 个文件 · 共 {pages} 页");
             body = body.child(
                 div()
+                    .flex_shrink_0()
                     .text_xs()
                     .text_color(rgb(0x334155))
                     .child(header),
             );
             body = body.child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
                     .text_xs()
                     .text_color(rgb(0x64748b))
-                    .child(src_label)
+                    .child("源尺寸 (只读)")
                     .child(
                         div()
                             .w(px(72.))
@@ -992,52 +1338,9 @@ impl ScoreSyncApp {
                     )
                     .child("pt"),
             );
-            if files_differ {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x334155))
-                        .child(if lock {
-                            "各 PDF 页框不同, 上表为参考; 全部统一到同一目标宽, 高度按各自比例."
-                        } else {
-                            "各 PDF 页框不同, 上表为参考; 全部拉伸到同一目标宽高."
-                        }),
-                );
-            }
-            if mixed_pages {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0xb45309))
-                        .child(format!(
-                            "有文件含不同尺寸页面, 上表为众数 ({} 页). {}",
-                            mode.page_count(),
-                            if lock {
-                                "各页仍统一到同一目标宽, 高度按该页比例."
-                            } else {
-                                "各页仍拉伸到同一目标宽高."
-                            }
-                        )),
-                );
-            }
-            if n_pdfs == 1 {
-                if let Some((iw, ih)) = mode.image_px {
-                    let def_w = px_from_pt(mode.w_pt, DEFAULT_PDF_SCALE);
-                    let def_h = px_from_pt(mode.h_pt, DEFAULT_PDF_SCALE);
-                    if iw > def_w || ih > def_h {
-                        body = body.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x1d4ed8))
-                                .child(format!(
-                                    "页内图像约 {iw} × {ih} px (×3 仅为 {def_w} × {def_h}), 已按图像预填目标."
-                                )),
-                        );
-                    }
-                }
-            }
             body = body.child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1087,6 +1390,7 @@ impl ScoreSyncApp {
             );
             body = body.child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1107,70 +1411,114 @@ impl ScoreSyncApp {
                     )
                     .child("相对参考页的 PDF 标记尺寸 (72 pt = 1 inch)"),
             );
-            if max_out_side >= 5000 {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0xb45309))
-                        .child("目标较大, 导入和识别会更慢、更占内存."),
+        }
+
+        let preview_hint: SharedString = if n_items == 0 {
+            "选择文件后预览".into()
+        } else if preview_loading && preview_img.is_none() {
+            "载入预览…".into()
+        } else if preview_img.is_none() {
+            "无法预览".into()
+        } else {
+            "".into()
+        };
+        let paint_img = preview_img.clone();
+        let preview_canvas = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let Some(img) = &paint_img else {
+                    return;
+                };
+                let sz = img.size(0);
+                let iw = (sz.width.0 as f32).max(1.0);
+                let ih = (sz.height.0 as f32).max(1.0);
+                let vw = f32::from(bounds.size.width);
+                let vh = f32::from(bounds.size.height);
+                let fit = (vw / iw).min(vh / ih).max(0.0001);
+                let dw = iw * fit;
+                let dh = ih * fit;
+                let ox = bounds.origin.x + px((vw - dw) * 0.5);
+                let oy = bounds.origin.y + px((vh - dh) * 0.5);
+                let img_bounds = Bounds {
+                    origin: point(ox, oy),
+                    size: size(px(dw), px(dh)),
+                };
+                let _ = window.paint_image(
+                    img_bounds,
+                    gpui::Corners::default(),
+                    img.clone(),
+                    0,
+                    false,
                 );
-            }
-            let chevron = if groups_open { "▾" } else { "▸" };
-            body = body.child(
+            },
+        )
+        .size_full();
+        let show_preview_hint = preview_img.is_none();
+        let preview_pane = div()
+            .id("pdf_import_preview")
+            .w(px(226.))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                this.on_import_preview_scroll(ev, cx);
+            }))
+            .child(
                 div()
-                    .id("pdf_groups_toggle")
+                    .id("pdf_import_preview_img")
+                    .w_full()
+                    .h(px(320.))
+                    .flex_shrink_0()
+                    .bg(rgb(0xf1f5f9))
+                    .border_1()
+                    .border_color(rgb(0xe2e8f0))
+                    .overflow_hidden()
+                    .relative()
+                    .child(
+                        preview_canvas
+                            .absolute()
+                            .inset_0()
+                            .size_full(),
+                    )
+                    .when(show_preview_hint, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .text_color(rgb(0x64748b))
+                                .child(preview_hint),
+                        )
+                    }),
+            )
+            .child(
+                div()
                     .flex()
                     .flex_row()
                     .items_center()
+                    .justify_center()
                     .gap_1()
                     .text_xs()
                     .text_color(rgb(0x334155))
-                    .cursor_pointer()
-                    .child(format!(
-                        "{chevron} {}",
-                        if n_items > 1 {
-                            "各文件尺寸与页码"
-                        } else {
-                            "各尺寸与页码"
-                        }
-                    ))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            if let Some(st) = this.pdf_import.as_mut() {
-                                st.groups_open = !st.groups_open;
-                            }
-                            cx.notify();
-                        }),
-                    ),
-            );
-            if groups_open {
-                let mut list = div()
-                    .id("pdf_import_groups")
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .pl_3()
-                    .max_h(px(160.))
-                    .overflow_y_scroll();
-                for (label, w_pt, h_pt, image_px, tw, th) in groups_copy {
-                    let img = image_px
-                        .map(|(iw, ih)| format!(" · 页内图 {iw}×{ih}"))
-                        .unwrap_or_default();
-                    list = list.child(
+                    .child("页")
+                    .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(0x475569))
-                            .child(format!(
-                                "{label}  {}×{} pt → {tw} × {th} px{img}",
-                                fmt_pt(w_pt),
-                                fmt_pt(h_pt)
-                            )),
-                    );
-                }
-                body = body.child(list);
-            }
-        }
+                            .w(px(52.))
+                            .h(px(24.))
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(0xcbd5e1))
+                            .bg(rgb(0xffffff))
+                            .child(preview_page_input),
+                    )
+                    .child(format!("/ {preview_count}")),
+            );
 
         div()
             .id("pdf_import_backdrop")
@@ -1211,8 +1559,8 @@ impl ScoreSyncApp {
             .child(
                 div()
                     .id("pdf_import_card")
-                    .w(px(520.))
-                    .max_h(px(560.))
+                    .w(px(780.))
+                    .h(px(480.))
                     .p_4()
                     .rounded_lg()
                     .bg(rgb(0xffffff))
@@ -1234,7 +1582,16 @@ impl ScoreSyncApp {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child("打开文件"),
                     )
-                    .child(body)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .gap_3()
+                            .child(body)
+                            .child(preview_pane),
+                    )
                     .child(
                         div()
                             .flex()

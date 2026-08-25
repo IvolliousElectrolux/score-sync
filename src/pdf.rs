@@ -33,10 +33,6 @@ impl PdfSizeGroup {
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
-
-    pub fn ranges_label(&self) -> String {
-        format_page_ranges(&self.pages)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -135,7 +131,8 @@ fn size_key(w: f32, h: f32) -> (i32, i32) {
     ((w * 2.0).round() as i32, (h * 2.0).round() as i32)
 }
 
-pub fn format_page_ranges(pages: &[u32]) -> String {
+#[cfg(test)]
+fn format_page_ranges(pages: &[u32]) -> String {
     if pages.is_empty() {
         return String::new();
     }
@@ -155,6 +152,7 @@ pub fn format_page_ranges(pages: &[u32]) -> String {
     out
 }
 
+#[cfg(test)]
 fn push_range(out: &mut String, start: u32, end: u32) {
     if !out.is_empty() {
         out.push_str(", ");
@@ -164,6 +162,50 @@ fn push_range(out: &mut String, start: u32, end: u32) {
     } else {
         out.push_str(&format!("{start}-{end}"));
     }
+}
+
+/// 解析形如 `1, 3-7, 9-13` 的页码 (1-based). 空输入表示全部页.
+/// 容忍全/半角逗号、连字符/波浪线、全角数字与任意空格; 非法片段忽略,
+/// 超出 `[1, total]` 的页码丢弃. 结果已排序去重.
+pub fn parse_page_selection(input: &str, total: usize) -> Vec<u32> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return (1..=total as u32).collect();
+    }
+    let normalized: String = trimmed
+        .chars()
+        .filter_map(|c| match c {
+            c if c.is_whitespace() => None,
+            '，' => Some(','),
+            '－' | '—' | '～' | '~' => Some('-'),
+            '\u{FF10}'..='\u{FF19}' => char::from_u32(c as u32 - 0xFF10 + '0' as u32),
+            c => Some(c),
+        })
+        .collect();
+    let mut set = std::collections::BTreeSet::new();
+    for part in normalized.split(',') {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((a, b)) = part.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                for i in lo..=hi {
+                    if i >= 1 && (i as usize) <= total {
+                        set.insert(i);
+                    }
+                }
+            }
+        } else if let Ok(a) = part.parse::<u32>() {
+            if a >= 1 && (a as usize) <= total {
+                set.insert(a);
+            }
+        }
+    }
+    set.into_iter().collect()
 }
 
 fn probe_page_image_px(page: &PdfPage<'_>) -> Option<(u32, u32)> {
@@ -250,6 +292,42 @@ pub fn inspect_pdf(pdf_path: &Path) -> Result<PdfInspect, crate::error::Error> {
     })
 }
 
+/// 导入弹窗预览: 按最长边限制光栅化单页, 不写临时文件.
+pub fn render_pdf_page_preview(
+    pdf_path: &Path,
+    page_1based: u32,
+    max_side: u32,
+) -> Result<image::RgbImage, crate::error::Error> {
+    let pdfium = bind_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(pdf_path, None)
+        .map_err(|e| crate::error::Error::PdfOpen(e.to_string()))?;
+    let n = document.pages().len() as u32;
+    if page_1based == 0 || page_1based > n {
+        return Err(crate::error::Error::PdfOpen(format!(
+            "{} 没有第 {page_1based} 页 (共 {n} 页).",
+            pdf_path.display()
+        )));
+    }
+    let page = document
+        .pages()
+        .get((page_1based - 1) as u16)
+        .map_err(|e| crate::error::Error::msg(format!("读取第 {page_1based} 页失败: {e}")))?;
+    let w_pt = page.width().value.max(1.0);
+    let h_pt = page.height().value.max(1.0);
+    let cap = max_side.max(64) as f32;
+    let scale = (cap / w_pt).min(cap / h_pt).clamp(0.05, PDF_MAX_SCALE);
+    let cfg = PdfRenderConfig::new()
+        .scale_page_width_by_factor(scale)
+        .scale_page_height_by_factor(scale);
+    let image = page
+        .render_with_config(&cfg)
+        .map_err(|e| crate::error::Error::msg(format!("渲染第 {page_1based} 页失败: {e}")))?
+        .as_image()
+        .into_rgb8();
+    Ok(image)
+}
+
 pub fn clamp_pdf_scale(scale: f32) -> f32 {
     scale.clamp(PDF_MIN_SCALE, PDF_MAX_SCALE)
 }
@@ -308,6 +386,7 @@ fn scale_for_page(scales: &[(f32, f32)], index: usize) -> (f32, f32) {
 /// PDF 逐页渲染到临时 PNG; 每完成一页回调 `(index0, total, path)`.
 /// `scales` 与页一一对应为 `(scale_x, scale_y)`; 长度为 1 时套用到每一页;
 /// 空则用 [DEFAULT_PDF_SCALE].
+/// `pages` 为 1-based 页码; 空则导入全部页.
 /// 渲染后立刻在本线程识别并写 sidecar, 不占用 UI.
 /// `should_continue` 返回 false 时停在当前页之前 (已写出的页保留), 返回已完成页数.
 pub fn pdf_pages_to_tmp_images_streaming(
@@ -315,6 +394,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
     ink_threshold: i32,
     margin: i32,
     scales: &[(f32, f32)],
+    pages: &[u32],
     mut should_continue: impl FnMut() -> bool,
     mut on_page: impl FnMut(usize, usize, PathBuf),
 ) -> Result<usize, crate::error::Error> {
@@ -341,23 +421,37 @@ pub fn pdf_pages_to_tmp_images_streaming(
         .and_then(|s| s.to_str())
         .unwrap_or("pdf");
     let n = document.pages().len() as usize;
+    let selected: Vec<usize> = if pages.is_empty() {
+        (0..n).collect()
+    } else {
+        pages
+            .iter()
+            .filter_map(|&p| {
+                let i = (p as usize).saturating_sub(1);
+                (i < n).then_some(i)
+            })
+            .collect()
+    };
+    let total = selected.len();
     crate::trace::log(&format!(
-        "pdf: 共 {n} 页, 渲染倍率 {scales:?} (空则 {DEFAULT_PDF_SCALE}), tmp={}",
+        "pdf: 共 {n} 页, 导入 {total} 页, 渲染倍率 {scales:?} (空则 {DEFAULT_PDF_SCALE}), tmp={}",
         tmp_dir.display()
     ));
-    if n == 0 {
+    if n == 0 || total == 0 {
         return Err(crate::error::Error::PdfOpen(format!(
-            "{} 没有页面.",
+            "{} 没有可导入的页面.",
             pdf_path.display()
         )));
     }
 
-    for i in 0..n {
+    for (done, &i) in selected.iter().enumerate() {
         if !should_continue() {
-            crate::trace::log(&format!("pdf: 在 {i}/{n} 处放弃 (已换工程或取消导入)"));
-            return Ok(i);
+            crate::trace::log(&format!(
+                "pdf: 在 {done}/{total} 处放弃 (已换工程或取消导入)"
+            ));
+            return Ok(done);
         }
-        crate::trace::log(&format!("pdf: 渲染 {}/{n} …", i + 1));
+        crate::trace::log(&format!("pdf: 渲染 {}/{total} (原第 {} 页) …", done + 1, i + 1));
         let page = document
             .pages()
             .get(i as u16)
@@ -372,8 +466,8 @@ pub fn pdf_pages_to_tmp_images_streaming(
             .as_image()
             .into_rgb8();
         crate::trace::log(&format!(
-            "pdf: 渲染 {}/{n} 完成 {}×{}, 写 PNG …",
-            i + 1,
+            "pdf: 渲染 {}/{total} 完成 {}×{}, 写 PNG …",
+            done + 1,
             image.width(),
             image.height()
         ));
@@ -381,13 +475,13 @@ pub fn pdf_pages_to_tmp_images_streaming(
         image
             .save(&out_path)
             .map_err(|e| crate::error::Error::msg(format!("写临时 PNG 失败: {e}")))?;
-        crate::trace::log(&format!("pdf: 识别 {}/{n} …", i + 1));
+        crate::trace::log(&format!("pdf: 识别 {}/{total} …", done + 1));
         crate::detect_cache::detect_and_save(&image, &out_path, ink_threshold, margin);
-        crate::trace::log(&format!("pdf: 已写+识别 {}/{n} → 回传 UI", i + 1));
-        on_page(i, n, out_path);
+        crate::trace::log(&format!("pdf: 已写+识别 {}/{total} → 回传 UI", done + 1));
+        on_page(i, total, out_path);
     }
-    crate::trace::log(&format!("pdf: 全部 {n} 页渲染结束"));
-    Ok(n)
+    crate::trace::log(&format!("pdf: 全部 {total} 页渲染结束"));
+    Ok(total)
 }
 
 /// PDF 每页渲染到临时 PNG, 返回按页序的路径列表.
@@ -398,6 +492,7 @@ pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, crate::e
         pdf_path,
         crate::model::DEFAULT_INK_THRESHOLD,
         crate::model::DEFAULT_MARGIN,
+        &[],
         &[],
         || true,
         |_, _, p| {
@@ -433,5 +528,35 @@ mod tests {
         assert_eq!(format_page_ranges(&[1, 2, 3, 5, 6, 9]), "1-3, 5-6, 9");
         assert_eq!(format_page_ranges(&[4]), "4");
         assert_eq!(format_page_ranges(&[]), "");
+    }
+
+    #[test]
+    fn parse_page_selection_empty_means_all() {
+        assert_eq!(parse_page_selection("", 5), vec![1, 2, 3, 4, 5]);
+        assert_eq!(parse_page_selection("  ", 3), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_page_selection_mixed_list_and_ranges() {
+        assert_eq!(
+            parse_page_selection("1, 3-7, 9-13", 20),
+            vec![1, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13]
+        );
+    }
+
+    #[test]
+    fn parse_page_selection_tolerates_fullwidth() {
+        assert_eq!(parse_page_selection("１，５～７", 20), vec![1, 5, 6, 7]);
+    }
+
+    #[test]
+    fn parse_page_selection_drops_out_of_range() {
+        assert_eq!(parse_page_selection("0, 5, 999", 6), vec![5]);
+        assert_eq!(parse_page_selection("abc", 10), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn parse_page_selection_reversed_range() {
+        assert_eq!(parse_page_selection("7-3", 10), vec![3, 4, 5, 6, 7]);
     }
 }

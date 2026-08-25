@@ -133,6 +133,7 @@ impl ScoreSyncApp {
                             page.img_h = img.height();
                             page.image = Some(img);
                         }
+                        view.doc.seed_region_anchors_for_page(idx);
                     }
                     if idx == view.doc.current_page_index {
                         if view.pending_redetect
@@ -173,6 +174,7 @@ impl ScoreSyncApp {
             .collect();
         if jobs.is_empty() {
             self.doc.ensure_all_page_groups();
+            self.start_seed_align_anchors(cx);
             self.request_page_window(cx);
             cx.notify();
             return;
@@ -235,6 +237,8 @@ impl ScoreSyncApp {
                 view.request_page_window(cx);
                 if detect_missing {
                     view.start_detect_missing_pages(cx);
+                } else {
+                    view.start_seed_align_anchors(cx);
                 }
                 cx.notify();
             })
@@ -325,6 +329,7 @@ impl ScoreSyncApp {
                 view.status = format!("已载入 {n_pages} 页, {g} 个输出组合.").into();
                 view.hint = view.status.clone();
                 view.after_doc_change(cx);
+                view.start_seed_align_anchors(cx);
             })
             .ok();
         })
@@ -445,14 +450,234 @@ impl ScoreSyncApp {
             .unwrap_or_else(|| "组合".into());
         let mask_prefs = self.doc.mask_prefs.clone();
         let pieces = self.doc.group_member_pieces(&gid);
-        let block_layout = self.doc.get_block_layout(&gid).to_vec();
         let ink_threshold = self.doc.ink_threshold;
+        let heights: Vec<(String, u32)> = pieces
+            .iter()
+            .map(|(rid, img)| (rid.clone(), img.height()))
+            .collect();
+        self.block_stats_cache.clear();
+        for (rid, img) in &pieces {
+            self.block_stats_cache
+                .insert(rid.clone(), mask_tool::layout::compute_piece_stats(img, ink_threshold));
+        }
+        self.block_pieces_cache = pieces;
+        let tiles: Vec<mask_tool::gui::BlockTile> = self
+            .block_pieces_cache
+            .iter()
+            .map(|(rid, img)| {
+                let stats = self
+                    .block_stats_cache
+                    .get(rid)
+                    .copied()
+                    .unwrap_or_default();
+                mask_tool::gui::BlockTile::from_piece(rid.clone(), img, stats)
+            })
+            .collect();
+        let bg_tile = if self.doc.bg_enabled {
+            self.doc.bg_image.as_ref().map(|img| {
+                mask_tool::gui::BlockBgTile::from_rgb(img, self.doc.bg_aspect_w, self.doc.bg_aspect_h)
+            })
+        } else {
+            None
+        };
+        let block_layout = self.doc.get_block_layout(&gid).to_vec();
+        self.last_synced_block_layout = block_layout.clone();
+        // 刚加载/尚未拖动过时, 目标纵向位置就是当前显示的位置 (与
+        // `MaskToolApp::set_block_geometry` 内部对 `voff_target` 的初始化
+        // 保持一致).
+        self.last_synced_voff_target = voff;
+        let guides = self.doc.get_group_guides(&gid);
+        let bg_applied = self.doc.bg_enabled;
+        let piece_ys = piece_staff_ys_from_parts(&self.block_pieces_cache, ink_threshold);
         self.mask_tool.update(cx, |m, cx| {
             m.set_embed_side_width(side_w);
-            m.load_rgb(rgb, gid, masks, &label, cx);
+            m.load_rgb(rgb, gid, masks, guides, &label, cx);
             m.apply_color_prefs(mask_prefs);
-            m.set_block_pieces(pieces, block_layout, ink_threshold);
+            m.set_block_geometry(heights, block_layout, hoff, voff);
+            m.set_piece_staff_ys(piece_ys);
+            m.set_block_tiles(tiles, bg_tile);
+            m.set_bg_applied(bg_applied);
         });
+    }
+
+    /// 对齐/全局撤重后刷新当前蒙版预览, 不 `invalidate_session`, 以免冲掉撤重栈.
+    pub(super) fn refresh_mask_preview_keep_history(&mut self, cx: &mut Context<Self>) {
+        if self.side_tool != SideTool::Mask {
+            return;
+        }
+        let Some(gid) = self.mask_target.clone() else {
+            return;
+        };
+        if self.doc.ensure_group_pages(&gid).is_err() {
+            return;
+        }
+        let Some((rgb, hoff, voff)) = self.doc.compose_group_preview(&gid) else {
+            return;
+        };
+        self.mask_preview_hoff = hoff;
+        self.mask_preview_voff = voff;
+        let masks: Vec<MaskRect> = self
+            .doc
+            .get_group_masks(&gid)
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                m.translate(hoff as i32, voff as i32);
+                m
+            })
+            .collect();
+        let mask_prefs = self.doc.mask_prefs.clone();
+        let pieces = self.doc.group_member_pieces(&gid);
+        let ink_threshold = self.doc.ink_threshold;
+        let heights: Vec<(String, u32)> = pieces
+            .iter()
+            .map(|(rid, img)| (rid.clone(), img.height()))
+            .collect();
+        self.block_stats_cache.clear();
+        for (rid, img) in &pieces {
+            self.block_stats_cache
+                .insert(rid.clone(), mask_tool::layout::compute_piece_stats(img, ink_threshold));
+        }
+        self.block_pieces_cache = pieces;
+        let tiles: Vec<mask_tool::gui::BlockTile> = self
+            .block_pieces_cache
+            .iter()
+            .map(|(rid, img)| {
+                let stats = self
+                    .block_stats_cache
+                    .get(rid)
+                    .copied()
+                    .unwrap_or_default();
+                mask_tool::gui::BlockTile::from_piece(rid.clone(), img, stats)
+            })
+            .collect();
+        let bg_tile = if self.doc.bg_enabled {
+            self.doc.bg_image.as_ref().map(|img| {
+                mask_tool::gui::BlockBgTile::from_rgb(img, self.doc.bg_aspect_w, self.doc.bg_aspect_h)
+            })
+        } else {
+            None
+        };
+        let block_layout = self.doc.get_block_layout(&gid).to_vec();
+        self.last_synced_block_layout = block_layout.clone();
+        self.last_synced_voff_target = voff;
+        let guides = self.doc.get_group_guides(&gid);
+        let bg_applied = self.doc.bg_enabled;
+        let piece_ys = piece_staff_ys_from_parts(&self.block_pieces_cache, ink_threshold);
+        self.mask_tool.update(cx, |m, cx| {
+            m.replace_session_image(rgb, masks, guides, cx);
+            m.apply_color_prefs(mask_prefs);
+            m.set_block_geometry(heights, block_layout, hoff, voff);
+            m.set_piece_staff_ys(piece_ys);
+            m.set_block_tiles(tiles, bg_tile);
+            m.set_bg_applied(bg_applied);
+        });
+    }
+
+    /// 精确算出「组合分块」当前布局应该写入的 `DocState::group_voff_shift`,
+    /// 使得 `apply_bg::process::natural_voff(拼合图高度) + group_voff_shift
+    /// == voff_target` (`MaskToolApp::voff_target` 表达的"目标纵向位置",
+    /// 见其字段文档). 不假设这个关系随拼合图高度变化是线性的——拼合图
+    /// 高度跨越 `apply_bg::process::frame_size` 按宽/按高定形的切换分界点
+    /// 前后并不成立, 这里直接用真实宽高比重算, 保证:
+    /// - 拖动结束/撤销/重做后, "未被这次改动波及的块" 的绝对位置在底色
+    ///   居中合成后依然精确不变 (无论拼合图高度是否跨越了切换分界点);
+    /// - 撤销/重做直接回滚 `voff_target` (随 `UndoSnapshot` 一起, 不额外
+    ///   处理), 这里对同一个 `voff_target` 结合*当时*的布局重新精确反算
+    ///   出的 `group_voff_shift` 与原来完全一致, 不会残留误差.
+    fn resolve_group_voff_shift(&self, layout: &[mask_tool::layout::BlockAdjust], voff_target: i64) -> i64 {
+        if !self.doc.bg_enabled {
+            return 0;
+        }
+        let Some(bg) = self.doc.bg_image.as_ref() else {
+            return 0;
+        };
+        if self.block_pieces_cache.is_empty() {
+            return 0;
+        }
+        let heights: Vec<(String, u32)> = self
+            .block_pieces_cache
+            .iter()
+            .map(|(rid, img)| (rid.clone(), img.height()))
+            .collect();
+        let sw = self.block_pieces_cache.iter().map(|(_, img)| img.width()).max().unwrap_or(1);
+        let sh = mask_tool::layout::sheet_height(&heights, layout);
+        let natural = apply_bg::process::natural_voff(
+            sw,
+            sh,
+            bg.width(),
+            bg.height(),
+            self.doc.bg_aspect_w,
+            self.doc.bg_aspect_h,
+        );
+        voff_target - natural
+    }
+
+    /// 蒙版拖动分块时 (`MaskToolApp::block_layout` 逐帧变化): 拖动过程中
+    /// 只把布局写回文档, 画面由蒙版工具用已缓存的分块 GPU 贴图跟手绘制,
+    /// 避免每帧整图重拼 + 重新上传贴图. 松手 (或撤销/重做) 后再合成一次
+    /// 含底色的最终预览图回填.
+    pub(super) fn sync_block_layout_from_mask_tool(
+        &mut self,
+        mt: &Entity<MaskToolApp>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.side_tool != SideTool::Mask {
+            return;
+        }
+        let Some(gid) = self.mask_target.clone() else {
+            return;
+        };
+        let dragging = mt.read(cx).is_block_dragging();
+        let has_tiles = mt.read(cx).has_block_tiles();
+        let active = mt.read(cx).selected_block_id().map(|s| s.to_string());
+        if active.is_some() && active != self.mask_active_block_id {
+            self.mask_active_block_id = active;
+            self.scroll_mask_block_list_to_active();
+            cx.notify();
+        }
+        let layout = mt.read(cx).block_layout_clone();
+        let voff_target = mt.read(cx).voff_target();
+        let drag_ended = self.block_drag_was_active && !dragging;
+        self.block_drag_was_active = dragging;
+        if layout == self.last_synced_block_layout
+            && voff_target == self.last_synced_voff_target
+            && !drag_ended
+        {
+            if dragging {
+                let (hoff, voff) = mt.read(cx).preview_offsets();
+                self.mask_preview_hoff = hoff;
+                self.mask_preview_voff = voff;
+            }
+            return;
+        }
+        self.last_synced_block_layout = layout.clone();
+        self.last_synced_voff_target = voff_target;
+        let voff_shift = self.resolve_group_voff_shift(&layout, voff_target);
+        self.doc.set_block_layout(&gid, layout);
+        self.doc.set_group_voff_shift(&gid, voff_shift);
+        if dragging && has_tiles && !drag_ended {
+            let (hoff, voff) = mt.read(cx).preview_offsets();
+            self.mask_preview_hoff = hoff;
+            self.mask_preview_voff = voff;
+            return;
+        }
+        let Some((rgb, hoff, voff)) = self.doc.compose_group_preview_with_parts_and_stats(
+            &gid,
+            &self.block_pieces_cache,
+            &self.block_stats_cache,
+        ) else {
+            return;
+        };
+        let dx = (hoff - self.mask_preview_hoff) as i32;
+        let dy = (voff - self.mask_preview_voff) as i32;
+        self.mask_preview_hoff = hoff;
+        self.mask_preview_voff = voff;
+        mt.update(cx, |m, cx| {
+            m.shift_masks(dx, dy);
+            m.update_base_image(rgb, hoff, voff, cx);
+        });
+        self.mark_video_pool_dirty_group(&gid);
     }
 
     pub(super) fn resolve_mask_target(&self) -> Option<String> {
@@ -473,8 +698,14 @@ impl ScoreSyncApp {
         let Some(gid) = self.mask_target.clone() else {
             return;
         };
-        let (masks, prefs, block_layout) = self.mask_tool.update(cx, |m, _| {
-            (m.masks_clone(), m.color_prefs(), m.block_layout_clone())
+        let (masks, prefs, block_layout, voff_target, guides) = self.mask_tool.update(cx, |m, _| {
+            (
+                m.masks_clone(),
+                m.color_prefs(),
+                m.block_layout_clone(),
+                m.voff_target(),
+                m.guides_clone(),
+            )
         });
         let (hoff, voff) = (self.mask_preview_hoff, self.mask_preview_voff);
         let masks: Vec<MaskRect> = masks
@@ -484,15 +715,36 @@ impl ScoreSyncApp {
                 m
             })
             .collect();
-        let layout_changed = block_layout != self.doc.get_block_layout(&gid);
-        self.doc.set_group_masks(&gid, masks);
-        if layout_changed {
-            self.doc.set_block_layout(&gid, block_layout);
+        let voff_shift = self.resolve_group_voff_shift(&block_layout, voff_target);
+        // 关窗 / 切页签也会 flush; 内容没变时不能把工程标脏, 否则刚保存完
+        // 退出仍会弹出未保存.
+        let masks_changed = masks.as_slice() != self.doc.get_group_masks(&gid);
+        let guides_changed = guides != self.doc.get_group_guides(&gid);
+        let layout_changed =
+            block_layout_effectively_differs(&block_layout, self.doc.get_block_layout(&gid));
+        let voff_changed = voff_shift != self.doc.get_group_voff_shift(&gid);
+        let prefs_changed = prefs != self.doc.mask_prefs.clone().clamp();
+        if masks_changed {
+            self.doc.set_group_masks(&gid, masks);
         }
-        self.doc.mask_prefs = prefs.clone();
-        config::remember_mask_prefs(&prefs);
-        self.mark_dirty();
-        self.mark_video_pool_dirty_group(&gid);
+        if guides_changed {
+            self.doc.set_group_guides(&gid, guides);
+        }
+        if layout_changed {
+            self.doc.set_block_layout(&gid, block_layout.clone());
+        }
+        if voff_changed {
+            self.doc.set_group_voff_shift(&gid, voff_shift);
+        }
+        if prefs_changed {
+            self.doc.mask_prefs = prefs.clone();
+            config::remember_mask_prefs(&prefs);
+        }
+        if masks_changed || layout_changed || voff_changed {
+            self.mark_video_pool_dirty_group(&gid);
+        } else if guides_changed || prefs_changed {
+            self.mark_dirty();
+        }
     }
 
     /// `scroll_other`: 点顶部页签时滚侧栏列表定位; 点侧栏自身则两边都不滚.
@@ -715,8 +967,10 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn after_doc_change(&mut self, cx: &mut Context<Self>) {
+        self.cancel_align_all();
         self.doc.prune_dangling_groups_if_hydrated();
         self.doc.sync_group_colors();
+        self.doc.seed_guide_defaults();
         self.mark_dirty();
         self.mark_video_pool_dirty_all();
         // 若当前页尺寸变了不必重渲整图, 但区域会重绘
@@ -737,6 +991,50 @@ impl ScoreSyncApp {
             self.sync_mask_image(cx);
         }
         cx.notify();
+    }
+}
+
+/// 与 `DocState::set_block_layout` 一致: 全是空操作等价于未设置.
+fn block_layout_effectively_differs(
+    new: &[mask_tool::layout::BlockAdjust],
+    stored: &[mask_tool::layout::BlockAdjust],
+) -> bool {
+    let new_live = new.iter().any(|a| !a.is_noop());
+    let stored_live = stored.iter().any(|a| !a.is_noop());
+    match (new_live, stored_live) {
+        (false, false) => false,
+        (true, true) => new != stored,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod layout_diff_tests {
+    use super::block_layout_effectively_differs;
+    use mask_tool::layout::BlockAdjust;
+
+    fn adj(id: &str, extra_top: i32) -> BlockAdjust {
+        BlockAdjust {
+            region_id: id.into(),
+            extra_top,
+            extra_bottom: 0,
+            gap_before: 0,
+            gap_after: 0,
+        }
+    }
+
+    #[test]
+    fn empty_and_all_noop_layouts_are_the_same() {
+        assert!(!block_layout_effectively_differs(&[], &[]));
+        assert!(!block_layout_effectively_differs(&[adj("a", 0)], &[]));
+        assert!(!block_layout_effectively_differs(&[], &[adj("a", 0)]));
+    }
+
+    #[test]
+    fn live_layout_differs_from_empty() {
+        assert!(block_layout_effectively_differs(&[adj("a", 4)], &[]));
+        assert!(block_layout_effectively_differs(&[], &[adj("a", 4)]));
+        assert!(block_layout_effectively_differs(&[adj("a", 4)], &[adj("a", 5)]));
     }
 }
 
@@ -768,4 +1066,22 @@ fn sample_paper_rgb(img: Option<&image::RgbImage>) -> [u8; 3] {
         (gs / n) as u8,
         (bs / n) as u8,
     ]
+}
+
+/// 在原始裁切条带上算锚点 (当前算法), 不读 sidecar 里可能过期的值,
+/// 也不在缩放后的预览画布上重检.
+fn piece_staff_ys_from_parts(
+    parts: &[(String, image::RgbImage)],
+    threshold: i32,
+) -> HashMap<String, Option<i32>> {
+    parts
+        .iter()
+        .map(|(id, img)| {
+            let y1 = (img.height() as i32).saturating_sub(1);
+            (
+                id.clone(),
+                mask_tool::staff::band_staff_anchor(img, 0, y1, threshold),
+            )
+        })
+        .collect()
 }

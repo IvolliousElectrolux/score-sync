@@ -11,6 +11,7 @@
 mod blocks;
 mod canvas;
 mod chrome;
+mod guides;
 mod io;
 mod picker;
 mod tools;
@@ -18,17 +19,20 @@ mod types;
 
 pub(crate) use blocks::BlockHitZone;
 pub(crate) use types::*;
+pub use blocks::{BlockBgTile, BlockTile};
+pub use guides::GuideHostCmd;
 
-pub(crate) use std::collections::HashSet;
+pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::sync::Arc;
 
 pub(crate) use gpui::{
     actions, canvas, div, point, prelude::*, px, quad, relative, rgb, size, App, Application,
-    Bounds, Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathBuilder, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
+    Bounds, ContentMask, Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, RenderImage, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, Window, WindowBounds,
+    WindowOptions,
 };
 pub(crate) use image::{Frame, ImageBuffer, Rgb, RgbaImage};
 pub(crate) use smallvec::smallvec;
@@ -41,6 +45,7 @@ pub(crate) use crate::mask::{
     default_export_path, export_masked, first_image_in_paths, is_image_path, new_id, MaskRect,
     DEFAULT_MASK_OPACITY,
 };
+pub use crate::guide::GuideState;
 
 actions!(
     mask_tool,
@@ -55,7 +60,6 @@ actions!(
         TogglePanMode,
         ToggleBrushMode,
         TogglePolyMode,
-        ToggleMoveBlocksMode,
         CancelPolyDraft,
         Undo,
         Redo
@@ -74,9 +78,9 @@ pub struct MaskToolApp {
     masks: Vec<MaskRect>,
     selected: HashSet<String>,
     /// 变更前快照栈 (Ctrl+Z)
-    undo_stack: Vec<Vec<MaskRect>>,
+    undo_stack: Vec<UndoSnapshot>,
     /// 撤销后快照栈 (Ctrl+Y)
-    redo_stack: Vec<Vec<MaskRect>>,
+    redo_stack: Vec<UndoSnapshot>,
     /// 按组合/页面会话持久化的撤重历史 (切走再回来仍可撤)
     histories: std::collections::HashMap<String, MaskHistory>,
     /// 框选/折线默认色与透明度
@@ -137,14 +141,68 @@ pub struct MaskToolApp {
     session_key: Option<String>,
     /// 偏好变更回调标记: 宿主可在 notify 后 flush 到 doc/appdata
     prefs_dirty: bool,
-    /// 「组合分块」原始裁切片段 (未应用位置/尺寸微调), 供块拖动即时重拼.
-    pub(crate) block_pieces: Vec<(String, image::RgbImage)>,
-    /// 当前块位置/尺寸微调 (拖动时实时更新; 宿主按需 pull 持久化).
+    /// 「组合分块」各成员原始高度 (未应用位置/尺寸微调), 与 `block_layout`
+    /// 一起换算命中测试/叠加线坐标; 实际像素拼接 (含底色合成) 由宿主负责.
+    pub(crate) block_heights: Vec<(String, u32)>,
+    /// 当前块位置/尺寸微调 (拖动时实时更新; 宿主按需 pull 持久化并重算).
     pub(crate) block_layout: Vec<BlockAdjust>,
-    /// 拼接背景色填充用的墨迹阈值 (来自宿主 `DocState.ink_threshold`).
-    block_ink_threshold: i32,
-    /// 「移动分块」模式下当前选中/拖动的块.
+    /// 组合拼合图在当前画布中的纵向偏移 (底色合成居中时非 0).
+    block_voff: i64,
+    /// 组合拼合图在当前画布中的横向偏移 (底色合成左右补边时非 0).
+    block_hoff: i64,
+    /// 拖动分块时 GPU 贴图预览用的底色裁切原点; 与 `apply_bg::process::preview_frame` 一致.
+    block_bg_left: u32,
+    block_bg_top: u32,
+    block_shows_bg: bool,
+    /// 谱面相对底色页面的缩放. 谱面高于页面时 < 1, 只缩小内部块, 不放大
+    /// 底色; 无底色或尚未越过按宽定高分界时为 1.
+    pub(crate) content_scale: f32,
+    /// 各分块原始裁切的 GPU 贴图 (加载时上传一次, 拖动时只改绘制位置,
+    /// 不再每帧把整张预览图重新上传图集).
+    pub(crate) block_tiles: Vec<BlockTile>,
+    pub(crate) block_bg: Option<BlockBgTile>,
+    /// 各块在原始页图条带上预计算的谱表锚点 (相对条带顶, `None` = 非谱表).
+    /// 当前页对齐用这个, 不在缩放后的预览画布上重检.
+    pub(crate) piece_staff_ys: HashMap<String, Option<i32>>,
+    /// 当前组合"应该"的纵向目标位置 (`natural_voff(拼合图高度) +
+    /// group_voff_shift` 理想情况下应等于这个值). 拖动分块时会把当时的
+    /// 居中留白折进第一块 `gap_before` (页面绝对坐标, y=0 即页顶), 并把
+    /// 这个目标值置 0 (顶对齐). 只在这里记录*意图*, 具体应该写入多少
+    /// `DocState::group_voff_shift` 由宿主结合真实宽高比
+    /// (`apply_bg::process::natural_voff`) 精确反算. 纳入撤销/重做快照
+    /// (`UndoSnapshot::voff_target`), 保证撤销后位置能精确复原.
+    pub(crate) voff_target: i64,
+    /// 当前选中/拖动的块 (未选中任何蒙版时才生效).
     pub(crate) block_selected: Option<String>,
+    /// 鼠标当前是否悬停在可拖动的分块区域上 (无拖动时按位置实时更新),
+    /// 只有这时才把光标换成上下拉伸样式, 不能整个画布都换.
+    pub(crate) block_hover: bool,
+    /// 拖动分块期间锁定的 (img_w, img_h), 用于计算显示缩放比例. 拼合图
+    /// 总高会随拖动实时变化, 如果每帧都按最新尺寸重算「适应视口」缩放,
+    /// 画面会跟着抖动/整体缩放, 屏幕坐标换算成图像坐标的比例也跟着变,
+    /// 导致拖动手感卡顿、鼠标位移跟分块实际位移对不上 (尤其是向上拖动
+    /// 需要精确吃掉间距时最明显). 拖动开始时锁定, 松手时解锁.
+    pub(crate) block_drag_freeze: Option<(f32, f32)>,
+    /// 当前组合的辅助线 (画布坐标系固定参考线, 仅蒙版画布内可见, 不参与
+    /// 导出/合成), 随 `session_key` 一起切换.
+    pub(crate) guides: GuideState,
+    /// 已选中的辅助线下标 (into `self.guides.lines`).
+    pub(crate) guide_selected: HashSet<usize>,
+    /// 鼠标悬停的辅助线下标.
+    pub(crate) guide_hover: Option<usize>,
+    /// 宿主填充: 工程是否启用了底色层 (`DocState::bg_enabled`), 只用于
+    /// 侧栏导出按钮的文案跟随, 不影响蒙版编辑本身的任何计算.
+    pub(crate) bg_applied: bool,
+    /// 左键开关是否作用到全部组合 (工程级, 宿主持久化).
+    pub(crate) guides_global: bool,
+    /// 同样根数的组合是否同步辅助线位置 (工程级, 宿主持久化).
+    pub(crate) guides_sync: bool,
+    /// 辅助线按钮右键菜单 (窗口坐标).
+    pub(crate) guide_menu: Option<(f32, f32)>,
+    /// 对齐按钮右键菜单 (窗口坐标).
+    pub(crate) align_menu: Option<(f32, f32)>,
+    /// 请宿主代办的全局辅助线/对齐操作; 宿主 observe 后 `take`.
+    pub(crate) guide_host_cmd: Option<GuideHostCmd>,
 }
 
 
@@ -180,7 +238,7 @@ impl MaskToolApp {
             brush_color: [255, 255, 255],
             brush_opacity: DEFAULT_BRUSH_OPACITY,
             recent_colors: MaskColorPrefs::default().recent_colors,
-            mode: ToolMode::Draw,
+            mode: ToolMode::Select,
             zoom: 1.0,
             pan: point(0.0, 0.0),
             user_zoomed: false,
@@ -221,10 +279,30 @@ impl MaskToolApp {
             embed_side_width: 0.0,
             session_key: None,
             prefs_dirty: false,
-            block_pieces: Vec::new(),
+            block_heights: Vec::new(),
             block_layout: Vec::new(),
-            block_ink_threshold: 200,
+            block_voff: 0,
+            block_hoff: 0,
+            block_bg_left: 0,
+            block_bg_top: 0,
+            block_shows_bg: false,
+            content_scale: 1.0,
+            block_tiles: Vec::new(),
+            block_bg: None,
+            piece_staff_ys: HashMap::new(),
+            voff_target: 0,
             block_selected: None,
+            block_hover: false,
+            block_drag_freeze: None,
+            guides: GuideState::default(),
+            guide_selected: HashSet::new(),
+            guide_hover: None,
+            bg_applied: false,
+            guides_global: false,
+            guides_sync: false,
+            guide_menu: None,
+            align_menu: None,
+            guide_host_cmd: None,
         };
         app.rebuild_hue_image();
         app.rebuild_sb_image();
@@ -336,9 +414,6 @@ impl Render for MaskToolApp {
             .on_action(cx.listener(|this, _: &TogglePolyMode, _, cx| {
                 this.toggle_poly_mode(cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleMoveBlocksMode, _, cx| {
-                this.toggle_move_blocks_mode(cx)
-            }))
             .on_action(cx.listener(|this, _: &CancelPolyDraft, _, cx| {
                 this.cancel_poly_draft(cx)
             }))
@@ -349,6 +424,7 @@ impl Render for MaskToolApp {
                     this.load_image(p, cx);
                 }
             }))
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -391,7 +467,6 @@ pub fn run_gui(initial: Option<PathBuf>) {
             KeyBinding::new("b", ToggleDrawMode, Some("MaskTool")),
             KeyBinding::new("l", TogglePolyMode, Some("MaskTool")),
             KeyBinding::new("p", TogglePanMode, Some("MaskTool")),
-            KeyBinding::new("m", ToggleMoveBlocksMode, Some("MaskTool")),
             KeyBinding::new("escape", CancelPolyDraft, Some("MaskTool")),
         ]);
         cx.bind_keys(apply_bg::bind_primary("o", OpenFile, Some("MaskTool")));

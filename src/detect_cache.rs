@@ -11,11 +11,20 @@ use serde::{Deserialize, Serialize};
 use crate::staff_detect::{detect_bands, Band, StaffGrouping};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CachedStaffAnchor {
+    /// `Some` = 谱表锚点 (相对条带顶); `None` = 已判定不是五线谱.
+    pub y: Option<i32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedRegion {
     pub id: String,
     pub y0: i32,
     pub y1: i32,
     pub kind: String,
+    /// 旧 sidecar 没有该字段, 视为尚未计算.
+    #[serde(default)]
+    pub staff_anchor: Option<CachedStaffAnchor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,11 +71,15 @@ pub fn detect_to_file(img: &RgbImage, ink_threshold: i32, margin: i32) -> PageDe
     }
     let regions = bands
         .into_iter()
-        .map(|b| CachedRegion {
-            id: new_rid(),
-            y0: b.y0,
-            y1: b.y1,
-            kind: b.kind,
+        .map(|b| {
+            let y = mask_tool::staff::band_staff_anchor(img, b.y0, b.y1, ink_threshold);
+            CachedRegion {
+                id: new_rid(),
+                y0: b.y0,
+                y1: b.y1,
+                kind: b.kind,
+                staff_anchor: Some(CachedStaffAnchor { y }),
+            }
         })
         .collect();
     PageDetectFile {

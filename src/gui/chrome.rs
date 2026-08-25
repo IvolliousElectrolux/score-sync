@@ -5,6 +5,9 @@ use super::ScoreSyncApp;
 
 impl ScoreSyncApp {
     pub(super) fn show_help(&mut self, cx: &mut Context<Self>) {
+        if self.page_organize.is_some() {
+            self.close_page_organize(cx);
+        }
         self.drag = None;
         self.dialog = Some(DialogKind::Help);
         cx.notify();
@@ -25,6 +28,7 @@ impl ScoreSyncApp {
 
     pub(super) fn has_modal_overlay(&self, cx: &App) -> bool {
         self.pdf_import.is_some()
+            || self.page_organize.is_some()
             || self.dialog.is_some()
             || self.apply_bg.read(cx).is_error_open()
             || self.score_video.read(cx).is_error_open()
@@ -180,10 +184,10 @@ impl ScoreSyncApp {
                 cx,
             ))
             .child(self.menu_item(
-                "fit",
-                "适应窗口 (F)",
+                "organize_pages",
+                "组织页面 (P)",
                 false,
-                |this, _, cx| this.fit_to_view(cx),
+                |this, window, cx| this.toggle_page_organize(window, cx),
                 cx,
             ))
     }
@@ -282,6 +286,7 @@ impl ScoreSyncApp {
         };
         div()
             .id("left_workspace")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -289,6 +294,24 @@ impl ScoreSyncApp {
             .min_h(px(0.))
             .when(self.side_tool == SideTool::Crop, |d| {
                 d.child(self.toolbar(cx))
+            })
+            .when(self.side_tool == SideTool::Mask, |d| {
+                // 蒙版面板顶部菜单栏 (导出本块/适应/删除 + 辅助线/对齐).
+                let tb = self
+                    .mask_tool
+                    .update(cx, |m, cx| m.toolbar_embedded(cx).into_any_element());
+                d.child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .flex_shrink_0()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(rgb(0xcbd5e1))
+                        .bg(rgb(0xe2e8f0))
+                        .child(tb),
+                )
             })
             .child(
                 div()
@@ -365,6 +388,8 @@ impl ScoreSyncApp {
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             this.mask_active_block_id = Some(rid.clone());
+                            this.mask_tool
+                                .update(cx, |m, cx| m.select_block(Some(rid.clone()), cx));
                             cx.notify();
                         }),
                     ),
@@ -737,7 +762,11 @@ impl ScoreSyncApp {
         self.mask_target = None;
         self.sync_mask_image(cx);
     }
-    pub(super) fn dialog_overlay(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn dialog_overlay(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // 关窗/新建确认必须盖过子面板错误, 否则「确定」被挡住也退不出.
         if matches!(self.dialog, Some(DialogKind::UnsavedExit)) {
             return self.unsaved_exit_dialog(cx).into_any_element();
@@ -747,6 +776,9 @@ impl ScoreSyncApp {
         }
         if self.pdf_import.is_some() {
             return self.pdf_import_overlay(cx).into_any_element();
+        }
+        if self.page_organize.is_some() {
+            return self.page_organize_overlay(window, cx).into_any_element();
         }
         if self.score_video.read(cx).is_export_open() {
             return self

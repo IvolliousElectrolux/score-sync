@@ -26,6 +26,42 @@ impl MaskToolApp {
                 |this, _, cx| this.delete_selected(cx),
                 cx,
             ))
+            .child(self.btn(
+                "clear",
+                "清空本页蒙版",
+                false,
+                false,
+                |this, _, cx| this.clear_masks(cx),
+                cx,
+            ))
+            .when(self.has_block_pieces(), |d| {
+                d.child(self.btn_with_context(
+                    "guides",
+                    "辅助线",
+                    self.guides_on(),
+                    |this, _, cx| this.guide_toggle(cx),
+                    |this, ev, _, cx| {
+                        this.open_guide_menu(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                    },
+                    cx,
+                ))
+                .when(self.guides_on(), |d2| {
+                    d2.child(self.btn_with_context(
+                        "guide_align",
+                        "对齐",
+                        false,
+                        |this, _, cx| this.guide_align_current(cx),
+                        |this, ev, _, cx| {
+                            this.open_align_menu(
+                                f32::from(ev.position.x),
+                                f32::from(ev.position.y),
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                })
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -64,6 +100,43 @@ impl MaskToolApp {
             MouseButton::Left,
             cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
         )
+    }
+
+    pub(super) fn btn_with_context(
+        &self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        active: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        on_right: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
+        let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
+        let hover = if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) };
+        div()
+            .id(id.into())
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(bg)
+            .border_1()
+            .border_color(rgb(0x94a3b8))
+            .text_color(fg)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(label.into())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev, window, cx| {
+                    cx.stop_propagation();
+                    on_right(this, ev, window, cx);
+                }),
+            )
     }
 
     pub fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -844,17 +917,7 @@ impl MaskToolApp {
                                 true,
                                 |this, _, cx| this.toggle_pan_mode(cx),
                                 cx,
-                            ))
-                            .when(self.has_block_pieces(), |d| {
-                                d.child(self.btn(
-                                    "mode_move_blocks",
-                                    "移动分块 (M)",
-                                    self.mode == ToolMode::MoveBlocks,
-                                    true,
-                                    |this, _, cx| this.toggle_move_blocks_mode(cx),
-                                    cx,
-                                ))
-                            }),
+                            )),
                     )
                     .when(!embedded, |d| {
                         d.child(self.btn(
@@ -877,7 +940,11 @@ impl MaskToolApp {
                     .child(self.btn(
                         "btn_export",
                         if embedded {
-                            "导出本页图片 (E)…"
+                            if self.bg_applied {
+                                "导出蒙版+底色后图片 (E)…"
+                            } else {
+                                "导出蒙版后图片 (E)…"
+                            }
                         } else {
                             "导出已遮盖图片 (E)…"
                         },

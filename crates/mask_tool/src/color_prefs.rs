@@ -33,7 +33,7 @@ fn default_recent() -> Vec<[u8; 3]> {
 }
 
 /// 可序列化进工程 / appdata 的选色偏好.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MaskColorPrefs {
     #[serde(default = "default_recent")]
     pub recent_colors: Vec<[u8; 3]>,

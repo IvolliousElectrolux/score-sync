@@ -40,7 +40,7 @@ fn is_zero_i32(v: &i32) -> bool {
 /// 轴对齐矩形 / 折线多边形 / 画笔描边.
 ///
 /// 旧工程只有 `id/x0/y0/x1/y1`, 新字段走默认值, 行为与原来一致.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MaskRect {
     pub id: String,
     pub x0: i32,
@@ -63,6 +63,13 @@ pub struct MaskRect {
     /// 本项不透明度 (0.05..=1). 旧工程缺省为 [`DEFAULT_MASK_OPACITY`].
     #[serde(default = "default_mask_opacity")]
     pub opacity: f32,
+    /// 落笔时绑定的「组合分块」成员 (region_id); 拖动该块时这条画迹/蒙版
+    /// 框整体跟着平移, 保证蒙版始终盖在同一块内容上. 落笔起点/终点所在块
+    /// 冲突、都不在任何块内、或是旧工程 (无此字段) 时留空, 改为按当前
+    /// 几何中心高度动态归属所在块 (随布局变化重新判定), 见
+    /// `MaskToolApp::sync_masks_to_block_shift`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_block: Option<String>,
 }
 
 impl MaskRect {
@@ -141,6 +148,7 @@ impl MaskRect {
             color: self.color,
             poly_points: Vec::new(),
             opacity: self.opacity,
+            bound_block: self.bound_block.clone(),
         }
     }
 
@@ -242,6 +250,27 @@ impl MaskRect {
         }
         for p in &mut self.poly_points {
             p.1 += dy;
+        }
+    }
+
+    /// 把所有坐标按 `f` 映射 (画布缩放/平移时用来整组换算蒙版).
+    pub fn map_xy(&mut self, mut f: impl FnMut(i32, i32) -> (i32, i32)) {
+        let (x0, y0) = f(self.x0, self.y0);
+        let (x1, y1) = f(self.x1, self.y1);
+        self.x0 = x0;
+        self.y0 = y0;
+        self.x1 = x1;
+        self.y1 = y1;
+        for p in &mut self.brush_points {
+            *p = f(p.0, p.1);
+        }
+        for p in &mut self.poly_points {
+            *p = f(p.0, p.1);
+        }
+        if self.is_brush() {
+            self.refresh_brush_bounds();
+        } else if self.is_poly() {
+            self.refresh_poly_bounds();
         }
     }
 }

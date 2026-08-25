@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use gpui::{Pixels, Point, SharedString};
 use crate::model::{Group, Page, Region};
+use mask_tool::guide::GuideState;
+use mask_tool::layout::BlockAdjust;
 use mask_tool::mask::MaskRect;
 
 pub(crate) const CROP_HISTORY_LIMIT: usize = 64;
@@ -19,6 +21,19 @@ pub(crate) const SIDE_PANEL_MAX: f32 = 720.0;
 pub(crate) const TAB_VIRTUAL_THRESHOLD: usize = 48;
 /// 页签估宽 (页码:文件名 + 间距); 有实测后用平均值.
 pub(crate) const TAB_SLOT_PX: f32 = 76.0;
+/// 「组织页面」缩略图最长边 (像素).
+pub(crate) const ORG_THUMB_MAX_SIDE: u32 = 192;
+pub(crate) const ORG_CELL_W: f32 = 128.0;
+pub(crate) const ORG_THUMB_W: f32 = 112.0;
+pub(crate) const ORG_THUMB_H: f32 = 158.0;
+pub(crate) const ORG_GRID_GAP: f32 = 12.0;
+pub(crate) const ORG_SCROLLBAR_W: f32 = 10.0;
+/// 组织页面 overlay 相对窗口的边距 (原先 p_4 = 1rem).
+pub(crate) const ORG_SLOT_PAD: f32 = 16.0;
+/// 组织页面卡片水平 chrome: 左右 padding + border_1.
+pub(crate) const ORG_CARD_PAD_X: f32 = 16.0;
+pub(crate) const ORG_CARD_BORDER: f32 = 1.0;
+pub(crate) const ORG_CARD_CHROME_X: f32 = ORG_CARD_PAD_X * 2.0 + ORG_CARD_BORDER * 2.0;
 /// 页签中间 PDF 名的最大显示列宽 (半角=1, 全角=2). 超出则截断并加…….
 pub(crate) const TAB_LABEL_NAME_COLS: usize = 11;
 /// 输出组合 / 蒙版组合超过此值时只渲染可视范围 (数据仍是全部).
@@ -32,16 +47,19 @@ pub(crate) const HELP_TEMPLATE: &str = "\
   {m}O 打开图片/PDF | {ms}N 新建工程 | {ms}O 打开工程 | {m}S 保存工程 | {ms}S 另存工程\n\
   D 识别本页 | A 识别全部页\n\
   N 添加新块 | S 分割块 | M 合并组合 | {m}M 一键两两合并 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
-  E 导出组合 | R 重置本页分组 | F 适应窗口 | H / F1 操作说明\n\
+  E 导出组合 | R 重置本页分组 | P 组织页面 | H / F1 操作说明\n\
   {m}A 全选本页原子块 | 输出组合 {m}点击多选 (拖拽时整块一起调序)\n\
   {m}Z/Y 撤重 (按当前标签页独立记忆; 关闭页面亦可撤回)\n\
   滚轮上下平移画布, Shift+滚轮左右平移, {m}滚轮缩放\n\
 \n\
 【蒙版】快捷键 (右侧切到蒙版后):\n\
+  初始为选择态 (不激活框选); 未选中蒙版时可直接拖动/拉伸「组合分块」\n\
   B 框选 | L 折线 (逐点连线, 吸附首点闭环) | P 平移 | 画笔/橡皮 (侧栏, 可调色/粗细)\n\
   E 导出本页图片 | F 适应 | Delete 删除选中\n\
-  {m}A 全选蒙版 | {m}Z/Y 撤重 (按组合独立记忆, 切走再回来仍可撤)\n\
+  {m}A 全选蒙版 | {m}Z/Y 撤重 (蒙版与分块微调共用, 按组合独立记忆, 切走再回来仍可撤)\n\
   {m}S 保存工程 (各面板通用)\n\
+  顶栏「辅助线」开关 (右键: 全局开启 / 同步同根数位置 / 当前页根数);\n\
+  「对齐」把本组合锚到辅助线 (右键: 全局对齐 / 还原初始状态)\n\
   有选中时透明度滑条改选中项; 无选中时改后续新建默认透明度\n\
   点击色块打开浮动取色器: HSV / 最近色 / RGB 手输; 滴管可从左侧图取色\n\
   (悬浮实时预览色盘与 RGB, 单击确认, Esc/右键取消); 画笔光标为圆形预览\n\
@@ -64,6 +82,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留当前页±4 (输出组合/蒙版页签仍列出全部).\n\
 2. {m}S 保存为单个 .staffcrop 工程包 (zip), 下次可用 {ms}O 继续; {ms}N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
+   「组织页面」(P) 用缩略图网格排序/删除, 比拖页签轻松; 无叉号, {m}点击多选 / Shift 连选, Delete 删选中, {m}Z/Y 撤重.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
    识别先找五线谱表, 再看相邻谱表是否有墨迹像素直接 8 连通 (贴边分量、无内部孔洞或过窄的连通域不计).\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
@@ -78,6 +97,14 @@ pub(crate) const HELP_TEMPLATE: &str = "\
    左侧点选块或切回分块时, 列表会滚到对应组合.\n\
 9. 「蒙版」编辑当前组合的竖向拼合图; 组合标签与分块一致为「排序号. 来源号」\n\
    (共享脚注可在不同组画不同遮盖). 标签栏/侧栏切换组合; 与分块互相切换时会定位并滚动到对应组合.\n\
+   未选中蒙版时: 拖块本体上下移动, 拖上下边裁切/扩展 (先消耗块间空白, 底色实时重拼).\n\
+   「辅助线」按五线谱块数铺线 (两端距顶 5/17、距底 4/15, 拖动按比例联动, 非镜像);\n\
+   默认识别为谱表的块才占线, 文字/脚注需在菜单里加根数才纳入对齐.\n\
+   一块一个谱行组时用大括号尖 (不够到顶/底谱表则用该组重心); 一块多个谱行组时\n\
+   用整块几何中心 (第一组顶线到末组底线的中点); 文字用上下边界中线.\n\
+   「对齐」优先保持页宽; 对不齐则改按页高缩尺 (显示变窄). 「还原初始状态」清掉微调.\n\
+   「全局开启」后左键开关作用于全部组合; 「同步同根数位置」把当前页线按高度比例映到同样根数的页;\n\
+   「全局对齐」后台把已铺线的组合都对齐.\n\
 10. 「导出组合」按「输出组合」列表顺序拼接并套用各组蒙版; 蒙版侧「导出本页图片」只导出当前组合.\n\
 11. 「工程」页「应用到工程组合」把工程底色作为可撤销的底层异步叠加到各输出组合 (不卡界面),\n\
     「取消工程底色」还原为两层状态; 蒙版/视频里的预览也会实时带上这层底色.\n\
@@ -95,6 +122,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 \n\
 其他:\n\
   空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
+  P 组织页面: 缩略图预览, 拖动排序, {m}点击多选 / Shift 连选, Delete 删除选中页.\n\
   右侧顶栏可切换「分块 / 蒙版 / 工程 / 视频」四个面板.\n\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
   「工程」面板可「清除视频缓存」删除旁路 `.staffcrop.cache`.\n\
@@ -155,6 +183,31 @@ pub(crate) struct CropSnap {
     pub(crate) active_group_id: Option<String>,
     pub(crate) groups_manual_order: bool,
     pub(crate) staff_grouping: crate::staff_detect::StaffGrouping,
+    pub(crate) group_guides: HashMap<String, GuideState>,
+    pub(crate) group_guide_defaults: HashMap<String, GuideState>,
+    pub(crate) guides_global: bool,
+    pub(crate) guides_sync_positions: bool,
+}
+
+/// 蒙版全局辅助线/对齐一次操作的文档快照, 与 `UndoSnapshot::host_guide_token`
+/// 配对, 供 Ctrl+Z/Y 回滚全部组合.
+#[derive(Clone)]
+pub(crate) struct MaskGlobalSnap {
+    pub(crate) group_guides: HashMap<String, GuideState>,
+    pub(crate) guides_global: bool,
+    pub(crate) guides_sync_positions: bool,
+    pub(crate) group_block_layout: HashMap<String, Vec<BlockAdjust>>,
+    pub(crate) group_voff_shift: HashMap<String, i64>,
+    pub(crate) group_masks: HashMap<String, Vec<MaskRect>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GuideHistEntry {
+    pub(crate) token: u64,
+    pub(crate) before: MaskGlobalSnap,
+    pub(crate) after: MaskGlobalSnap,
+    /// 对齐等改了拼合几何, 回滚后要重拼当前页预览, 但不能 `invalidate_session`.
+    pub(crate) refresh_preview: bool,
 }
 
 #[derive(Clone, Default)]
@@ -249,6 +302,8 @@ pub(crate) enum ScrollList {
     Help,
     /// 更新提示里的版本摘要
     Update,
+    /// 「组织页面」缩略图网格
+    PageOrganize,
 }
 
 #[derive(Clone)]
@@ -295,6 +350,8 @@ pub(crate) enum ImportJob {
     Pdf {
         path: PathBuf,
         scales: Vec<(f32, f32)>,
+        /// 1-based 页码; 空则导入全部页.
+        pages: Vec<u32>,
     },
     Image {
         path: PathBuf,
@@ -306,7 +363,10 @@ pub(crate) enum ImportJob {
 pub(crate) enum PdfLoadMsg {
     Page {
         path: PathBuf,
+        /// 原 PDF 0-based 页码 (文件名 `_p012` 用).
         index: usize,
+        /// 本次已导入页数 (1-based).
+        done: usize,
         total: usize,
         pdf_name: String,
     },

@@ -97,37 +97,8 @@ impl ScoreSyncApp {
                     cx.notify();
                 }
             }
-            Some(DragKind::TabReorder {
-                from,
-                start_x,
-                start_y,
-                origin_x,
-                origin_y,
-                mut armed,
-                ..
-            }) => {
-                if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
-                    armed = true;
-                }
-                let (to, line_at, line_after) = if armed {
-                    self.resolve_tab_drop(from, x, y)
-                } else {
-                    (from, None, false)
-                };
-                self.drag = Some(DragKind::TabReorder {
-                    from,
-                    to,
-                    line_at,
-                    line_after,
-                    start_x,
-                    start_y,
-                    origin_x,
-                    origin_y,
-                    x,
-                    y,
-                    armed,
-                });
-                cx.notify();
+            Some(DragKind::TabReorder { .. }) => {
+                self.apply_tab_reorder_at(x, y, cx);
             }
             Some(DragKind::MemberReorder {
                 from,

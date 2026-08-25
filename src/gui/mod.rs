@@ -6,6 +6,7 @@
 //! - `crop` 识别与加减块
 //! - `io` 打开/保存/导出
 //! - `tabs` / `lists` 页签与侧栏列表
+//! - `page_organize` 组织页面弹窗
 //! - `chrome` 工具栏、工作区、对话框
 //! - `sync` 页图窗口与蒙版/视频同步
 //! - `history` 分块撤重
@@ -14,9 +15,11 @@
 mod canvas;
 mod chrome;
 mod crop;
+mod guides;
 mod history;
 mod host;
 mod io;
+mod page_organize;
 mod pdf_import;
 mod lists;
 mod sync;
@@ -53,6 +56,7 @@ actions!(
         ExportGroups,
         ResetGroups,
         FitView,
+        OrganizePages,
         ShowHelp,
         ShareIntoGroup,
         UngroupActive,
@@ -114,6 +118,23 @@ pub(crate) struct ScoreSyncApp {
     /// 当前蒙版预览图相对拼合图的横向/纵向偏移 (叠加工程底色补边时非零)
     mask_preview_hoff: i64,
     mask_preview_voff: i64,
+    /// 各分块背景色统计缓存 (region_id -> 统计量), 供拖动分块时每帧重拼
+    /// 预览图复用, 避免每帧重新扫描像素算均值/标准差.
+    block_stats_cache: std::collections::HashMap<String, mask_tool::layout::PieceStats>,
+    /// 当前蒙版编辑目标各分块的原始裁切片段缓存 (与 `group_member_pieces`
+    /// 同序), 供拖动分块时每帧重拼预览图复用, 避免每帧重新从页图裁切.
+    block_pieces_cache: Vec<(String, image::RgbImage)>,
+    /// 上一次从蒙版工具读到并同步过的分块布局 (拖动分块时逐帧比较用).
+    last_synced_block_layout: Vec<mask_tool::layout::BlockAdjust>,
+    /// 上一次从蒙版工具读到并同步过的组合"目标纵向位置"
+    /// (`mask_tool::gui::MaskToolApp::voff_target`, 逐帧比较用). 每次
+    /// 检测到变化 (拖动或撤销/重做导致), 都用
+    /// `apply_bg::process::natural_voff` 结合真实宽高比精确反算应该写入
+    /// `DocState::group_voff_shift` 的量, 不在这里做任何线性近似.
+    last_synced_voff_target: i64,
+    /// 上一帧蒙版工具是否正在拖动分块. 松手那一帧 layout 可能没再变,
+    /// 靠这个边沿触发一次完整预览合成.
+    block_drag_was_active: bool,
     dialog: Option<DialogKind>,
     /// 标签右键菜单
     tab_menu: Option<TabContextMenu>,
@@ -130,9 +151,12 @@ pub(crate) struct ScoreSyncApp {
     param_edit: Option<ParamEdit>,
     /// PDF 导入弹窗
     pdf_import: Option<pdf_import::PdfImportState>,
+    /// 「组织页面」弹窗
+    page_organize: Option<page_organize::PageOrganizeState>,
     pdf_w_input: Entity<TextInput>,
     pdf_h_input: Entity<TextInput>,
     pdf_scale_input: Entity<TextInput>,
+    pdf_preview_page_input: Entity<TextInput>,
     /// 画布悬停光标 (边缘/分割)
     hover_cursor: CursorStyle,
     region_scroll: ScrollHandle,
@@ -145,6 +169,8 @@ pub(crate) struct ScoreSyncApp {
     help_scroll: ScrollHandle,
     update_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
+    /// 「组织页面」网格滚动
+    page_organize_scroll: ScrollHandle,
     /// 蒙版组合页签独立滚动状态; 与分块页签的 `tab_scroll` 分开, 避免切换
     /// 面板时共用同一 handle 导致上一帧 max_offset 对不上, 滚动条抽搐一下.
     mask_tab_scroll: ScrollHandle,
@@ -168,6 +194,13 @@ pub(crate) struct ScoreSyncApp {
     crop_histories: HashMap<String, CropHistory>,
     /// 删页/复制页等文档结构撤重 (与单页 regions 栈分开).
     page_struct_history: CropHistory,
+    /// 蒙版「全局开启 / 全局对齐」等跨组合操作, 与当前页 `host_guide_token` 配对.
+    guide_undo: Vec<GuideHistEntry>,
+    guide_redo: Vec<GuideHistEntry>,
+    next_guide_token: u64,
+    /// 后台全局对齐代次; 文档改动或再次点击会对掉旧结果.
+    align_all_gen: u64,
+    align_all_running: bool,
     /// 有未保存改动
     dirty: bool,
     /// 切页异步加载代数, 防止连切时旧结果覆盖
@@ -188,10 +221,20 @@ pub(crate) struct ScoreSyncApp {
     save_spin_phase: f32,
     /// 按下发生在标签栏「+」上; 仅空点松开时才打开文件.
     tab_add_press: bool,
+    /// 按下发生在哪个页签的「×」上; 仅在同一叉上松开才关页 (拖到其他页签叉上松开不关).
+    tab_close_press: Option<usize>,
     /// 启动检查到的更新; 等当前对话框关掉后再弹出.
     pending_update: Option<crate::update::UpdateInfo>,
     /// 页图未就绪, 等加载后再识别.
     pending_redetect: bool,
+    /// 「输出组合」列表按页分桶+排序的缓存 (`group_list_rows_in` 用), 避免
+    /// 页签拖拽等纯 UI 交互每一帧都要把全部组合重新分桶排序一遍 (大工程
+    /// 卡顿的根因之一, 与蒙版面板"组合分块"只列当前组合成员、天然轻量
+    /// 不同). 用当前各组合 `(页序,y0,y1)` 的折叠校验值判断是否需要重建,
+    /// 而不是去逐一追踪"文档结构改了"的时机 (后台 hydrate/redetect 等
+    /// 异步流程也会改动组合, 手动追踪容易漏, 校验值能保证任何情况下都
+    /// 不会读到脏数据).
+    group_by_page_cache: std::cell::RefCell<Option<(u64, HashMap<usize, Vec<(usize, i32, i32)>>)>>,
 }
 
 impl ScoreSyncApp {
@@ -203,12 +246,21 @@ impl ScoreSyncApp {
         let pdf_w_input = cx.new(|cx| TextInput::new(cx, "", "宽").with_compact(true));
         let pdf_h_input = cx.new(|cx| TextInput::new(cx, "", "高").with_compact(true));
         let pdf_scale_input = cx.new(|cx| TextInput::new(cx, "", "倍率").with_compact(true));
+        let pdf_preview_page_input = cx.new(|cx| TextInput::new(cx, "1", "页").with_compact(true));
         let mask_tool = cx.new(|cx| {
             let mut m = MaskToolApp::new(cx, None);
             m.apply_color_prefs(mask_prefs.clone());
             m
         });
-        cx.observe(&mask_tool, |_, _, cx| cx.notify()).detach();
+        cx.observe(&mask_tool, |this, mt, cx| {
+            let dragging = mt.read(cx).is_block_dragging();
+            this.sync_block_layout_from_mask_tool(&mt, cx);
+            this.handle_guide_host_cmd(cx);
+            if !dragging {
+                cx.notify();
+            }
+        })
+        .detach();
         let apply_bg = cx.new(ApplyBgApp::new);
         cx.observe(&apply_bg, |_, _, cx| cx.notify()).detach();
         let score_video = cx.new(ScoreVideoApp::new);
@@ -255,6 +307,11 @@ impl ScoreSyncApp {
             mask_target: None,
             mask_preview_hoff: 0,
             mask_preview_voff: 0,
+            block_stats_cache: std::collections::HashMap::new(),
+            block_pieces_cache: Vec::new(),
+            last_synced_block_layout: Vec::new(),
+            last_synced_voff_target: 0,
+            block_drag_was_active: false,
             dialog: None,
             tab_menu: None,
             tab_hover_idx: None,
@@ -265,9 +322,11 @@ impl ScoreSyncApp {
             param_input,
             param_edit: None,
             pdf_import: None,
+            page_organize: None,
             pdf_w_input,
             pdf_h_input,
             pdf_scale_input,
+            pdf_preview_page_input,
             hover_cursor: CursorStyle::Arrow,
             region_scroll: ScrollHandle::new(),
             group_scroll: ScrollHandle::new(),
@@ -277,6 +336,7 @@ impl ScoreSyncApp {
             help_scroll: ScrollHandle::new(),
             update_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
+            page_organize_scroll: ScrollHandle::new(),
             mask_tab_scroll: ScrollHandle::new(),
             tab_bounds: HashMap::new(),
             member_bounds: HashMap::new(),
@@ -287,6 +347,11 @@ impl ScoreSyncApp {
             video_sync_gen: 0,
             crop_histories: HashMap::new(),
             page_struct_history: CropHistory::default(),
+            guide_undo: Vec::new(),
+            guide_redo: Vec::new(),
+            next_guide_token: 1,
+            align_all_gen: 0,
+            align_all_running: false,
             dirty: false,
             page_load_gen: 0,
             hydrate_gen: 0,
@@ -297,8 +362,10 @@ impl ScoreSyncApp {
             allow_close: false,
             save_spin_phase: 0.0,
             tab_add_press: false,
+            tab_close_press: None,
             pending_update: None,
             pending_redetect: false,
+            group_by_page_cache: std::cell::RefCell::new(None),
         };
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
@@ -339,7 +406,7 @@ impl Focusable for ScoreSyncApp {
 }
 
 impl Render for ScoreSyncApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title_core: SharedString = if let Some(page) = self.doc.current_page() {
             format!(
                 "曲谱同步 — [{}/{}] {}",
@@ -359,14 +426,19 @@ impl Render for ScoreSyncApp {
         let _ = A4_RATIO;
         let mask_mode = self.side_tool == SideTool::Mask;
         let video_mode = self.side_tool == SideTool::Video;
-        let focus = if mask_mode {
+        let organize_open = self.page_organize.is_some();
+        let focus = if organize_open {
+            self.focus_handle.clone()
+        } else if mask_mode {
             self.mask_tool.read(cx).focus_handle_ref().clone()
         } else if video_mode {
             self.score_video.read(cx).focus_handle_ref().clone()
         } else {
             self.focus_handle.clone()
         };
-        let key_ctx = if mask_mode {
+        let key_ctx = if organize_open {
+            "PageOrganize"
+        } else if mask_mode {
             "MaskTool"
         } else if video_mode {
             "ScoreVideo"
@@ -473,6 +545,10 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &MergeSelected, _, cx| this.merge_selected(cx)))
             .on_action(cx.listener(|this, _: &PairUngrouped, _, cx| this.pair_ungrouped(cx)))
             .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
+                if this.page_organize.is_some() {
+                    this.delete_organize_selected(cx);
+                    return;
+                }
                 this.delete_selected(cx)
             }))
             .on_action(cx.listener(|this, _: &ExportGroups, window, cx| {
@@ -480,6 +556,9 @@ impl Render for ScoreSyncApp {
             }))
             .on_action(cx.listener(|this, _: &ResetGroups, _, cx| this.reset_groups(cx)))
             .on_action(cx.listener(|this, _: &FitView, _, cx| this.fit_to_view(cx)))
+            .on_action(cx.listener(|this, _: &OrganizePages, window, cx| {
+                this.toggle_page_organize(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
             .on_action(cx.listener(|this, _: &ShareIntoGroup, _, cx| {
                 this.share_into_group(cx)
@@ -541,12 +620,24 @@ impl Render for ScoreSyncApp {
                 this.mask_tool.update(cx, |m, cx| m.cancel_poly_draft(cx));
             }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| {
-                this.undo_action(cx);
+                if this.page_organize.is_some() {
+                    this.undo_organize(cx);
+                } else {
+                    this.undo_action(cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &Redo, _, cx| {
-                this.redo_action(cx);
+                if this.page_organize.is_some() {
+                    this.redo_organize(cx);
+                } else {
+                    this.redo_action(cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectAllPageRegions, _, cx| {
+                if this.page_organize.is_some() {
+                    this.select_all_organize_pages(cx);
+                    return;
+                }
                 if this.side_tool != SideTool::Crop {
                     return;
                 }
@@ -727,9 +818,11 @@ impl Render for ScoreSyncApp {
                     )
                     .child(self.right_workspace(cx)),
             )
-            .child(self.dialog_overlay(cx))
+            .child(self.dialog_overlay(window, cx))
             .child(self.tab_context_menu_overlay(cx))
+            .child(self.guide_context_menu_overlay(cx))
             .child(self.tab_tooltip_overlay())
+            .child(self.tab_drop_line_overlay())
             .child(self.tab_drag_ghost())
             .child(self.member_drag_ghost())
             .child(self.group_drag_ghost())
@@ -758,12 +851,16 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("e", ExportGroups, Some("ScoreSync")),
             KeyBinding::new("r", ResetGroups, Some("ScoreSync")),
             KeyBinding::new("f", FitView, Some("ScoreSync")),
+            KeyBinding::new("p", OrganizePages, Some("ScoreSync")),
+            KeyBinding::new("p", OrganizePages, Some("PageOrganize")),
             KeyBinding::new("h", ShowHelp, Some("ScoreSync")),
             KeyBinding::new("f1", ShowHelp, Some("ScoreSync")),
             KeyBinding::new("h", ShowHelp, None),
             KeyBinding::new("f1", ShowHelp, None),
             KeyBinding::new("delete", DeleteSelected, Some("ScoreSync")),
             KeyBinding::new("backspace", DeleteSelected, Some("ScoreSync")),
+            KeyBinding::new("delete", DeleteSelected, Some("PageOrganize")),
+            KeyBinding::new("backspace", DeleteSelected, Some("PageOrganize")),
             KeyBinding::new("enter", ConfirmParamEdit, Some("ScoreSync")),
             KeyBinding::new("escape", CancelParamEdit, Some("ScoreSync")),
             KeyBinding::new("enter", ConfirmParamEdit, None),
@@ -795,6 +892,10 @@ pub fn run_gui(initial: Vec<PathBuf>) {
         keys.extend(apply_bg::bind_primary("y", Redo, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("shift-z", Redo, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("a", SelectAllPageRegions, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary("z", Undo, Some("PageOrganize")));
+        keys.extend(apply_bg::bind_primary("y", Redo, Some("PageOrganize")));
+        keys.extend(apply_bg::bind_primary("shift-z", Redo, Some("PageOrganize")));
+        keys.extend(apply_bg::bind_primary("a", SelectAllPageRegions, Some("PageOrganize")));
         keys.extend(apply_bg::bind_primary("o", mask_tool::gui::OpenFile, Some("MaskTool")));
         keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("MaskTool")));
         keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("MaskTool")));

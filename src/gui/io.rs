@@ -57,6 +57,10 @@ impl ScoreSyncApp {
             self.close_import_dialog(cx);
             return;
         }
+        if self.page_organize.is_some() {
+            self.close_page_organize(cx);
+            return;
+        }
         self.dismiss_error_overlays(cx);
         match self.dialog {
             Some(DialogKind::UnsavedExit | DialogKind::UnsavedNew) => {
@@ -141,6 +145,7 @@ impl ScoreSyncApp {
                 .map(|path| ImportJob::Pdf {
                     path,
                     scales: Vec::new(),
+                    pages: Vec::new(),
                 })
                 .collect(),
             true,
@@ -186,23 +191,31 @@ impl ScoreSyncApp {
                     ImportJob::Image { path, target } => {
                         let _ = tx.send_blocking(PdfLoadMsg::Image { path, target });
                     }
-                    ImportJob::Pdf { path: pdf, scales } => {
+                    ImportJob::Pdf {
+                        path: pdf,
+                        scales,
+                        pages,
+                    } => {
                         let name = pdf
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or("pdf")
                             .to_string();
                         let token_loop = Arc::clone(&token);
+                        let mut done = 0usize;
                         let result = pdf::pdf_pages_to_tmp_images_streaming(
                             &pdf,
                             ink,
                             margin,
                             &scales,
+                            &pages,
                             move || token_loop.load(Ordering::SeqCst) == gen,
                             |i, total, path| {
+                                done += 1;
                                 let _ = tx.send_blocking(PdfLoadMsg::Page {
                                     path,
                                     index: i,
+                                    done,
                                     total,
                                     pdf_name: name.clone(),
                                 });
@@ -246,6 +259,7 @@ impl ScoreSyncApp {
                         PdfLoadMsg::Page {
                             path,
                             index,
+                            done,
                             total,
                             pdf_name,
                         } => {
@@ -255,7 +269,7 @@ impl ScoreSyncApp {
                                 index + 1
                             ));
                             crate::trace::log(&format!(
-                                "ui: 登记 PDF 页 {}/{total} (run_detect=false)",
+                                "ui: 登记 PDF 页 {done}/{total} (原第 {}, run_detect=false)",
                                 index + 1
                             ));
                             match view.doc.add_page_from_disk(
@@ -266,7 +280,6 @@ impl ScoreSyncApp {
                             ) {
                                 Ok(_) => {
                                     view.mark_dirty();
-                                    let done = index + 1;
                                     let refresh = was_empty || done == total || done % 8 == 0;
                                     if refresh {
                                         if was_empty {
@@ -434,6 +447,9 @@ impl ScoreSyncApp {
         if self.pdf_import.is_some() {
             self.close_import_dialog(cx);
         }
+        if self.page_organize.is_some() {
+            self.close_page_organize(cx);
+        }
         self.abandon_pdf_import();
         let name = path
             .file_name()
@@ -470,6 +486,10 @@ impl ScoreSyncApp {
                         view.region_y_edit = None;
                         view.crop_histories.clear();
                         view.page_struct_history = CropHistory::default();
+                        view.guide_undo.clear();
+                        view.guide_redo.clear();
+                        view.align_all_running = false;
+                        view.align_all_gen = view.align_all_gen.wrapping_add(1);
                         view.side_tool = SideTool::Crop;
                         view.canvas_tool = CanvasTool::Normal;
                         view.mask_target = None;
@@ -480,8 +500,11 @@ impl ScoreSyncApp {
                         view.zoom = 1.0;
                         view.pan = point(0.0, 0.0);
                         let mask_prefs = view.doc.mask_prefs.clone();
+                        let g_global = view.doc.guides_global;
+                        let g_sync = view.doc.guides_sync_positions;
                         view.mask_tool.update(cx, |m, _| {
                             m.apply_color_prefs(mask_prefs);
+                            m.set_guide_prefs(g_global, g_sync);
                         });
                         view.refresh_render(cx);
                         view.start_hydrate_all(false, cx);
@@ -547,6 +570,9 @@ impl ScoreSyncApp {
         if self.pdf_import.is_some() {
             self.close_import_dialog(cx);
         }
+        if self.page_organize.is_some() {
+            self.close_page_organize(cx);
+        }
         let mask_prefs = self.doc.mask_prefs.clone();
         self.flush_mask_to_doc(cx);
         self.doc = DocState::new();
@@ -562,6 +588,10 @@ impl ScoreSyncApp {
         self.region_y_edit = None;
         self.crop_histories.clear();
         self.page_struct_history = CropHistory::default();
+        self.guide_undo.clear();
+        self.guide_redo.clear();
+        self.align_all_running = false;
+        self.align_all_gen = self.align_all_gen.wrapping_add(1);
         self.side_tool = SideTool::Crop;
         self.canvas_tool = CanvasTool::Normal;
         self.mask_target = None;

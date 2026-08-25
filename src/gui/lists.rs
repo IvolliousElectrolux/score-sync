@@ -268,10 +268,35 @@ impl ScoreSyncApp {
             .collect()
     }
 
-    pub(super) fn group_list_rows_in(&self, start: usize, end: usize) -> Vec<ListRow> {
-        let n = self.doc.groups.len();
-        let start = start.min(n);
-        let end = end.min(n);
+    /// 全部组合 `(页序, y0, y1)` 折叠校验值: 任意组合的排序键变化 (含增删/
+    /// 跨页移动/重识别改了 y0y1 等) 都会让它变化, 供 `group_by_page_cache`
+    /// 判断是否需要重新分桶排序.
+    fn group_top_keys_fingerprint(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (self.doc.groups.len() as u64);
+        for g in &self.doc.groups {
+            let (p, y0, y1) = self.doc.group_top_key(g);
+            h ^= p as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+            h ^= y0 as u32 as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+            h ^= y1 as u32 as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+        h
+    }
+
+    /// 各组合按 `group_top_key` 所在页分桶并按 (y0,y1) 排序后的下标表,
+    /// 命中缓存 (指纹不变) 时不重新分配/排序.
+    fn with_group_by_page<R>(
+        &self,
+        f: impl FnOnce(&HashMap<usize, Vec<(usize, i32, i32)>>) -> R,
+    ) -> R {
+        let fp = self.group_top_keys_fingerprint();
+        if let Some((cached_fp, map)) = self.group_by_page_cache.borrow().as_ref() {
+            if *cached_fp == fp {
+                return f(map);
+            }
+        }
         let mut by_page: HashMap<usize, Vec<(usize, i32, i32)>> = HashMap::new();
         for (i, g) in self.doc.groups.iter().enumerate() {
             let k = self.doc.group_top_key(g);
@@ -280,40 +305,51 @@ impl ScoreSyncApp {
         for v in by_page.values_mut() {
             v.sort_by_key(|&(_, y0, y1)| (y0, y1));
         }
-        (start..end)
-            .filter_map(|i| {
-                let g = self.doc.groups.get(i)?;
-                let mut labels = Vec::new();
-                let mut pages_in = HashSet::new();
-                for rid in &g.region_ids {
-                    if let Some((pi, r)) = self.doc.find_region(rid) {
-                        let pno = pi + 1;
-                        pages_in.insert(pno);
-                        labels.push(format!("P{pno}:{}:{}-{}", r.kind, r.y0, r.y1));
+        let result = f(&by_page);
+        *self.group_by_page_cache.borrow_mut() = Some((fp, by_page));
+        result
+    }
+
+    pub(super) fn group_list_rows_in(&self, start: usize, end: usize) -> Vec<ListRow> {
+        let n = self.doc.groups.len();
+        let start = start.min(n);
+        let end = end.min(n);
+        self.with_group_by_page(|by_page| {
+            (start..end)
+                .filter_map(|i| {
+                    let g = self.doc.groups.get(i)?;
+                    let mut labels = Vec::new();
+                    let mut pages_in = HashSet::new();
+                    for rid in &g.region_ids {
+                        if let Some((pi, r)) = self.doc.find_region(rid) {
+                            let pno = pi + 1;
+                            pages_in.insert(pno);
+                            labels.push(format!("P{pno}:{}:{}-{}", r.kind, r.y0, r.y1));
+                        }
                     }
-                }
-                let cross = if pages_in.len() > 1 { "跨页 " } else { "" };
-                let top = self.doc.group_top_key(g);
-                let c = by_page
-                    .get(&top.0)
-                    .and_then(|v| v.iter().position(|(gi, _, _)| *gi == i))
-                    .map(|x| x + 1)
-                    .unwrap_or(1);
-                let page_no = if top.0 == usize::MAX { 0 } else { top.0 + 1 };
-                let text = format!(
-                    "{cross}{}. p{page_no}c{c} | [{}]",
-                    i + 1,
-                    labels.join(", ")
-                );
-                Some(ListRow {
-                    id: g.id.clone(),
-                    label: text.into(),
-                    color: 0x0f172a,
-                    selected: self.doc.group_has_selected_region(g),
-                    src_index: i,
+                    let cross = if pages_in.len() > 1 { "跨页 " } else { "" };
+                    let top = self.doc.group_top_key(g);
+                    let c = by_page
+                        .get(&top.0)
+                        .and_then(|v| v.iter().position(|(gi, _, _)| *gi == i))
+                        .map(|x| x + 1)
+                        .unwrap_or(1);
+                    let page_no = if top.0 == usize::MAX { 0 } else { top.0 + 1 };
+                    let text = format!(
+                        "{cross}{}. p{page_no}c{c} | [{}]",
+                        i + 1,
+                        labels.join(", ")
+                    );
+                    Some(ListRow {
+                        id: g.id.clone(),
+                        label: text.into(),
+                        color: 0x0f172a,
+                        selected: self.doc.group_has_selected_region(g),
+                        src_index: i,
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        })
     }
 
     pub(super) fn visible_group_range(&self) -> (usize, usize) {
@@ -461,6 +497,7 @@ impl ScoreSyncApp {
             ScrollList::MaskBlock => &self.mask_block_scroll,
             ScrollList::Help => &self.help_scroll,
             ScrollList::Update => &self.update_scroll,
+            ScrollList::PageOrganize => &self.page_organize_scroll,
         }
     }
 
