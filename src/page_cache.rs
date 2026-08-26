@@ -1,7 +1,7 @@
-//! 会话页图磁盘备份与内存滑动窗口 (±4).
+//! 会话页图磁盘备份与内存滑动窗口 (默认 ±4, 高清页自动收窄).
 //!
 //! - 本会话打开的所有页 PNG 落在 `score_sync_session_<uuid>/`
-//! - 内存最多保留当前页前后各 [`WINDOW_RADIUS`] 页
+//! - 内存最多保留当前页前后各 [`window_radius_for_bytes`] 页
 //! - 退出时清理会话目录; 工程旁 `.staffcrop.cache` 不由此清理
 
 use std::path::{Path, PathBuf};
@@ -10,8 +10,25 @@ use std::sync::Mutex;
 use image::RgbImage;
 use uuid::Uuid;
 
-/// 当前页前后各保留的页数 → 至多 2*R+1 张在内存.
+/// 当前页前后各保留的页数 → 至多 2*R+1 张在内存 (小图).
 pub const WINDOW_RADIUS: usize = 4;
+
+/// 单页 RGB 超过此值则窗口收到 ±2 (约 2800×2800).
+const HEAVY_PAGE_BYTES: u64 = 24 * 1024 * 1024;
+/// 单页 RGB 超过此值则窗口收到 ±1 (约 4000×4000). 9 张高清页会把
+/// 工作集顶到近 GB, 任意 UI 重绘都卡半拍.
+const HUGE_PAGE_BYTES: u64 = 48 * 1024 * 1024;
+
+/// 按单页解码体积收缩内存窗口; 高清谱不要再硬留 ±4.
+pub fn window_radius_for_bytes(page_bytes: u64) -> usize {
+    if page_bytes >= HUGE_PAGE_BYTES {
+        1
+    } else if page_bytes >= HEAVY_PAGE_BYTES {
+        2
+    } else {
+        WINDOW_RADIUS
+    }
+}
 
 static SESSION_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 static EXTRA_TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -178,6 +195,29 @@ pub fn pool_thumb_png(project_path: &Path, group_id: &str) -> PathBuf {
         .join(format!("{group_id}_thumb.png"))
 }
 
+/// 删掉当前组合列表里已经没有的缓存 PNG, 避免删组后磁盘一直涨.
+pub fn prune_pool_cache(cache_root: &Path, live_group_ids: &std::collections::HashSet<String>) {
+    let Ok(rd) = std::fs::read_dir(cache_root) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let path = ent.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".png") else {
+            continue;
+        };
+        let gid = stem.strip_suffix("_thumb").unwrap_or(stem);
+        if !live_group_ids.contains(gid) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// 可用物理内存字节 (启发式). 失败时给一个保守默认.
 pub fn available_memory_bytes() -> u64 {
     #[cfg(windows)]
@@ -224,5 +264,25 @@ fn windows_available_memory() -> Option<u64> {
             return None;
         }
         Some((*p).ull_avail_phys)
+    }
+}
+
+#[cfg(test)]
+mod window_radius_tests {
+    use super::window_radius_for_bytes;
+
+    #[test]
+    fn small_pages_keep_default_radius() {
+        assert_eq!(window_radius_for_bytes(8 * 1024 * 1024), 4);
+    }
+
+    #[test]
+    fn heavy_pages_shrink_to_two() {
+        assert_eq!(window_radius_for_bytes(30 * 1024 * 1024), 2);
+    }
+
+    #[test]
+    fn huge_pages_shrink_to_one() {
+        assert_eq!(window_radius_for_bytes(80 * 1024 * 1024), 1);
     }
 }

@@ -4,7 +4,11 @@
 //! 用整块所有谱行组的几何中心 (第一组顶线到末组底线的中点). 认不出
 //! 谱表的块用上下边界中线.
 
+use std::collections::HashMap;
+
 use image::RgbImage;
+
+use crate::layout::{self, BlockAdjust};
 
 use crate::brace::{
     brace_anchor_y, detect_brace_cluster_near, detect_brace_extent, detect_left_ink_clusters,
@@ -493,6 +497,21 @@ pub struct BlockAlignAnchor {
     pub is_staff: bool,
 }
 
+/// 在原始裁切条带上算锚点 (相对条带顶). 当页对齐与全局对齐都走这个,
+/// 不要在整页图上带邻行像素重检, 也不要在缩放后的预览画布上重检.
+pub fn piece_staff_ys_from_parts(
+    parts: &[(String, RgbImage)],
+    threshold: i32,
+) -> HashMap<String, Option<i32>> {
+    parts
+        .iter()
+        .map(|(id, img)| {
+            let y1 = (img.height() as i32).saturating_sub(1);
+            (id.clone(), band_staff_anchor(img, 0, y1, threshold))
+        })
+        .collect()
+}
+
 /// 用预计算的条带锚点还原对齐用的 `offset_sheet`.
 /// `extra_top` 来自分块微调 (正值=顶上留白, 负值=从顶裁进内容);
 /// 非谱表则用 span 高度中线.
@@ -573,6 +592,57 @@ pub fn assignments_for_guides(
         .take(n)
         .map(|(a, t)| (a.region_id.clone(), a.offset_sheet, t))
         .collect()
+}
+
+/// 与蒙版「对齐」同一套: 按块 span + 条带预计算锚点还原 `offset_sheet`.
+pub fn anchors_from_piece_ys(
+    heights: &[(String, u32)],
+    layout: &[BlockAdjust],
+    piece_staff_ys: &HashMap<String, Option<i32>>,
+) -> Vec<BlockAlignAnchor> {
+    let spans = layout::compute_spans(heights, layout);
+    spans
+        .into_iter()
+        .map(|(rid, y0, y1)| {
+            let extra = BlockAdjust::find(layout, &rid)
+                .map(|a| a.extra_top)
+                .unwrap_or(0);
+            let span_h = (y1 - y0 + 1) as i32;
+            let piece_y = piece_staff_ys.get(&rid).copied().flatten();
+            block_anchor_from_piece_y(rid, piece_y, extra, span_h)
+        })
+        .collect()
+}
+
+/// 一次「对齐到辅助线」的纯数据输入. 当页按钮与全局后台线程共用, 避免
+/// 两条路径用不同的高度/锚点/页高而导致偏移.
+#[derive(Clone, Debug)]
+pub struct AlignGroupInput {
+    pub heights: Vec<(String, u32)>,
+    pub layout: Vec<BlockAdjust>,
+    pub voff: i32,
+    pub page_h: i32,
+    pub anchors: Vec<BlockAlignAnchor>,
+    pub guide_lines: Vec<i32>,
+}
+
+/// 与蒙版左键「对齐」同一套几何. 没有可配对的块时返回 `None` (不折
+/// `voff`, 与当页按钮一致).
+pub fn align_group(input: &AlignGroupInput) -> Option<(Vec<BlockAdjust>, i32)> {
+    if input.guide_lines.is_empty() || input.heights.is_empty() {
+        return None;
+    }
+    let assignments = assignments_for_guides(&input.anchors, &input.guide_lines);
+    if assignments.is_empty() {
+        return None;
+    }
+    Some(layout::align_blocks_to_targets(
+        &input.heights,
+        &input.layout,
+        input.voff,
+        &assignments,
+        input.page_h,
+    ))
 }
 
 #[cfg(test)]
@@ -896,5 +966,37 @@ mod tests {
         let t = block_anchor_from_piece_y("t".into(), None, 0, 80);
         assert!(!t.is_staff);
         assert_eq!(t.offset_sheet, 39);
+    }
+
+    #[test]
+    fn piece_crop_anchor_matches_full_page_band() {
+        let mut page = blank(400, 400);
+        paint_staff(&mut page, 80, 40, 380, 8);
+        let full = band_staff_anchor(&page, 40, 200, DEFAULT_INK_THRESHOLD);
+        let crop = image::imageops::crop_imm(&page, 0, 40, 400, 161).to_image();
+        let piece = band_staff_anchor(&crop, 0, 160, DEFAULT_INK_THRESHOLD);
+        assert_eq!(full, piece);
+    }
+
+    #[test]
+    fn align_group_matches_page_align_geometry() {
+        let heights = vec![("a".into(), 40u32), ("b".into(), 40)];
+        let mut piece_ys = HashMap::new();
+        piece_ys.insert("a".into(), Some(19));
+        piece_ys.insert("b".into(), Some(19));
+        let anchors = anchors_from_piece_ys(&heights, &[], &piece_ys);
+        let input = AlignGroupInput {
+            heights: heights.clone(),
+            layout: vec![],
+            voff: 40,
+            page_h: 400,
+            anchors,
+            guide_lines: vec![100, 300],
+        };
+        let (layout, voff_delta) = align_group(&input).unwrap();
+        assert_eq!(voff_delta, -40);
+        let spans = layout::compute_spans(&heights, &layout);
+        assert_eq!(spans[0].1 + 19, 100);
+        assert_eq!(spans[1].1 + 19, 300);
     }
 }

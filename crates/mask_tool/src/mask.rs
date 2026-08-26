@@ -413,6 +413,49 @@ fn fill_poly_color(
     }
 }
 
+/// 把编辑器里存的蒙版叠到未缩放拼合图上.
+///
+/// 存储坐标是预览画布减去 `hoff`/`voff`. 谱面高于页面被缩小装进画布时,
+/// 这些数字等于 `拼合图像素 * content_scale`. 这里先除回拼合图像素再盖上,
+/// 随后仍走原来的等比合成, 遮盖位置对准, 谱面也不会被拉变形.
+pub fn apply_masks_to_sheet(
+    sheet: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+    masks: &[MaskRect],
+    content_scale: f32,
+    default_opacity: f32,
+) {
+    if masks.is_empty() {
+        return;
+    }
+    let scale = if content_scale > 0.0001 {
+        content_scale
+    } else {
+        1.0
+    };
+    if (scale - 1.0).abs() < 0.0001 {
+        apply_masks_rgb(sheet, masks, default_opacity);
+        return;
+    }
+    let inv = 1.0 / scale;
+    let converted: Vec<MaskRect> = masks
+        .iter()
+        .cloned()
+        .map(|mut m| {
+            if m.is_brush() {
+                m.brush_radius = ((m.brush_radius as f32) * inv).round().max(1.0) as i32;
+            }
+            m.map_xy(|x, y| {
+                (
+                    (x as f32 * inv).round() as i32,
+                    (y as f32 * inv).round() as i32,
+                )
+            });
+            m
+        })
+        .collect();
+    apply_masks_rgb(sheet, &converted, default_opacity);
+}
+
 /// 在 RGB 图上叠蒙版. `default_opacity` 仅作兼容保留 (每项用自己的 `opacity`).
 pub fn apply_masks_rgb(
     rgb: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
@@ -481,4 +524,36 @@ pub fn default_export_path(image_path: Option<&Path>) -> PathBuf {
 
 pub fn first_image_in_paths(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find(|p| is_image_path(p)).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgb;
+
+    fn rect_mask(x0: i32, y0: i32, x1: i32, y1: i32, color: [u8; 3]) -> MaskRect {
+        MaskRect {
+            id: "m".into(),
+            x0,
+            y0,
+            x1,
+            y1,
+            brush_points: Vec::new(),
+            brush_radius: 0,
+            color,
+            poly_points: Vec::new(),
+            opacity: 1.0,
+            bound_block: None,
+        }
+    }
+
+    #[test]
+    fn apply_to_sheet_divides_content_scale() {
+        let mut sheet = image::RgbImage::from_pixel(20, 20, Rgb([10, 20, 30]));
+        // 预览缩小 0.5 时, 存储点 (5, 6) 对应拼合图 (10, 12)
+        let masks = [rect_mask(5, 6, 5, 6, [255, 255, 255])];
+        apply_masks_to_sheet(&mut sheet, &masks, 0.5, 1.0);
+        assert_eq!(*sheet.get_pixel(10, 12), Rgb([255, 255, 255]));
+        assert_eq!(*sheet.get_pixel(5, 6), Rgb([10, 20, 30]));
+    }
 }

@@ -709,9 +709,11 @@ impl MaskToolApp {
                     .child({
                         let brush_on = self.mode == ToolMode::Brush;
                         let eraser_on = self.mode == ToolMode::Eraser;
-                        let size_frac = ((self.brush_size - BRUSH_SIZE_MIN)
-                            / (BRUSH_SIZE_MAX - BRUSH_SIZE_MIN))
-                            .clamp(0.0, 1.0);
+                        let size_frac = brush_size_to_t(
+                            self.brush_size,
+                            BRUSH_SIZE_MIN,
+                            self.brush_size_max(),
+                        );
                         let brush_px = self.brush_size.round() as i32;
                         let brush_color_u32 = color_rgb_u32(self.brush_color);
                         div()

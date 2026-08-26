@@ -8,7 +8,8 @@ impl MaskToolApp {
         let vh = f32::from(self.view_bounds.size.height);
         // 拖动分块时用锁定的尺寸算缩放比例, 避免拼合图总高实时变化导致
         // 画面跟着缩放抖动, 也保证鼠标坐标换算全程用同一套比例 (见字段
-        // 注释); 图像本身仍按当前实际尺寸绘制 (`img_bounds` 用的是活的
+        // 注释); 松手后 freeze 仍保持到整图回填, 避免中间一帧闪回旧图.
+        // 图像本身仍按当前实际尺寸绘制 (`img_bounds` 用的是活的
         // `self.img_w/h`), 只是缩放比例暂时不跟着重算.
         let (fit_w, fit_h) = self
             .block_drag_freeze
@@ -68,6 +69,34 @@ impl MaskToolApp {
         }
         if ev.click_count >= 2 && ev.button == MouseButton::Left {
             self.fit_to_view(cx);
+            return;
+        }
+        if self.preview_only {
+            if ev.button == MouseButton::Right && self.host_pick_armed {
+                self.host_pick_armed = false;
+                self.host_pick_hover = None;
+                self.status = "已取消取色".into();
+                cx.notify();
+                return;
+            }
+            if ev.button != MouseButton::Left {
+                return;
+            }
+            if self.host_pick_armed {
+                let (sx, sy) = self.screen_in_view(ev.position);
+                let (ix, iy) = self.xform().screen_to_image(sx, sy);
+                if let Some(rgb) = self.sample_image_rgb(ix, iy) {
+                    self.host_pick_hover = Some(rgb);
+                    self.host_pick_click = Some(rgb);
+                    self.host_pick_armed = false;
+                    self.status = "已取色".into();
+                }
+                cx.notify();
+                return;
+            }
+            self.drag = Some(DragKind::PagePan {
+                last: ev.position,
+            });
             return;
         }
         if ev.button != MouseButton::Left {
@@ -248,7 +277,7 @@ impl MaskToolApp {
                     | DragKind::PaletteSb
                     | DragKind::PaletteHue
             )
-        )
+        ) || (self.preview_only && matches!(self.drag, Some(DragKind::PagePan { .. })))
     }
 
     /// 宿主在窗口外转发鼠标移动 (元素级 on_mouse_move 在窗口外不触发).
@@ -278,6 +307,17 @@ impl MaskToolApp {
 
     pub(super) fn apply_mouse_move_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (sx, sy) = self.screen_in_view(position);
+        if self.preview_only && self.host_pick_armed {
+            let xform = self.xform();
+            let (ix, iy) = xform.screen_to_image(sx, sy);
+            if let Some(rgb) = self.sample_image_rgb(ix, iy) {
+                if self.host_pick_hover != Some(rgb) {
+                    self.host_pick_hover = Some(rgb);
+                    cx.notify();
+                }
+            }
+            return;
+        }
         if self.eyedropper_armed {
             let xform = self.xform();
             let (ix, iy) = xform.screen_to_image(sx, sy);
@@ -564,7 +604,9 @@ impl MaskToolApp {
     }
 
     pub(super) fn apply_mouse_up_at(&mut self, _position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.block_drag_freeze = None;
+        // 分块拖动的 freeze 不能在这里清: 松手后 `drag` 已空, 若同时丢掉
+        // freeze, 下一帧会立刻改画过期的整图 (拖之前的合成结果), 等宿主
+        // 后台合成完再闪到拖后状态. freeze 留到 `update_base_image`.
         let finished = self.drag.take();
         match finished {
             Some(DragKind::Draw { x0, y0, x1, y1 }) => {
@@ -709,6 +751,17 @@ impl MaskToolApp {
         if self.render_image.is_none() {
             return;
         }
+        if self.preview_only && !apply_bg::is_primary_mod(&ev.modifiers) {
+            let dy = match ev.delta {
+                ScrollDelta::Pixels(p) => f32::from(p.y),
+                ScrollDelta::Lines(p) => p.y * 40.0,
+            };
+            if dy.abs() > 0.5 {
+                self.preview_wheel = if dy > 0.0 { -1 } else { 1 };
+                cx.notify();
+            }
+            return;
+        }
         // 无模式禁止移动页面; Ctrl+滚轮缩放始终可用
         if !apply_bg::is_primary_mod(&ev.modifiers) {
             if self.mode == ToolMode::Select {
@@ -787,15 +840,21 @@ impl MaskToolApp {
         let brush_color = self.brush_color;
         let brush_opacity = self.brush_opacity;
         let mask_color = self.mask_color;
-        let show_blocks =
-            self.mode == ToolMode::Select && self.selected.is_empty() && self.has_block_pieces();
+        let show_blocks = !self.preview_only
+            && self.mode == ToolMode::Select
+            && self.selected.is_empty()
+            && self.has_block_pieces();
         let block_spans = if show_blocks { self.block_spans() } else { Vec::new() };
         let block_selected = self.block_selected.clone();
-        let guide_lines = self.guides.lines.clone();
+        let guide_lines = if self.preview_only {
+            Vec::new()
+        } else {
+            self.guides.lines.clone()
+        };
         let guide_selected = self.guide_selected.clone();
         let guide_hover = self.guide_hover;
         let freeze = self.block_drag_freeze;
-        let tile_preview = self.is_block_dragging() && !self.block_tiles.is_empty();
+        let tile_preview = self.wants_block_tile_preview();
         let block_tiles = if tile_preview {
             self.block_tiles.clone()
         } else {
@@ -813,12 +872,13 @@ impl MaskToolApp {
         };
         let block_hoff = self.block_hoff;
         let block_voff_paint = self.block_voff;
-        let block_bg_left = self.block_bg_left;
-        let block_bg_top = self.block_bg_top;
         let block_shows_bg = self.block_shows_bg;
         let content_scale = self.content_scale;
-        let cursor = if self.eyedropper_armed {
+        let canvas_loading = self.canvas_loading;
+        let cursor = if self.host_pick_armed || self.eyedropper_armed {
             CursorStyle::Crosshair
+        } else if self.preview_only {
+            CursorStyle::OpenHand
         } else {
             match self.mode {
                 ToolMode::Brush => CursorStyle::None,
@@ -851,12 +911,18 @@ impl MaskToolApp {
             .h_full()
             .bg(rgb(0x2b2b2b))
             .overflow_hidden()
+            .relative()
             .cursor(cursor)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_view_mouse_down))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, _, cx| {
-                    if this.eyedropper_armed {
+                    if this.preview_only && this.host_pick_armed {
+                        this.host_pick_armed = false;
+                        this.host_pick_hover = None;
+                        this.status = "已取消取色".into();
+                        cx.notify();
+                    } else if this.eyedropper_armed {
                         this.cancel_eyedropper(cx);
                     } else if this.mode == ToolMode::Poly {
                         this.cancel_poly_draft(cx);
@@ -868,6 +934,9 @@ impl MaskToolApp {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_view_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                if this.preview_only {
+                    return;
+                }
                 if let Some(p) = first_image_in_paths(paths.paths()) {
                     this.load_image(p, cx);
                 }
@@ -918,8 +987,6 @@ impl MaskToolApp {
                                 block_hoff,
                                 block_voff_paint,
                                 block_bg.as_ref(),
-                                block_bg_left,
-                                block_bg_top,
                                 block_shows_bg,
                                 content_scale,
                             );
@@ -1240,6 +1307,20 @@ impl MaskToolApp {
                 )
                 .size_full(),
             )
+            .when(canvas_loading, |d| {
+                d.child(
+                    div()
+                        .id("mask_preview_loading")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(0xe2e8f0))
+                        .text_sm()
+                        .child("加载中…"),
+                )
+            })
     }
 }
 
@@ -1255,8 +1336,6 @@ fn paint_live_block_tiles(
     hoff: i64,
     voff: i64,
     bg: Option<&BlockBgTile>,
-    bg_left: u32,
-    bg_top: u32,
     shows_bg: bool,
     content_scale: f32,
 ) {
@@ -1295,15 +1374,10 @@ fn paint_live_block_tiles(
     window.with_content_mask(Some(ContentMask { bounds: img_bounds }), |window| {
         if shows_bg {
             if let Some(bg) = bg {
-                let bg_bounds = Bounds {
-                    origin: point(
-                        img_bounds.origin.x - px(bg_left as f32 * scale),
-                        img_bounds.origin.y - px(bg_top as f32 * scale),
-                    ),
-                    size: size(px(bg.width as f32 * scale), px(bg.height as f32 * scale)),
-                };
+                // 贴图已是目标页裁切, 铺满预览画布; 不再用完整底色的
+                // bg_left/bg_top 做原点平移 (那会把已裁画布再错位一次).
                 let _ = window.paint_image(
-                    bg_bounds,
+                    img_bounds,
                     Corners::default(),
                     bg.image.clone(),
                     0,

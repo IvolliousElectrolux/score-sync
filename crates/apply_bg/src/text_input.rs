@@ -753,6 +753,7 @@ impl Render for TextInput {
             .border_1()
             .border_color(rgb(0xcbd5e1))
             .bg(rgb(0xf8fafc))
+            .min_w(px(0.))
             .line_height(line_h)
             .text_size(text_size)
             .text_color(rgb(0x0f172a))

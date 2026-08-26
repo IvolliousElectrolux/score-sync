@@ -260,54 +260,7 @@ impl ScoreSyncApp {
             return;
         }
         self.flush_mask_to_doc(cx);
-        if self.doc.guided_groups_anchors_ready() {
-            self.commit_guide_global(cx, true, |this| this.apply_align_all_from_cache());
-            return;
-        }
         self.start_align_all_async(cx);
-    }
-
-    fn apply_align_all_from_cache(&mut self) -> SharedString {
-        let gids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
-        let mut n = 0u32;
-        for gid in &gids {
-            if self.align_group_from_cache(gid) {
-                n += 1;
-            }
-        }
-        format!("已全局对齐 {n} 个组合.").into()
-    }
-
-    fn align_group_from_cache(&mut self, gid: &str) -> bool {
-        let guides = self.doc.get_group_guides(gid);
-        if guides.lines.is_empty() {
-            return false;
-        }
-        let Some(anchors) = self.doc.block_align_anchors_for_group(gid) else {
-            return false;
-        };
-        let Some(frame) = self.doc.group_preview_frame(gid) else {
-            return false;
-        };
-        let heights = self.doc.group_member_heights(gid);
-        if heights.is_empty() {
-            return false;
-        }
-        let assignments = mask_tool::staff::assignments_for_guides(&anchors, &guides.lines);
-        if assignments.is_empty() {
-            return false;
-        }
-        let layout = self.doc.get_block_layout(gid).to_vec();
-        let voff_i32 = frame.voff.max(0).min(i32::MAX as i64) as i32;
-        let page_h = if frame.shows_bg { frame.canvas_h as i32 } else { 0 };
-        let (new_layout, voff_delta) = layout::align_blocks_to_targets(
-            &heights,
-            &layout,
-            voff_i32,
-            &assignments,
-            page_h,
-        );
-        self.apply_group_align_result(gid, &heights, &layout, new_layout, frame.voff, voff_delta)
     }
 
     fn apply_group_align_result(
@@ -316,15 +269,14 @@ impl ScoreSyncApp {
         heights: &[(String, u32)],
         old_layout: &[BlockAdjust],
         new_layout: Vec<BlockAdjust>,
-        voff: i64,
-        voff_delta: i32,
+        new_voff_target: i64,
     ) -> bool {
-        if new_layout == old_layout && voff_delta == 0 {
+        let old_shift = self.doc.get_group_voff_shift(gid);
+        let new_shift = self.resolve_group_voff_shift_for(gid, heights, &new_layout, new_voff_target);
+        if new_layout == old_layout && new_shift == old_shift {
             return false;
         }
         self.shift_group_masks_sheet(gid, heights, old_layout, &new_layout);
-        let new_voff_target = voff + voff_delta as i64;
-        let new_shift = self.resolve_group_voff_shift_for(gid, &new_layout, new_voff_target);
         self.doc.set_block_layout(gid, new_layout);
         self.doc.set_group_voff_shift(gid, new_shift);
         self.mark_video_pool_dirty_group(gid);
@@ -335,8 +287,10 @@ impl ScoreSyncApp {
         self.align_all_gen = self.align_all_gen.wrapping_add(1);
         let gen = self.align_all_gen;
         self.align_all_running = true;
-        let job = self.build_align_all_job();
-        let n_pages = job.pages.len();
+        let current = self.mask_tool.read(cx).current_align_input();
+        let current_gid = self.mask_target.clone();
+        let job = self.build_align_all_job(current_gid.as_deref(), current);
+        let n_pages = job.n_pages_to_load;
         self.status = if n_pages > 0 {
             format!("正在后台全局对齐 ({n_pages} 页需读图)…").into()
         } else {
@@ -360,46 +314,92 @@ impl ScoreSyncApp {
         .detach();
     }
 
-    fn build_align_all_job(&self) -> AlignAllJob {
-        let mut pages: HashMap<PathBuf, Vec<(String, i32, i32)>> = HashMap::new();
+    fn build_align_all_job(
+        &self,
+        current_gid: Option<&str>,
+        current: Option<(mask_tool::staff::AlignGroupInput, i64)>,
+    ) -> AlignAllJob {
+        let bg = if self.doc.bg_enabled {
+            self.doc.bg_image.as_ref().map(|bg| AlignBg {
+                bw: bg.width(),
+                bh: bg.height(),
+                aspect_w: self.doc.bg_aspect_w,
+                aspect_h: self.doc.bg_aspect_h,
+            })
+        } else {
+            None
+        };
         let mut groups = Vec::new();
         for g in &self.doc.groups {
-            if self.doc.get_group_guides(&g.id).lines.is_empty() {
+            let guides = self.doc.get_group_guides(&g.id);
+            if guides.lines.is_empty() {
                 continue;
             }
-            let Some(frame) = self.doc.group_preview_frame(&g.id) else {
-                continue;
-            };
-            let heights = self.doc.group_member_heights(&g.id);
-            if heights.is_empty() {
+            if self.doc.bg_enabled && bg.is_none() {
                 continue;
             }
-            for rid in &g.region_ids {
-                if self.doc.region_staff_anchors.contains_key(rid) {
+            if current_gid == Some(g.id.as_str()) {
+                if let Some((input, voff_target)) = current.clone() {
+                    groups.push(AlignGroupSpec {
+                        gid: g.id.clone(),
+                        members: Vec::new(),
+                        layout: input.layout.clone(),
+                        guide_lines: input.guide_lines.clone(),
+                        voff_shift: self.doc.get_group_voff_shift(&g.id),
+                        sheet_w: self.doc.group_sheet_width(&g.id),
+                        bg: bg.clone(),
+                        live: Some(LiveAlign {
+                            input,
+                            voff_target,
+                        }),
+                    });
                     continue;
                 }
-                if let Some((pi, r)) = self.doc.find_region(rid) {
-                    if let Some(page) = self.doc.pages.get(pi) {
-                        pages
-                            .entry(page.disk_path.clone())
-                            .or_default()
-                            .push((rid.clone(), r.y0, r.y1));
-                    }
-                }
+            }
+            let mut members = Vec::new();
+            for rid in &g.region_ids {
+                let Some((pi, r)) = self.doc.find_region(rid) else {
+                    continue;
+                };
+                let Some(page) = self.doc.pages.get(pi) else {
+                    continue;
+                };
+                members.push(AlignMember {
+                    rid: rid.clone(),
+                    page_path: page.disk_path.clone(),
+                    y0: r.y0,
+                    y1: r.y1,
+                });
+            }
+            if members.is_empty() {
+                continue;
             }
             groups.push(AlignGroupSpec {
                 gid: g.id.clone(),
-                heights,
+                members,
                 layout: self.doc.get_block_layout(&g.id).to_vec(),
-                guide_lines: self.doc.get_group_guides(&g.id).lines.clone(),
-                voff: frame.voff,
-                page_h: if frame.shows_bg { frame.canvas_h as i32 } else { 0 },
+                guide_lines: guides.lines.clone(),
+                voff_shift: self.doc.get_group_voff_shift(&g.id),
+                sheet_w: self.doc.group_sheet_width(&g.id),
+                bg: bg.clone(),
+                live: None,
             });
         }
+        let n_pages_to_load = {
+            let mut paths = HashSet::new();
+            for g in &groups {
+                if g.live.is_some() {
+                    continue;
+                }
+                for m in &g.members {
+                    paths.insert(m.page_path.clone());
+                }
+            }
+            paths.len()
+        };
         AlignAllJob {
             threshold: self.doc.ink_threshold,
-            cached: self.doc.region_staff_anchors.clone(),
-            pages: pages.into_iter().collect(),
+            n_pages_to_load,
             groups,
         }
     }
@@ -420,15 +420,12 @@ impl ScoreSyncApp {
         self.commit_guide_global(cx, true, move |this| {
             let mut n = 0u32;
             for g in groups {
-                let heights = this.doc.group_member_heights(&g.gid);
-                let old_layout = this.doc.get_block_layout(&g.gid).to_vec();
                 if this.apply_group_align_result(
                     &g.gid,
-                    &heights,
-                    &old_layout,
+                    &g.heights,
+                    &g.old_layout,
                     g.layout,
-                    g.voff,
-                    g.voff_delta,
+                    g.new_voff_target,
                 ) {
                     n += 1;
                 }
@@ -500,6 +497,7 @@ impl ScoreSyncApp {
     fn resolve_group_voff_shift_for(
         &self,
         group_id: &str,
+        heights: &[(String, u32)],
         layout: &[BlockAdjust],
         voff_target: i64,
     ) -> i64 {
@@ -509,12 +507,11 @@ impl ScoreSyncApp {
         let Some(bg) = self.doc.bg_image.as_ref() else {
             return 0;
         };
-        let heights = self.doc.group_member_heights(group_id);
         if heights.is_empty() {
             return 0;
         }
         let sw = self.doc.group_sheet_width(group_id);
-        let sh = layout::sheet_height(&heights, layout);
+        let sh = layout::sheet_height(heights, layout);
         let natural = apply_bg::process::natural_voff(
             sw,
             sh,
@@ -855,27 +852,49 @@ impl ScoreSyncApp {
     }
 }
 
+#[derive(Clone)]
+struct AlignBg {
+    bw: u32,
+    bh: u32,
+    aspect_w: u32,
+    aspect_h: u32,
+}
+
+struct AlignMember {
+    rid: String,
+    page_path: PathBuf,
+    y0: i32,
+    y1: i32,
+}
+
+struct LiveAlign {
+    input: mask_tool::staff::AlignGroupInput,
+    voff_target: i64,
+}
+
 struct AlignGroupSpec {
     gid: String,
-    heights: Vec<(String, u32)>,
+    members: Vec<AlignMember>,
     layout: Vec<BlockAdjust>,
     guide_lines: Vec<i32>,
-    voff: i64,
-    page_h: i32,
+    voff_shift: i64,
+    sheet_w: u32,
+    bg: Option<AlignBg>,
+    live: Option<LiveAlign>,
 }
 
 struct AlignAllJob {
     threshold: i32,
-    cached: HashMap<String, Option<i32>>,
-    pages: Vec<(PathBuf, Vec<(String, i32, i32)>)>,
+    n_pages_to_load: usize,
     groups: Vec<AlignGroupSpec>,
 }
 
 struct AlignGroupResult {
     gid: String,
+    heights: Vec<(String, u32)>,
+    old_layout: Vec<BlockAdjust>,
     layout: Vec<BlockAdjust>,
-    voff: i64,
-    voff_delta: i32,
+    new_voff_target: i64,
 }
 
 struct AlignAllResult {
@@ -884,30 +903,29 @@ struct AlignAllResult {
     n_fail: u32,
 }
 
-fn run_align_all_job(job: AlignAllJob) -> AlignAllResult {
-    let mut anchors = job.cached;
-    let mut n_fail = 0u32;
-    for (path, bands) in job.pages {
-        match crate::page_cache::load_rgb(&path) {
-            Ok(img) => {
-                for (rid, y0, y1) in bands {
-                    let y = mask_tool::staff::band_staff_anchor(&img, y0, y1, job.threshold);
-                    anchors.insert(rid, y);
-                }
-            }
-            Err(_) => {}
-        }
+fn crop_band(img: &image::RgbImage, y0: i32, y1: i32) -> Option<image::RgbImage> {
+    let w = img.width();
+    let h = img.height();
+    if w == 0 || h == 0 {
+        return None;
     }
-    let new_anchors: Vec<(String, Option<i32>)> = anchors
-        .iter()
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
+    let y0 = y0.max(0) as u32;
+    let y1 = (y1 as u32).min(h.saturating_sub(1));
+    if y1 < y0 {
+        return None;
+    }
+    Some(crate::model::crop_band_fast(img, y0, y1 - y0 + 1))
+}
+
+fn run_align_all_job(job: AlignAllJob) -> AlignAllResult {
+    let mut page_cache: HashMap<PathBuf, image::RgbImage> = HashMap::new();
+    let mut new_anchors = Vec::new();
     let mut groups = Vec::new();
+    let mut n_fail = 0u32;
     for g in job.groups {
-        if let Some(r) = align_group_spec(&g, &anchors) {
-            groups.push(r);
-        } else {
-            n_fail += 1;
+        match align_one_group(g, job.threshold, &mut page_cache, &mut new_anchors) {
+            Some(r) => groups.push(r),
+            None => n_fail += 1,
         }
     }
     AlignAllResult {
@@ -917,43 +935,90 @@ fn run_align_all_job(job: AlignAllJob) -> AlignAllResult {
     }
 }
 
-fn align_group_spec(
-    g: &AlignGroupSpec,
-    anchors: &HashMap<String, Option<i32>>,
+fn align_one_group(
+    g: AlignGroupSpec,
+    threshold: i32,
+    page_cache: &mut HashMap<PathBuf, image::RgbImage>,
+    new_anchors: &mut Vec<(String, Option<i32>)>,
 ) -> Option<AlignGroupResult> {
-    let spans = layout::compute_spans(&g.heights, &g.layout);
-    let mut block_anchors = Vec::with_capacity(spans.len());
-    for (rid, y0, y1) in spans {
-        let piece_y = anchors.get(&rid).copied().flatten();
-        let extra = BlockAdjust::find(&g.layout, &rid)
-            .map(|a| a.extra_top)
-            .unwrap_or(0);
-        let span_h = (y1 - y0 + 1) as i32;
-        block_anchors.push(mask_tool::staff::block_anchor_from_piece_y(
-            rid, piece_y, extra, span_h,
-        ));
+    let (input, voff_target) = if let Some(live) = g.live {
+        (live.input, live.voff_target)
+    } else {
+        let mut parts = Vec::with_capacity(g.members.len());
+        for m in &g.members {
+            if !page_cache.contains_key(&m.page_path) {
+                match crate::page_cache::load_rgb(&m.page_path) {
+                    Ok(img) => {
+                        page_cache.insert(m.page_path.clone(), img);
+                    }
+                    Err(_) => return None,
+                }
+            }
+            let page = page_cache.get(&m.page_path)?;
+            let piece = crop_band(page, m.y0, m.y1)?;
+            parts.push((m.rid.clone(), piece));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let heights: Vec<(String, u32)> = parts
+            .iter()
+            .map(|(id, img)| (id.clone(), img.height()))
+            .collect();
+        let piece_ys = mask_tool::staff::piece_staff_ys_from_parts(&parts, threshold);
+        for (id, y) in &piece_ys {
+            new_anchors.push((id.clone(), *y));
+        }
+        let anchors = mask_tool::staff::anchors_from_piece_ys(&heights, &g.layout, &piece_ys);
+        let sh = layout::sheet_height(&heights, &g.layout);
+        let (voff, page_h) = if let Some(bg) = &g.bg {
+            let frame = apply_bg::process::preview_frame(
+                g.sheet_w.max(1),
+                sh.max(1),
+                bg.bw,
+                bg.bh,
+                bg.aspect_w,
+                bg.aspect_h,
+                g.voff_shift,
+            );
+            let voff = frame.voff.max(0).min(i32::MAX as i64) as i32;
+            let page_h = if frame.shows_bg {
+                frame.canvas_h as i32
+            } else {
+                0
+            };
+            (voff, page_h)
+        } else {
+            (0, 0)
+        };
+        (
+            mask_tool::staff::AlignGroupInput {
+                heights,
+                layout: g.layout.clone(),
+                voff,
+                page_h,
+                anchors,
+                guide_lines: g.guide_lines,
+            },
+            voff as i64,
+        )
+    };
+    let old_layout = input.layout.clone();
+    let heights = input.heights.clone();
+    match mask_tool::staff::align_group(&input) {
+        Some((new_layout, voff_delta)) => Some(AlignGroupResult {
+            gid: g.gid,
+            heights,
+            old_layout,
+            layout: new_layout,
+            new_voff_target: voff_target + voff_delta as i64,
+        }),
+        None => Some(AlignGroupResult {
+            gid: g.gid,
+            heights,
+            old_layout: old_layout.clone(),
+            layout: old_layout,
+            new_voff_target: voff_target,
+        }),
     }
-    let assignments = mask_tool::staff::assignments_for_guides(&block_anchors, &g.guide_lines);
-    if assignments.is_empty() {
-        return Some(AlignGroupResult {
-            gid: g.gid.clone(),
-            layout: g.layout.clone(),
-            voff: g.voff,
-            voff_delta: 0,
-        });
-    }
-    let voff_i32 = g.voff.max(0).min(i32::MAX as i64) as i32;
-    let (new_layout, voff_delta) = layout::align_blocks_to_targets(
-        &g.heights,
-        &g.layout,
-        voff_i32,
-        &assignments,
-        g.page_h,
-    );
-    Some(AlignGroupResult {
-        gid: g.gid.clone(),
-        layout: new_layout,
-        voff: g.voff,
-        voff_delta,
-    })
 }

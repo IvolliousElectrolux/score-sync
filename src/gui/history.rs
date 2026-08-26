@@ -34,10 +34,14 @@ impl ScoreSyncApp {
             .doc
             .pages
             .iter()
-            .map(|p| {
-                let mut p = p.clone();
-                p.image = None;
-                p
+            .map(|p| crate::model::Page {
+                id: p.id.clone(),
+                path: p.path.clone(),
+                disk_path: p.disk_path.clone(),
+                image: None,
+                img_w: p.img_w,
+                img_h: p.img_h,
+                regions: p.regions.clone(),
             })
             .collect();
         CropSnap {
@@ -104,10 +108,7 @@ impl ScoreSyncApp {
             if let Some(masks) = snap.group_masks {
                 self.doc.group_masks = masks;
             }
-            self.doc.retain_window(
-                self.doc.current_page_index,
-                crate::page_cache::WINDOW_RADIUS,
-            );
+            self.doc.retain_memory_window();
         } else {
             for (pid, regions) in snap.page_regions {
                 if let Some(p) = self.doc.pages.iter_mut().find(|p| p.id == pid) {
@@ -209,7 +210,7 @@ impl ScoreSyncApp {
             SideTool::Video => {
                 self.score_video.update(cx, |v, cx| v.undo(cx));
             }
-            SideTool::Project => {}
+            SideTool::Project => self.undo_bg(cx),
         }
     }
 
@@ -222,7 +223,7 @@ impl ScoreSyncApp {
             SideTool::Video => {
                 self.score_video.update(cx, |v, cx| v.redo(cx));
             }
-            SideTool::Project => {}
+            SideTool::Project => self.redo_bg(cx),
         }
     }
 }

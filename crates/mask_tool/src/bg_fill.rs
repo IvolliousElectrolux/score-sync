@@ -94,12 +94,23 @@ pub fn flat_fill(width: u32, height: u32, mean: [f32; 3]) -> RgbImage {
 }
 
 /// 从图像边缘 (顶部或底部) 取 `sample_rows` 行作为背景采样区域; 若图像
-/// 本身矮于该值则取全图.
+/// 本身矮于该值则取全图. 按行整块拷贝, 不用
+/// `image::imageops::crop_imm().to_image()` (内部逐像素调用
+/// get_pixel/put_pixel).
 pub fn edge_sample(img: &RgbImage, from_top: bool, sample_rows: u32) -> RgbImage {
     let (w, h) = img.dimensions();
     let rows = sample_rows.min(h).max(1);
     let y0 = if from_top { 0 } else { h - rows };
-    image::imageops::crop_imm(img, 0, y0, w, rows).to_image()
+    let mut out = RgbImage::new(w, rows);
+    let row_bytes = w as usize * 3;
+    let src: &[u8] = img;
+    let dst: &mut [u8] = &mut out;
+    for row in 0..rows as usize {
+        let s0 = (y0 as usize + row) * row_bytes;
+        let d0 = row * row_bytes;
+        dst[d0..d0 + row_bytes].copy_from_slice(&src[s0..s0 + row_bytes]);
+    }
+    out
 }
 
 /// FNV-1a: 把字符串稳定映射到一个 u64 种子, 供背景填充的伪随机噪声使用

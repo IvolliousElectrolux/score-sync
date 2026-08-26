@@ -80,11 +80,13 @@ pub fn bind_keys(cx: &mut App) {
 pub struct ScoreVideoApp {
     focus_handle: FocusHandle,
     pool: Vec<MaterialItem>,
+    /// 素材缩略图缓存 (已缩放到预览上限 + 转 BGRA), 见 `image_for` 文档.
     render_cache: std::collections::HashMap<String, Arc<RenderImage>>,
-    /// 全分辨率 RGBA 热集 (按 group_id), 超出容量时 LRU 淘汰.
-    image_hot: std::collections::HashMap<String, Arc<image::RgbaImage>>,
-    image_lru: std::collections::VecDeque<String>,
-    image_lru_cap: usize,
+    /// 正在后台解码/缩放中的素材, 避免同一 group 重复起线程.
+    image_loading: std::collections::HashSet<String>,
+    /// 素材池整体刷新代数 (`set_pool` 自增), 防止某个素材后台解码到一半
+    /// 素材池又整体换了一批 (同 group_id 但内容已变), 旧结果晚到写脏缓存.
+    pool_gen: u64,
     timeline: Timeline,
     audio: AudioEngine,
     aspect_w: u32,
@@ -154,9 +156,8 @@ impl ScoreVideoApp {
             focus_handle: cx.focus_handle(),
             pool: Vec::new(),
             render_cache: std::collections::HashMap::new(),
-            image_hot: std::collections::HashMap::new(),
-            image_lru: std::collections::VecDeque::new(),
-            image_lru_cap: 12,
+            image_loading: std::collections::HashSet::new(),
+            pool_gen: 0,
             timeline: Timeline::new(),
             audio: AudioEngine::new(),
             aspect_w: 16,

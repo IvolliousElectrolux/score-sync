@@ -60,25 +60,36 @@ impl MaskToolApp {
         label: &str,
         cx: &mut Context<Self>,
     ) {
+        let render = rgb_to_render_image(&rgb);
+        self.load_rgb_with_render(rgb, render, session_key, masks, guides, label, cx);
+    }
+
+    /// 同 [`Self::load_rgb`], 但 GPU 贴图由调用方预先算好 (通常在后台线程,
+    /// 见 `rgb_to_render_image` 文档: 高清拼合图这一步自己就要上百毫秒,
+    /// 调用方若在界面线程上再转一遍就白白多卡一次). 宿主 (score_sync)
+    /// 的 `sync_mask_image` 走这条路径, 界面线程只做一次贴图指针替换.
+    pub fn load_rgb_with_render(
+        &mut self,
+        rgb: image::RgbImage,
+        render: Arc<RenderImage>,
+        session_key: String,
+        masks: Vec<MaskRect>,
+        guides: GuideState,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
         if self.session_key.as_ref() == Some(&session_key) && self.rgb_image.is_some() {
             return;
         }
         self.stash_history();
         let (w, h) = rgb.dimensions();
-        let mut rgba: RgbaImage = ImageBuffer::from_fn(w, h, |x, y| {
-            let p = rgb.get_pixel(x, y);
-            image::Rgba([p[0], p[1], p[2], 255])
-        });
-        for px in rgba.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
-        let render = Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]));
         self.image_path = None;
         self.session_key = Some(session_key.clone());
         self.rgb_image = Some(rgb);
-        self.render_image = Some(render);
+        self.replace_render_image(Some(render));
         self.img_w = w;
         self.img_h = h;
+        self.clamp_brush_size();
         self.masks = masks;
         self.guides = guides;
         self.guide_selected.clear();
@@ -90,11 +101,13 @@ impl MaskToolApp {
         self.drag = None;
         self.poly_draft = None;
         self.poly_cursor = None;
+        self.block_drag_freeze = None;
         self.status = format!("{label} ({w}×{h}) · 蒙版 {} 个", self.masks.len()).into();
         self.hint = format!(
             "编辑: {label}\n蒙版坐标相对本组合拼合图; 各组合独立 (共享脚注可在不同组画不同遮盖)."
         )
         .into();
+        self.canvas_loading = false;
         cx.notify();
     }
 
@@ -103,7 +116,8 @@ impl MaskToolApp {
         self.image_path = None;
         self.session_key = None;
         self.rgb_image = None;
-        self.render_image = None;
+        self.replace_render_image(None);
+        self.canvas_loading = false;
         self.img_w = 0;
         self.img_h = 0;
         self.masks.clear();
@@ -117,15 +131,24 @@ impl MaskToolApp {
         self.poly_cursor = None;
         self.block_heights.clear();
         self.block_layout.clear();
-        self.block_tiles.clear();
-        self.block_bg = None;
+        self.set_block_tiles(Vec::new(), None);
         self.piece_staff_ys.clear();
         self.block_hoff = 0;
         self.block_voff = 0;
         self.block_bg_left = 0;
         self.block_bg_top = 0;
         self.block_shows_bg = false;
+        self.block_drag_freeze = None;
         self.status = message.into();
+        cx.notify();
+    }
+
+    /// 立刻清空画布并挂「加载中」占位, 像素由宿主在后台生成完再
+    /// [`Self::load_rgb_with_render`]. 界面线程只做这一步, 好让面板/组合
+    /// 切换先跟手画出来.
+    pub fn begin_preview_load(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.clear_view(message, cx);
+        self.canvas_loading = true;
         cx.notify();
     }
 
@@ -137,22 +160,32 @@ impl MaskToolApp {
         guides: GuideState,
         cx: &mut Context<Self>,
     ) {
+        let render = rgb_to_render_image(&rgb);
+        self.replace_session_image_with_render(rgb, render, masks, guides, cx);
+    }
+
+    /// 同 [`Self::replace_session_image`], 但 GPU 贴图由调用方预先算好
+    /// (通常在后台线程, 见 `rgb_to_render_image` 文档), 界面线程只做一次
+    /// 贴图指针替换; 供全局对齐/撤重后刷新预览时避免堵在界面线程上.
+    pub fn replace_session_image_with_render(
+        &mut self,
+        rgb: image::RgbImage,
+        render: Arc<RenderImage>,
+        masks: Vec<MaskRect>,
+        guides: GuideState,
+        cx: &mut Context<Self>,
+    ) {
         let (w, h) = rgb.dimensions();
-        let mut rgba: RgbaImage = ImageBuffer::from_fn(w, h, |x, y| {
-            let p = rgb.get_pixel(x, y);
-            image::Rgba([p[0], p[1], p[2], 255])
-        });
-        for px in rgba.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
-        let render = Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]));
         self.rgb_image = Some(rgb);
-        self.render_image = Some(render);
+        self.replace_render_image(Some(render));
         self.img_w = w;
         self.img_h = h;
+        self.clamp_brush_size();
         self.masks = masks;
         self.guides = guides;
         self.guide_selected.clear();
+        self.canvas_loading = false;
+        self.block_drag_freeze = None;
         cx.notify();
     }
 
@@ -170,27 +203,21 @@ impl MaskToolApp {
             Ok(img) => {
                 let rgb = img.to_rgb8();
                 let (w, h) = rgb.dimensions();
-                let mut rgba: RgbaImage = ImageBuffer::from_fn(w, h, |x, y| {
-                    let p = rgb.get_pixel(x, y);
-                    image::Rgba([p[0], p[1], p[2], 255])
-                });
-                for px in rgba.chunks_exact_mut(4) {
-                    px.swap(0, 2);
-                }
-                let render = Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]));
                 let restored = self
                     .page_masks
                     .get(&path)
                     .cloned()
                     .unwrap_or_default();
+                let render = rgb_to_render_image(&rgb);
                 // 先把旧页的撤重栈存好, 再切路径.
                 self.stash_history();
                 self.image_path = Some(path.clone());
                 self.session_key = None;
                 self.rgb_image = Some(rgb);
-                self.render_image = Some(render);
+                self.replace_render_image(Some(render));
                 self.img_w = w;
                 self.img_h = h;
+                self.clamp_brush_size();
                 self.masks = restored;
                 self.guides = GuideState::default();
                 self.guide_selected.clear();
@@ -238,6 +265,10 @@ impl MaskToolApp {
     }
 
     pub fn open_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // 嵌入宿主时由宿主管开图, 这里弹独立选图会盖掉当前组合.
+        if self.embed_side_width > 1.0 {
+            return;
+        }
         let start = self
             .image_path
             .as_ref()

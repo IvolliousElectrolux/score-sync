@@ -130,10 +130,7 @@ impl ScoreSyncApp {
                 }
             }
             this.update(cx, |view, cx| {
-                view.doc.retain_window(
-                    view.doc.current_page_index,
-                    crate::page_cache::WINDOW_RADIUS,
-                );
+                view.doc.retain_memory_window();
                 view.status = format!("已识别全部 {n} 页.").into();
                 view.hint = view.status.clone();
                 view.after_doc_change(cx);

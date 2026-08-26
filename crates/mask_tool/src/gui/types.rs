@@ -3,10 +3,40 @@
 use super::*;
 
 pub(crate) const HISTORY_LIMIT: usize = 64;
-/// 画笔粗细 (直径, 图像像素) 的可调范围.
+/// 画笔粗细 (直径, 图像像素) 下限; 上限为当前图宽的 1/10, 滑条按对数映射.
 pub(crate) const BRUSH_SIZE_MIN: f32 = 2.0;
-pub(crate) const BRUSH_SIZE_MAX: f32 = 80.0;
+/// 尚未载入图片时滑条上限的回退值.
+pub(crate) const BRUSH_SIZE_FALLBACK_MAX: f32 = 80.0;
 pub(crate) const BRUSH_SIZE_DEFAULT: f32 = 16.0;
+
+/// 当前图宽对应的画笔直径上限 (宽的十分之一).
+pub(crate) fn brush_size_max_for_image(img_w: u32) -> f32 {
+    if img_w < 10 {
+        BRUSH_SIZE_FALLBACK_MAX
+    } else {
+        (img_w as f32 / 10.0).max(BRUSH_SIZE_MIN)
+    }
+}
+
+/// 对数滑条: `t=0` → min, `t=1` → max, 越往右增长越快 (与 PS 画笔粗细一致).
+pub(crate) fn brush_size_from_t(t: f32, min: f32, max: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let min = min.max(1.0);
+    let max = max.max(min);
+    min * (max / min).powf(t)
+}
+
+pub(crate) fn brush_size_to_t(size: f32, min: f32, max: f32) -> f32 {
+    let min = min.max(1.0);
+    let max = max.max(min);
+    let size = size.clamp(min, max);
+    let span = (max / min).ln();
+    if span.abs() < 1e-6 {
+        0.0
+    } else {
+        ((size / min).ln() / span).clamp(0.0, 1.0)
+    }
+}
 /// 折线闭环: 距首点多少屏幕像素内吸附.
 pub(crate) const POLY_SNAP_SCREEN_PX: f32 = 12.0;
 /// 橡皮: 超过此图像像素位移才视为拖擦 (否则为单击擦顶层).
@@ -371,4 +401,40 @@ pub(crate) struct UndoSnapshot {
 pub(crate) struct MaskHistory {
     pub(crate) undo: Vec<UndoSnapshot>,
     pub(crate) redo: Vec<UndoSnapshot>,
+}
+
+#[cfg(test)]
+mod brush_size_tests {
+    use super::*;
+
+    #[test]
+    fn log_slider_roundtrip() {
+        let min = 2.0;
+        let max = 400.0;
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let size = brush_size_from_t(t, min, max);
+            let back = brush_size_to_t(size, min, max);
+            assert!((back - t).abs() < 1e-5, "t={t} size={size} back={back}");
+        }
+        assert!((brush_size_from_t(0.0, min, max) - min).abs() < 1e-5);
+        assert!((brush_size_from_t(1.0, min, max) - max).abs() < 1e-5);
+    }
+
+    #[test]
+    fn log_slider_grows_faster_on_the_right() {
+        let min = 2.0;
+        let max = 400.0;
+        let left = brush_size_from_t(0.4, min, max) - brush_size_from_t(0.2, min, max);
+        let right = brush_size_from_t(0.8, min, max) - brush_size_from_t(0.6, min, max);
+        assert!(right > left * 2.0, "left={left} right={right}");
+        let mid = brush_size_from_t(0.5, min, max);
+        assert!((mid - (min * max).sqrt()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn brush_max_is_tenth_of_image_width() {
+        assert_eq!(brush_size_max_for_image(0), BRUSH_SIZE_FALLBACK_MAX);
+        assert_eq!(brush_size_max_for_image(2000), 200.0);
+        assert_eq!(brush_size_max_for_image(4000), 400.0);
+    }
 }

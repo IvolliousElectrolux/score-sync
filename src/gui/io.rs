@@ -57,6 +57,16 @@ impl ScoreSyncApp {
             self.close_import_dialog(cx);
             return;
         }
+        if self.bg.pick_open {
+            self.bg.pick_open = false;
+            cx.notify();
+            return;
+        }
+        if self.bg.batch_open {
+            self.bg.batch_open = false;
+            cx.notify();
+            return;
+        }
         if self.page_organize.is_some() {
             self.close_page_organize(cx);
             return;
@@ -486,6 +496,7 @@ impl ScoreSyncApp {
                         view.region_y_edit = None;
                         view.crop_histories.clear();
                         view.page_struct_history = CropHistory::default();
+                        view.bg_history = BgHistory::default();
                         view.guide_undo.clear();
                         view.guide_redo.clear();
                         view.align_all_running = false;
@@ -505,8 +516,10 @@ impl ScoreSyncApp {
                         view.mask_tool.update(cx, |m, _| {
                             m.apply_color_prefs(mask_prefs);
                             m.set_guide_prefs(g_global, g_sync);
+                            m.set_preview_only(false);
                         });
                         view.refresh_render(cx);
+                        view.sync_bg_ui_from_doc(cx);
                         view.start_hydrate_all(false, cx);
                         view.status = format!(
                             "已打开工程: {} ({} 页, {} 组)",
@@ -588,6 +601,7 @@ impl ScoreSyncApp {
         self.region_y_edit = None;
         self.crop_histories.clear();
         self.page_struct_history = CropHistory::default();
+        self.bg_history = BgHistory::default();
         self.guide_undo.clear();
         self.guide_redo.clear();
         self.align_all_running = false;
@@ -598,12 +612,13 @@ impl ScoreSyncApp {
         self.mask_tool.update(cx, |m, cx| {
             m.clear_view("", cx);
             m.apply_color_prefs(mask_prefs);
+            m.set_preview_only(false);
         });
         self.score_video.update(cx, |v, cx| {
             v.load_timeline_snapshot(score_video::model::TimelineSnapshot::default(), cx);
             v.set_pool(Vec::new(), cx);
         });
-        self.render_image = None;
+        self.retire_current_render_image();
         self.img_w = 0;
         self.img_h = 0;
         self.user_zoomed = false;
@@ -615,6 +630,10 @@ impl ScoreSyncApp {
         )
         .into();
         self.hint = self.status.clone();
+        self.bg.pick_open = false;
+        self.bg.batch_open = false;
+        self.bg.eyedropper_armed = false;
+        self.sync_bg_ui_from_doc(cx);
         self.try_show_update_dialog(cx);
         cx.notify();
     }
@@ -827,10 +846,7 @@ impl ScoreSyncApp {
                         ) {
                             Ok(n) => {
                                 saved += n;
-                                view.doc.retain_window(
-                                    view.doc.current_page_index,
-                                    crate::page_cache::WINDOW_RADIUS,
-                                );
+                                view.doc.retain_memory_window();
                                 view.status =
                                     format!("导出进度 {saved}/{}…", group_ids.len()).into();
                                 view.hint = view.status.clone();
@@ -846,10 +862,7 @@ impl ScoreSyncApp {
                 }
             }
             this.update(cx, |view, cx| {
-                view.doc.retain_window(
-                    view.doc.current_page_index,
-                    crate::page_cache::WINDOW_RADIUS,
-                );
+                view.doc.retain_memory_window();
                 match err {
                     Some(e) => {
                         view.show_error("导出失败", e, cx);

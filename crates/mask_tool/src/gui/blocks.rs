@@ -2,9 +2,8 @@
 //! 宿主负责 (`compose_group_preview` 之类既有逻辑), 这里只算位置/尺寸,
 //! 换算成命中测试与叠加线用的坐标. 拖动中途只改 `block_layout` 并
 //! `cx.notify()`, 画面用加载时上传好的分块 GPU 贴图按新位置绘制 (不再
-//! 每帧整图重拼/重新上传); 松手后宿主 observe 到变化, 用
-//! [`Self::update_base_image`] 换回含底色合成的整图, 蒙版编辑继续显示
-//! 那份最终预览.
+//! 每帧整图重拼/重新上传); 松手后继续画贴图, 等宿主 observe 到变化并用
+//! [`Self::update_base_image`] 换回含底色合成的整图, 避免中间闪一帧旧图.
 
 use super::*;
 use crate::layout;
@@ -42,26 +41,42 @@ impl BlockTile {
     }
 }
 
-/// 工程底色的 GPU 贴图, 拖动时按 `preview_frame` 的裁切原点平移裁剪绘制.
+/// 工程底色的 GPU 贴图: 完整底色只作备份, 这里上传的是按目标页
+/// ([`apply_bg::process::page_size`]) 裁好的恰好大小画布. 拖动时铺满预览,
+/// 不再按完整扫描图原点平移裁剪.
 #[derive(Clone)]
 pub struct BlockBgTile {
     pub image: Arc<RenderImage>,
+    /// 裁切后的目标画布宽高 (绘制铺满预览).
     pub width: u32,
     pub height: u32,
+    /// 完整底色备份的像素尺寸, 只给 `preview_frame` / `natural_voff`.
+    pub src_width: u32,
+    pub src_height: u32,
     pub aspect_w: u32,
     pub aspect_h: u32,
 }
 
 impl BlockBgTile {
-    pub fn from_rgb(img: &image::RgbImage, aspect_w: u32, aspect_h: u32) -> Self {
-        let (width, height) = img.dimensions();
-        Self {
-            image: rgb_to_render_image(img),
+    /// 从完整底色备份裁出当前谱面宽对应的目标页, 再上传 GPU 贴图.
+    /// 底色装不下该页时返回 `None`.
+    pub fn from_full(
+        full: &image::RgbImage,
+        aspect_w: u32,
+        aspect_h: u32,
+        sheet_w: u32,
+    ) -> Option<Self> {
+        let crop = apply_bg::process::crop_bg_to_page(full, aspect_w, aspect_h, sheet_w)?;
+        let (width, height) = crop.dimensions();
+        Some(Self {
+            image: rgb_to_render_image(&crop),
             width,
             height,
+            src_width: full.width(),
+            src_height: full.height(),
             aspect_w,
             aspect_h,
-        }
+        })
     }
 }
 
@@ -73,10 +88,26 @@ fn mean_to_u8(m: [f32; 3]) -> [u8; 3] {
     ]
 }
 
+/// GPUI 图集按整图上传; 高清页一次就是几十 MB, 切页还不 drop,
+/// 按钮一按就要重绘整棵树, 卡半拍. 显示贴图限最长边, 命中/识别仍用原图像素.
+pub const GPU_TEX_MAX_SIDE: u32 = 2048;
+
 /// RGB → BGRA `RenderImage` (GPUI 贴图). 按行整块展开, 不走逐像素
 /// `get_pixel`/`put_pixel`; 拖动分块的热路径会反复用到, 加载分块贴图
-/// 与松手后回填整图都走这里.
-pub(crate) fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
+/// 与松手后回填整图都走这里. 超过 [`GPU_TEX_MAX_SIDE`] 先缩小再上传.
+pub fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
+    let (w, h) = rgb.dimensions();
+    let m = w.max(h);
+    if m > GPU_TEX_MAX_SIDE {
+        let tw = ((w as u64).saturating_mul(GPU_TEX_MAX_SIDE as u64) / m as u64).max(1) as u32;
+        let th = ((h as u64).saturating_mul(GPU_TEX_MAX_SIDE as u64) / m as u64).max(1) as u32;
+        let scaled = image::imageops::resize(rgb, tw, th, image::imageops::FilterType::Triangle);
+        return rgb_to_render_image_raw(&scaled);
+    }
+    rgb_to_render_image_raw(rgb)
+}
+
+fn rgb_to_render_image_raw(rgb: &image::RgbImage) -> Arc<RenderImage> {
     let (w, h) = rgb.dimensions();
     let src = rgb.as_raw();
     let n = src.len() / 3 * 4;
@@ -125,11 +156,25 @@ impl MaskToolApp {
     }
 
     pub fn set_block_tiles(&mut self, tiles: Vec<BlockTile>, bg: Option<BlockBgTile>) {
+        let old_tiles = std::mem::take(&mut self.block_tiles);
+        let old_bg = self.block_bg.take();
+        for t in old_tiles {
+            self.retire_gpu_image(Some(t.image));
+        }
+        if let Some(old) = old_bg {
+            let reuse = bg
+                .as_ref()
+                .map(|n| Arc::ptr_eq(&n.image, &old.image))
+                .unwrap_or(false);
+            if !reuse {
+                self.retire_gpu_image(Some(old.image));
+            }
+        }
         self.block_tiles = tiles;
         self.block_bg = bg;
-        // 只填底色裁切原点, 不动 hoff/voff/img 尺寸——那些以宿主刚合成的
-        // 预览图为准, 这里再算一遍并 `shift_masks` 会把已换算过的蒙版再
-        // 平移一次.
+        // 只填底色裁切原点 (完整备份上的页矩形), 不动 hoff/voff/img
+        // 尺寸——那些以宿主刚合成的预览图为准. 绘制用的是已裁好的目标
+        // 页贴图, 铺满画布, 不再按这个原点平移.
         if let Some(frame) = self.compute_preview_frame() {
             self.block_bg_left = frame.bg_left;
             self.block_bg_top = frame.bg_top;
@@ -147,6 +192,27 @@ impl MaskToolApp {
         )
     }
 
+    /// 拖动中, 或松手/撤重后整图尚未回填: 用分块贴图按当前 layout 画,
+    /// 不要闪回上一张合成图.
+    pub fn wants_block_tile_preview(&self) -> bool {
+        !self.block_tiles.is_empty()
+            && (self.is_block_dragging() || self.block_drag_freeze.is_some())
+    }
+
+    /// 在当前画布尺寸上锁住贴图预览 (撤重/对齐后整图尚未回填时).
+    /// 拖动途中不要调用: 那边要保持拖动起点的尺寸, 避免缩放跟手跳.
+    pub(super) fn hold_block_tile_preview(&mut self) {
+        if self.block_tiles.is_empty() {
+            return;
+        }
+        self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+    }
+
+    /// 宿主合成失败或切页时解开贴图预览锁.
+    pub fn release_block_tile_preview(&mut self) {
+        self.block_drag_freeze = None;
+    }
+
     pub fn has_block_tiles(&self) -> bool {
         !self.block_tiles.is_empty()
     }
@@ -161,6 +227,10 @@ impl MaskToolApp {
 
     pub fn voff_target(&self) -> i64 {
         self.voff_target
+    }
+
+    pub fn set_voff_target(&mut self, v: i64) {
+        self.voff_target = v;
     }
 
     pub fn has_block_pieces(&self) -> bool {
@@ -182,18 +252,35 @@ impl MaskToolApp {
     }
 
     /// 只替换当前显示的位图 (宿主重算含底色合成的拼合图后回填), 不动
-    /// 历史/选中/缩放/会话状态; 拖动分块期间宿主每帧调用它保持画面同步.
-    /// `voff`: 新拼合图在画布中的纵向偏移 (调整分块可能改变拼合图总高,
-    /// 底色合成居中的偏移量也会跟着变, 必须同步更新, 否则下一帧命中
-    /// 测试/叠加线的位置会跟画面错位).
+    /// 历史/选中/缩放/会话状态. 拖动/撤重期间画面先用分块贴图撑着, 整图
+    /// 到齐后走这里换回最终预览. `voff`: 新拼合图在画布中的纵向偏移
+    /// (调整分块可能改变拼合图总高, 底色合成居中的偏移量也会跟着变,
+    /// 必须同步更新, 否则下一帧命中测试/叠加线的位置会跟画面错位).
     pub fn update_base_image(&mut self, rgb: image::RgbImage, hoff: i64, voff: i64, cx: &mut Context<Self>) {
+        let render = rgb_to_render_image(&rgb);
+        self.update_base_image_with_render(rgb, render, hoff, voff, cx);
+    }
+
+    /// 同 [`Self::update_base_image`], 但 GPU 贴图由调用方 (通常在后台
+    /// 线程) 预先转换好, 见 `rgb_to_render_image` 文档: 大图这一步自己
+    /// 就要上百毫秒, 拖动分块松手那一刻若在界面线程上做就会卡一拍.
+    pub fn update_base_image_with_render(
+        &mut self,
+        rgb: image::RgbImage,
+        render: Arc<RenderImage>,
+        hoff: i64,
+        voff: i64,
+        cx: &mut Context<Self>,
+    ) {
         let (w, h) = rgb.dimensions();
-        self.render_image = Some(rgb_to_render_image(&rgb));
+        self.replace_render_image(Some(render));
         self.rgb_image = Some(rgb);
         self.img_w = w;
         self.img_h = h;
+        self.clamp_brush_size();
         self.block_hoff = hoff;
         self.block_voff = voff;
+        self.block_drag_freeze = None;
         if let Some(frame) = self.compute_preview_frame() {
             self.content_scale = frame.content_scale;
         }
@@ -210,16 +297,16 @@ impl MaskToolApp {
             let natural = apply_bg::process::natural_voff(
                 sheet_w,
                 sheet_h,
-                bg.width,
-                bg.height,
+                bg.src_width,
+                bg.src_height,
                 bg.aspect_w,
                 bg.aspect_h,
             );
             apply_bg::process::preview_frame(
                 sheet_w,
                 sheet_h,
-                bg.width,
-                bg.height,
+                bg.src_width,
+                bg.src_height,
                 bg.aspect_w,
                 bg.aspect_h,
                 self.voff_target - natural,
@@ -254,6 +341,21 @@ impl MaskToolApp {
             frame.voff,
             frame.content_scale,
         );
+        self.apply_preview_frame(frame);
+    }
+
+    /// 撤重后: 快照里的蒙版已经是当时画布坐标系, 只按还原后的 layout
+    /// 重算 hoff/voff/尺寸, 不要再 `remap_masks_canvas` (否则会把旧坐标
+    /// 误当成当前坐标系再映一次, 画笔跟着偏).
+    pub(super) fn restore_preview_geom_from_layout(&mut self) {
+        let Some(frame) = self.compute_preview_frame() else {
+            return;
+        };
+        self.apply_preview_frame(frame);
+        self.hold_block_tile_preview();
+    }
+
+    fn apply_preview_frame(&mut self, frame: apply_bg::process::PreviewFrame) {
         self.img_w = frame.canvas_w;
         self.img_h = frame.canvas_h;
         self.block_hoff = frame.hoff;
@@ -722,5 +824,44 @@ fn snap_zero(v: i32) -> i32 {
         0
     } else {
         v
+    }
+}
+
+#[cfg(test)]
+mod gpu_tex_tests {
+    use super::{rgb_to_render_image, BlockBgTile, GPU_TEX_MAX_SIDE};
+    use image::RgbImage;
+
+    #[test]
+    fn huge_rgb_is_capped_for_gpu() {
+        let img = RgbImage::from_pixel(3000, 4000, image::Rgb([10, 20, 30]));
+        let tex = rgb_to_render_image(&img);
+        let sz = tex.size(0);
+        let w = i32::from(sz.width) as u32;
+        let h = i32::from(sz.height) as u32;
+        assert!(w.max(h) <= GPU_TEX_MAX_SIDE);
+        assert_eq!(w * 4000, h * 3000);
+    }
+
+    #[test]
+    fn from_full_uploads_page_crop_not_full_bg() {
+        let bg = RgbImage::from_pixel(800, 800, image::Rgb([10, 20, 30]));
+        let sheet_w = 200u32;
+        let tile = BlockBgTile::from_full(&bg, 16, 9, sheet_w).expect("covers page");
+        let (cw, ch) = apply_bg::process::page_size(sheet_w, 16, 9);
+        assert_eq!((tile.width, tile.height), (cw, ch));
+        assert_eq!((tile.src_width, tile.src_height), (800, 800));
+        assert_eq!((tile.aspect_w, tile.aspect_h), (16, 9));
+        let sz = tile.image.size(0);
+        let tw = i32::from(sz.width) as u32;
+        let th = i32::from(sz.height) as u32;
+        assert!(tw.max(th) <= GPU_TEX_MAX_SIDE);
+        assert!(tile.width < bg.width() || tile.height < bg.height());
+    }
+
+    #[test]
+    fn from_full_rejects_undersized_bg() {
+        let bg = RgbImage::from_pixel(50, 50, image::Rgb([10, 20, 30]));
+        assert!(BlockBgTile::from_full(&bg, 16, 9, 200).is_none());
     }
 }

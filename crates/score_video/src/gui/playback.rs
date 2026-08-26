@@ -46,10 +46,11 @@ impl ScoreVideoApp {
     }
 
     pub fn set_pool(&mut self, pool: Vec<MaterialItem>, cx: &mut Context<Self>) {
-        // 素材内容可能已变化但 group_id 不变, 因此整体清空缓存.
+        // 素材内容可能已变化但 group_id 不变, 因此整体清空缓存; 正在后台
+        // 解码的旧内容用 `pool_gen` 标记过期, 回来时会被丢弃 (见 `image_for`).
+        self.pool_gen = self.pool_gen.wrapping_add(1);
         self.render_cache.clear();
-        self.image_hot.clear();
-        self.image_lru.clear();
+        self.image_loading.clear();
         self.pool = pool;
         if let Some(gid) = &self.expanded_pool {
             if !self.pool.iter().any(|m| &m.group_id == gid) {
@@ -57,29 +58,6 @@ impl ScoreVideoApp {
             }
         }
         cx.notify();
-    }
-
-    /// 从磁盘缓存加载全分辨率图并放入 LRU 热集.
-    pub(super) fn full_rgba(&mut self, group_id: &str) -> Option<Arc<image::RgbaImage>> {
-        if let Some(img) = self.image_hot.get(group_id) {
-            if let Some(pos) = self.image_lru.iter().position(|k| k == group_id) {
-                if let Some(k) = self.image_lru.remove(pos) {
-                    self.image_lru.push_back(k);
-                }
-            }
-            return Some(img.clone());
-        }
-        let item = self.pool.iter().find(|m| m.group_id == group_id)?;
-        let rgba = item.load_rgba().ok()?;
-        let arc = Arc::new(rgba);
-        self.image_hot.insert(group_id.to_string(), arc.clone());
-        self.image_lru.push_back(group_id.to_string());
-        while self.image_lru.len() > self.image_lru_cap {
-            if let Some(old) = self.image_lru.pop_front() {
-                self.image_hot.remove(&old);
-            }
-        }
-        Some(arc)
     }
 
     /// 仅在播放期间才启动的进度 ticker (每次开始播放时新建一个).
@@ -119,30 +97,70 @@ impl ScoreVideoApp {
         .detach();
     }
 
-    pub(super) fn image_for(&mut self, group_id: &str) -> Option<Arc<RenderImage>> {
+    /// 素材缩略图 (预览窗当前帧 / 素材池展开预览用): 命中缓存直接返回;
+    /// 否则后台线程做磁盘读取 + 解码 + 缩放 + 通道换序, 本帧先返回
+    /// `None` (画布这一帧先空着), 解码完成后自行 `cx.notify()` 刷新.
+    /// 落盘素材图可达四五千像素见方, `image::open`+`to_rgba8`+缩放单张
+    /// 就要上百毫秒, 若在界面线程上做 (原实现如此), 播放头移到新素材、
+    /// 切入视频面板等操作都会明显卡一拍.
+    pub(super) fn image_for(&mut self, group_id: &str, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
         if let Some(img) = self.render_cache.get(group_id) {
             return Some(img.clone());
         }
-        let rgba_src = self.full_rgba(group_id)?;
-        // 谱面组合拼合 (+ 可能叠加的工程底色补边) 后经常是很高的整图; 预览限幅.
-        const MAX_PREVIEW_DIM: u32 = 2048;
-        let (w, h) = rgba_src.dimensions();
-        let mut rgba = if w > MAX_PREVIEW_DIM || h > MAX_PREVIEW_DIM {
-            let scale = (MAX_PREVIEW_DIM as f32 / w.max(h) as f32).min(1.0);
-            let nw = ((w as f32 * scale).round() as u32).max(1);
-            let nh = ((h as f32 * scale).round() as u32).max(1);
-            image::imageops::resize(&*rgba_src, nw, nh, image::imageops::FilterType::Triangle)
-        } else {
-            (*rgba_src).clone()
-        };
-        // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素.
-        for px in rgba.chunks_exact_mut(4) {
-            px.swap(0, 2);
+        if !self.image_loading.insert(group_id.to_string()) {
+            return None; // 已经有一份后台任务在算这张, 别重复起线程
         }
-        let render = Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]));
-        self.render_cache
-            .insert(group_id.to_string(), render.clone());
-        Some(render)
+        let Some(item) = self.pool.iter().find(|m| m.group_id == group_id).cloned() else {
+            self.image_loading.remove(group_id);
+            return None;
+        };
+        let gen = self.pool_gen;
+        let gid = group_id.to_string();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let render = item.load_rgba().ok().map(|rgba| {
+                // 谱面组合拼合 (+ 可能叠加的工程底色补边) 后经常是很高的整图; 预览限幅.
+                const MAX_PREVIEW_DIM: u32 = 2048;
+                let (w, h) = rgba.dimensions();
+                let mut small = if w > MAX_PREVIEW_DIM || h > MAX_PREVIEW_DIM {
+                    let scale = (MAX_PREVIEW_DIM as f32 / w.max(h) as f32).min(1.0);
+                    let nw = ((w as f32 * scale).round() as u32).max(1);
+                    let nh = ((h as f32 * scale).round() as u32).max(1);
+                    image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Triangle)
+                } else {
+                    rgba
+                };
+                // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素.
+                for px in small.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+                Arc::new(RenderImage::new(smallvec![Frame::new(small)]))
+            });
+            let _ = tx.send_blocking(render);
+        });
+        cx.spawn(async move |this, cx| {
+            let render = rx.recv().await.ok().flatten();
+            this.update(cx, |view, cx| {
+                if view.pool_gen != gen {
+                    view.image_loading.remove(&gid); // 素材池已整体刷新, 这份结果作废
+                    return;
+                }
+                match render {
+                    Some(render) => {
+                        view.image_loading.remove(&gid);
+                        view.render_cache.insert(gid, render);
+                        cx.notify();
+                    }
+                    // 解码失败 (如缓存文件损坏): 不移出 `image_loading`, 避免
+                    // 之后每帧都重新起一次注定失败的后台线程; 留到下次
+                    // `set_pool` 整体刷新时才会重试.
+                    None => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
+        None
     }
 
     pub(super) fn x_to_time(&self, x: f32) -> f64 {

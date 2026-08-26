@@ -19,7 +19,7 @@ mod types;
 
 pub(crate) use blocks::BlockHitZone;
 pub(crate) use types::*;
-pub use blocks::{BlockBgTile, BlockTile};
+pub use blocks::{rgb_to_render_image, BlockBgTile, BlockTile};
 pub use guides::GuideHostCmd;
 
 pub(crate) use std::collections::{HashMap, HashSet};
@@ -73,6 +73,8 @@ pub struct MaskToolApp {
     page_masks: std::collections::HashMap<PathBuf, Vec<MaskRect>>,
     rgb_image: Option<ImageBuffer<Rgb<u8>, Vec<u8>>>,
     render_image: Option<Arc<RenderImage>>,
+    /// 待宿主 `drop_image` 的旧 GPU 贴图 (嵌入时本 entity 不一定走 `Render`).
+    gpu_drop: Vec<Arc<RenderImage>>,
     img_w: u32,
     img_h: u32,
     masks: Vec<MaskRect>,
@@ -177,11 +179,14 @@ pub struct MaskToolApp {
     /// 鼠标当前是否悬停在可拖动的分块区域上 (无拖动时按位置实时更新),
     /// 只有这时才把光标换成上下拉伸样式, 不能整个画布都换.
     pub(crate) block_hover: bool,
-    /// 拖动分块期间锁定的 (img_w, img_h), 用于计算显示缩放比例. 拼合图
-    /// 总高会随拖动实时变化, 如果每帧都按最新尺寸重算「适应视口」缩放,
+    /// 锁定的 (img_w, img_h), 用于计算显示缩放比例, 并作为「分块贴图预览」
+    /// 开关: `Some` 时画布画分块 GPU 贴图而不是可能过期的整图. 拼合图总
+    /// 高会随拖动实时变化, 如果每帧都按最新尺寸重算「适应视口」缩放,
     /// 画面会跟着抖动/整体缩放, 屏幕坐标换算成图像坐标的比例也跟着变,
     /// 导致拖动手感卡顿、鼠标位移跟分块实际位移对不上 (尤其是向上拖动
-    /// 需要精确吃掉间距时最明显). 拖动开始时锁定, 松手时解锁.
+    /// 需要精确吃掉间距时最明显). 拖动开始时锁定; 松手/撤重后仍保持,
+    /// 直到宿主把匹配的整图回填 (`update_base_image`), 避免中间一帧闪回
+    /// 拖之前的合成图.
     pub(crate) block_drag_freeze: Option<(f32, f32)>,
     /// 当前组合的辅助线 (画布坐标系固定参考线, 仅蒙版画布内可见, 不参与
     /// 导出/合成), 随 `session_key` 一起切换.
@@ -203,6 +208,17 @@ pub struct MaskToolApp {
     pub(crate) align_menu: Option<(f32, f32)>,
     /// 请宿主代办的全局辅助线/对齐操作; 宿主 observe 后 `take`.
     pub(crate) guide_host_cmd: Option<GuideHostCmd>,
+    /// 宿主正在后台生成当前预览 (切组合/切面板). 画布叠「加载中…」,
+    /// 像分块页那样先切过去再等像素, 不堵在界面线程上.
+    pub(crate) canvas_loading: bool,
+    /// 宿主「底色」预览: 只显示/平移/缩放, 不编辑蒙版或分块.
+    pub(crate) preview_only: bool,
+    /// 预览态普通滚轮: 宿主取出后切组合. -1 上一组, +1 下一组.
+    pub(crate) preview_wheel: i32,
+    /// 宿主滴管: 从预览图取色, 不改蒙版色.
+    pub(crate) host_pick_armed: bool,
+    pub(crate) host_pick_hover: Option<[u8; 3]>,
+    pub(crate) host_pick_click: Option<[u8; 3]>,
 }
 
 
@@ -226,6 +242,7 @@ impl MaskToolApp {
             page_masks: std::collections::HashMap::new(),
             rgb_image: None,
             render_image: None,
+            gpu_drop: Vec::new(),
             img_w: 0,
             img_h: 0,
             masks: Vec::new(),
@@ -303,6 +320,12 @@ impl MaskToolApp {
             guide_menu: None,
             align_menu: None,
             guide_host_cmd: None,
+            canvas_loading: false,
+            preview_only: false,
+            preview_wheel: 0,
+            host_pick_armed: false,
+            host_pick_hover: None,
+            host_pick_click: None,
         };
         app.rebuild_hue_image();
         app.rebuild_sb_image();
@@ -316,8 +339,71 @@ impl MaskToolApp {
         &self.focus_handle
     }
 
+    pub(crate) fn retire_gpu_image(&mut self, img: Option<Arc<RenderImage>>) {
+        if let Some(img) = img {
+            self.gpu_drop.push(img);
+        }
+    }
+
+    /// 宿主每帧取走旧贴图, 在自己的 `Window` 上 `drop_image`.
+    pub fn take_gpu_drops(&mut self) -> Vec<Arc<RenderImage>> {
+        std::mem::take(&mut self.gpu_drop)
+    }
+
+    pub(crate) fn replace_render_image(&mut self, new: Option<Arc<RenderImage>>) {
+        let old = self.render_image.take();
+        self.retire_gpu_image(old);
+        self.render_image = new;
+    }
+
     pub fn set_embed_side_width(&mut self, w: f32) {
         self.embed_side_width = w;
+    }
+
+    pub fn set_preview_only(&mut self, on: bool) {
+        if self.preview_only == on {
+            return;
+        }
+        self.preview_only = on;
+        if on {
+            self.mode = ToolMode::Select;
+            self.drag = None;
+            self.selected.clear();
+            self.block_selected = None;
+            self.poly_draft = None;
+            self.eyedropper_armed = false;
+            self.host_pick_armed = false;
+            self.host_pick_hover = None;
+            self.host_pick_click = None;
+            self.preview_wheel = 0;
+        }
+    }
+
+    pub fn take_preview_wheel(&mut self) -> i32 {
+        let v = self.preview_wheel;
+        self.preview_wheel = 0;
+        v
+    }
+
+    pub fn set_host_pick_armed(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.host_pick_armed = on;
+        if !on {
+            self.host_pick_hover = None;
+        }
+        self.host_pick_click = None;
+        cx.notify();
+    }
+
+    pub fn take_host_pick_click(&mut self) -> Option<[u8; 3]> {
+        self.host_pick_click.take()
+    }
+
+    pub fn host_pick_hover(&self) -> Option<[u8; 3]> {
+        self.host_pick_hover
+    }
+
+    pub fn host_pick_armed(&self) -> bool {
+        self.host_pick_armed
     }
 
     pub fn image_path(&self) -> Option<&PathBuf> {
@@ -378,7 +464,10 @@ impl Focusable for MaskToolApp {
 }
 
 impl Render for MaskToolApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for img in self.take_gpu_drops() {
+            let _ = window.drop_image(img);
+        }
         let title: SharedString = match &self.image_path {
             Some(p) => format!(
                 "蒙版遮盖 — {}",

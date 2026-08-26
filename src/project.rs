@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use image::ImageFormat;
 use mask_tool::mask::MaskRect;
@@ -511,6 +512,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         bg_source_path: None,
         bg_aspect_w: 2560,
         bg_aspect_h: 1440,
+        bg_gen: 0,
         video_state: score_video::model::TimelineSnapshot {
             video_clips: meta
                 .video
@@ -540,7 +542,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             let image = image::load_from_memory(&png)
                 .map_err(|e| format!("解码底色失败: {e}"))?
                 .to_rgb8();
-            doc.bg_image = Some(image);
+            doc.bg_image = Some(Arc::new(image));
             doc.bg_enabled = true;
             doc.bg_aspect_w = bg.aspect_w.max(1);
             doc.bg_aspect_h = bg.aspect_h.max(1);
@@ -564,7 +566,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         .collect();
     doc.selected_region_ids
         .retain(|id| valid_regions.contains(id));
-    doc.retain_window(doc.current_page_index, crate::page_cache::WINDOW_RADIUS);
+    doc.retain_memory_window();
     doc.rebuild_rid_index();
     doc.seed_guide_defaults();
     Ok(doc)

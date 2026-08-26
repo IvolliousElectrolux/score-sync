@@ -375,7 +375,7 @@ impl ScoreVideoApp {
     pub(super) fn preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.timeline.playhead;
         let cur_group = self.timeline.covering_clip(t).map(|c| c.group_id.clone());
-        let img = cur_group.as_deref().and_then(|g| self.image_for(g));
+        let img = cur_group.as_deref().and_then(|g| self.image_for(g, cx));
         let fade = self.timeline.covering_fade(t);
         let fade_alpha = fade
             .map(|f| {
@@ -423,15 +423,34 @@ impl ScoreVideoApp {
                         let dh = aspect_h * fit;
                         let ox = bounds.origin.x + px((vw - dw) * 0.5);
                         let oy = bounds.origin.y + px((vh - dh) * 0.5);
-                        let img_bounds = Bounds {
+                        let frame = Bounds {
                             origin: point(ox, oy),
                             size: size(px(dw), px(dh)),
                         };
+                        window.paint_quad(gpui::fill(frame, rgb(0x111827)));
                         if let Some(img) = &img {
-                            let _ =
-                                window.paint_image(img_bounds, Corners::default(), img.clone(), 0, false);
-                        } else {
-                            window.paint_quad(gpui::fill(img_bounds, rgb(0x111827)));
+                            // 画进 16:9 框时按图片自身宽高比 contain, 不能把竖图
+                            // 强行拉满画框, 否则谱面会被压扁/拉瘦.
+                            let sz = img.size(0);
+                            let iw = (sz.width.0 as f32).max(1.0);
+                            let ih = (sz.height.0 as f32).max(1.0);
+                            let img_fit = (dw / iw).min(dh / ih).max(0.0001);
+                            let idw = iw * img_fit;
+                            let idh = ih * img_fit;
+                            let img_bounds = Bounds {
+                                origin: point(
+                                    ox + px((dw - idw) * 0.5),
+                                    oy + px((dh - idh) * 0.5),
+                                ),
+                                size: size(px(idw), px(idh)),
+                            };
+                            let _ = window.paint_image(
+                                img_bounds,
+                                Corners::default(),
+                                img.clone(),
+                                0,
+                                false,
+                            );
                         }
                         if fade_alpha > 0.004 {
                             let hex = if fade_keep_bg {
@@ -444,7 +463,7 @@ impl ScoreVideoApp {
                             };
                             let mut faded = rgba(hex);
                             faded.a = fade_alpha;
-                            window.paint_quad(gpui::fill(img_bounds, faded));
+                            window.paint_quad(gpui::fill(frame, faded));
                         }
                     },
                 )

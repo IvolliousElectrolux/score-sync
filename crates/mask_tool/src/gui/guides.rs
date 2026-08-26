@@ -292,31 +292,16 @@ impl MaskToolApp {
         undid
     }
 
-    fn current_align_assignments(&self) -> Vec<crate::layout::AlignAssignment> {
-        if self.guides.lines.is_empty() || self.block_heights.is_empty() {
-            return Vec::new();
-        }
-        let anchors = self.current_block_align_anchors();
-        crate::staff::assignments_for_guides(&anchors, &self.guides.lines)
-    }
-
     /// 优先用原始条带预计算锚点 (与全局对齐同一套); 缺锚点时才在预览
     /// 画布上重检. 脚注把拼合图撑高、页面缩小之后, 预览上重检会偏.
     /// 组合里多了尚未缓存的文字块时, 仍用已有谱行条带锚点, 文字当非谱表.
     fn current_block_align_anchors(&self) -> Vec<crate::staff::BlockAlignAnchor> {
-        let sheet_spans = crate::layout::compute_spans(&self.block_heights, &self.block_layout);
         if !self.piece_staff_ys.is_empty() {
-            return sheet_spans
-                .into_iter()
-                .map(|(rid, y0, y1)| {
-                    let extra = crate::layout::BlockAdjust::find(&self.block_layout, &rid)
-                        .map(|a| a.extra_top)
-                        .unwrap_or(0);
-                    let span_h = (y1 - y0 + 1) as i32;
-                    let piece_y = self.piece_staff_ys.get(&rid).copied().flatten();
-                    crate::staff::block_anchor_from_piece_y(rid, piece_y, extra, span_h)
-                })
-                .collect();
+            return crate::staff::anchors_from_piece_ys(
+                &self.block_heights,
+                &self.block_layout,
+                &self.piece_staff_ys,
+            );
         }
         let Some(rgb) = self.rgb_image.as_ref() else {
             return Vec::new();
@@ -327,6 +312,28 @@ impl MaskToolApp {
         crate::staff::collect_block_align_anchors(rgb, &self.block_spans(), x0, x1, cs, thr)
     }
 
+    /// 与左键「对齐」同一套输入, 供宿主全局对齐在后台逐页复用.
+    pub fn current_align_input(&self) -> Option<(crate::staff::AlignGroupInput, i64)> {
+        if !self.guides_on() || self.block_heights.is_empty() {
+            return None;
+        }
+        Some((
+            crate::staff::AlignGroupInput {
+                heights: self.block_heights.clone(),
+                layout: self.block_layout.clone(),
+                voff: self.block_voff.max(0).min(i32::MAX as i64) as i32,
+                page_h: if self.block_shows_bg {
+                    self.img_h as i32
+                } else {
+                    0
+                },
+                anchors: self.current_block_align_anchors(),
+                guide_lines: self.guides.lines.clone(),
+            },
+            self.voff_target,
+        ))
+    }
+
     /// 「对齐」: 按辅助线当前纵坐标从上到下配对 (不是存储下标).
     /// 一块一个谱行组时优先用大括号尖尖, 否则用该组重心; 一块多个谱行
     /// 组时用整块几何中心; 文字用上下边界中线.
@@ -334,41 +341,24 @@ impl MaskToolApp {
     /// 能保持页宽则保持; 否则按页高缩尺 (显示变窄) 也要把锚点落到线上.
     pub fn guide_align_current(&mut self, cx: &mut Context<Self>) {
         self.close_guide_menus();
-        if !self.guides_on() || self.block_heights.is_empty() {
+        let Some((input, _)) = self.current_align_input() else {
             self.status = "没有辅助线或没有分块, 无法对齐.".into();
             cx.notify();
             return;
-        }
-        let assignments = self.current_align_assignments();
-        if assignments.is_empty() {
+        };
+        let aligned_n = crate::staff::assignments_for_guides(&input.anchors, &input.guide_lines).len();
+        let Some((new_layout, voff_shift_delta)) = crate::staff::align_group(&input) else {
             self.status = "没有可对齐到辅助线的块.".into();
             cx.notify();
             return;
-        }
-        self.apply_align_assignments(assignments, cx);
-    }
-
-    fn apply_align_assignments(
-        &mut self,
-        assignments: Vec<crate::layout::AlignAssignment>,
-        cx: &mut Context<Self>,
-    ) {
+        };
         self.push_undo();
         let old_layout = self.block_layout.clone();
-        let voff_i32 = self.block_voff.max(0).min(i32::MAX as i64) as i32;
-        let aligned_n = assignments.len();
-        let page_h = if self.block_shows_bg { self.img_h as i32 } else { 0 };
-        let (new_layout, voff_shift_delta) = crate::layout::align_blocks_to_targets(
-            &self.block_heights,
-            &self.block_layout,
-            voff_i32,
-            &assignments,
-            page_h,
-        );
         self.block_layout = new_layout;
         self.voff_target += voff_shift_delta as i64;
         self.sync_masks_to_block_shift(&old_layout);
         self.refresh_preview_geom();
+        self.hold_block_tile_preview();
         self.status = format!("已将 {aligned_n} 个块对齐到辅助线.").into();
         cx.notify();
     }
@@ -388,8 +378,8 @@ impl MaskToolApp {
             apply_bg::process::natural_voff(
                 sw,
                 sh,
-                bg.width,
-                bg.height,
+                bg.src_width,
+                bg.src_height,
                 bg.aspect_w,
                 bg.aspect_h,
             )
@@ -408,6 +398,7 @@ impl MaskToolApp {
         self.voff_target = natural;
         self.sync_masks_to_block_shift(&old_layout);
         self.refresh_preview_geom();
+        self.hold_block_tile_preview();
         self.status = "已还原本页分块到初始位置.".into();
         cx.notify();
     }

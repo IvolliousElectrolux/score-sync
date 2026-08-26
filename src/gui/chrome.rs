@@ -30,10 +30,219 @@ impl ScoreSyncApp {
         self.pdf_import.is_some()
             || self.page_organize.is_some()
             || self.dialog.is_some()
+            || self.bg.pick_open
+            || self.bg.batch_open
             || self.apply_bg.read(cx).is_error_open()
             || self.score_video.read(cx).is_error_open()
             || self.score_video.read(cx).is_export_open()
     }
+
+    pub(super) fn header_file_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ms = apply_bg::primary_shift();
+        div()
+            .id("header_file_bar")
+            .flex_shrink_0()
+            .mr_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(self.header_icon_btn(
+                "hdr-new",
+                HeaderGlyph::NewDoc,
+                format!("新建工程 ({ms}N)").into(),
+                |this, window, cx| this.request_new_project(window, cx),
+                cx,
+            ))
+            .child(self.header_icon_btn(
+                "hdr-open",
+                HeaderGlyph::OpenFolder,
+                format!("打开工程 ({ms}O)").into(),
+                |this, window, cx| this.open_project(window, cx),
+                cx,
+            ))
+            .child(self.header_icon_btn(
+                "hdr-save",
+                HeaderGlyph::SaveDisk,
+                apply_bg::with_mod("保存工程", "S").into(),
+                |this, window, cx| this.save_project(window, cx),
+                cx,
+            ))
+            .child(self.header_icon_btn(
+                "hdr-saveas",
+                HeaderGlyph::SaveAsDisk,
+                format!("另存工程 ({ms}S)").into(),
+                |this, window, cx| this.save_project_as(window, cx),
+                cx,
+            ))
+            .child(self.header_help_btn(cx))
+    }
+
+    fn header_icon_btn(
+        &self,
+        id: &'static str,
+        glyph: HeaderGlyph,
+        tip: SharedString,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity();
+        let tip_hover = tip.clone();
+        div()
+            .id(id)
+            .relative()
+            .flex_shrink_0()
+            .w(px(22.))
+            .h(px(22.))
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(0x64748b))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(0xe2e8f0)).border_color(rgb(0x334155)))
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        entity.update(cx, |this, _| {
+                            this.header_btn_bounds.insert(id.to_string(), bounds);
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
+            .child(
+                canvas(|_, _, _| {}, {
+                    move |bounds, _, window, _| {
+                        paint_header_glyph(window, bounds, glyph, rgb(0x334155));
+                    }
+                })
+                .w(px(13.))
+                .h(px(13.)),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.note_header_hover(id, tip_hover.clone(), cx);
+                } else if this.header_hover_id == Some(id) {
+                    this.clear_tab_hover(cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.clear_tab_hover(cx);
+                    on_click(this, window, cx);
+                }),
+            )
+    }
+
+    fn header_help_btn(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        let tip: SharedString = "操作说明 (H / F1)".into();
+        let tip_hover = tip.clone();
+        div()
+            .id("hdr-help")
+            .relative()
+            .flex_shrink_0()
+            .ml_1()
+            .w(px(22.))
+            .h(px(22.))
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(0x64748b))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(rgb(0x334155))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(0xe2e8f0)).border_color(rgb(0x334155)))
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        entity.update(cx, |this, _| {
+                            this.header_btn_bounds
+                                .insert("hdr-help".to_string(), bounds);
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
+            .child("?")
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.note_header_hover("hdr-help", tip_hover.clone(), cx);
+                } else if this.header_hover_id == Some("hdr-help") {
+                    this.clear_tab_hover(cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.clear_tab_hover(cx);
+                    this.show_help(cx);
+                }),
+            )
+    }
+
+    fn note_header_hover(
+        &mut self,
+        id: &'static str,
+        text: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        if self.header_hover_id == Some(id) {
+            return;
+        }
+        self.tab_hover_idx = None;
+        self.header_hover_id = Some(id);
+        self.tab_tooltip = None;
+        self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
+        let gen = self.tab_hover_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1000))
+                .await;
+            this.update(cx, |view, cx| {
+                if view.tab_hover_gen != gen || view.header_hover_id != Some(id) {
+                    return;
+                }
+                let (ax, ay, aw, ah) = view
+                    .header_btn_bounds
+                    .get(id)
+                    .map(|b| {
+                        (
+                            f32::from(b.origin.x),
+                            f32::from(b.origin.y),
+                            f32::from(b.size.width),
+                            f32::from(b.size.height),
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                view.tab_tooltip = Some(TabTooltip {
+                    id: id.into(),
+                    anchor_x: ax,
+                    anchor_y: ay,
+                    anchor_w: aw,
+                    anchor_h: ah,
+                    text,
+                    measured_w: 0.0,
+                    measured_h: 0.0,
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(super) fn btn(
         &self,
         id: impl Into<SharedString>,
@@ -45,8 +254,12 @@ impl ScoreSyncApp {
         let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
         let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
         let hover = if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) };
+        let id: SharedString = id.into();
+        let id_down = id.clone();
+        let id_up = id.clone();
+        let id_out = id.clone();
         div()
-            .id(id.into())
+            .id(id)
             .px_2()
             .py_1()
             .rounded_md()
@@ -58,9 +271,30 @@ impl ScoreSyncApp {
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .child(label.into())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.btn_press = Some(id_down.clone());
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+                cx.listener(move |this, _, window, cx| {
+                    let press = this.btn_press.take();
+                    if press.as_ref() != Some(&id_up) {
+                        return;
+                    }
+                    on_click(this, window, cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, _| {
+                    if this.btn_press.as_ref() == Some(&id_out) {
+                        this.btn_press = None;
+                    }
+                }),
             )
     }
 
@@ -210,8 +444,8 @@ impl ScoreSyncApp {
             .border_b_1()
             .border_color(rgb(0xcbd5e1))
             .child(self.tool_tab("tool_crop", "分块", crop_on, SideTool::Crop, cx))
+            .child(self.tool_tab("tool_proj", "底色", proj_on, SideTool::Project, cx))
             .child(self.tool_tab("tool_mask", "蒙版", mask_on, SideTool::Mask, cx))
-            .child(self.tool_tab("tool_proj", "工程", proj_on, SideTool::Project, cx))
             .child(self.tool_tab("tool_video", "视频", video_on, SideTool::Video, cx))
     }
 
@@ -276,13 +510,46 @@ impl ScoreSyncApp {
                 .child(canvas)
                 .into_any_element();
         }
+        if self.side_tool == SideTool::Project {
+            // 底色: 左侧用蒙版同款预览 (只读), 设置在右侧面板.
+            let canvas = self
+                .mask_tool
+                .update(cx, |m, cx| m.image_view(cx))
+                .into_any_element();
+            return div()
+                .id("left_workspace")
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(rgb(0xcbd5e1))
+                        .bg(rgb(0xf8fafc))
+                        .child(self.tab_bar(cx)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .min_w(px(0.))
+                        .child(canvas),
+                )
+                .into_any_element();
+        }
         let canvas = match self.side_tool {
-            SideTool::Crop | SideTool::Project => self.image_view(cx).into_any_element(),
+            SideTool::Crop => self.image_view(cx).into_any_element(),
             SideTool::Mask => self
                 .mask_tool
                 .update(cx, |m, cx| m.image_view(cx))
                 .into_any_element(),
-            SideTool::Video => unreachable!(),
+            SideTool::Project | SideTool::Video => unreachable!(),
         };
         div()
             .id("left_workspace")
@@ -462,7 +729,7 @@ impl ScoreSyncApp {
                     .child(mask_body)
                     .into_any_element()
             }
-            SideTool::Project => self.project_panel(cx).into_any_element(),
+            SideTool::Project => self.bg_side_panel(cx).into_any_element(),
             SideTool::Video => self
                 .score_video
                 .update(cx, |v, cx| v.right_panel(cx))
@@ -489,251 +756,6 @@ impl ScoreSyncApp {
                     .overflow_hidden()
                     .child(body),
             )
-    }
-
-    pub(super) fn project_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let proj_name = self
-            .project_path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            .unwrap_or("(未保存)")
-            .to_string();
-        let bg_status: SharedString = if self.doc.bg_enabled {
-            let src = self
-                .doc
-                .bg_source_path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                .unwrap_or("bg");
-            format!(
-                "底色层: 已启用 {} ({}:{}) — 导出时底层合成, 未改写页图",
-                src, self.doc.bg_aspect_w, self.doc.bg_aspect_h
-            )
-            .into()
-        } else {
-            "底色层: 未启用".into()
-        };
-        let apply_panel = self.apply_bg.update(cx, |m, cx| m.panel(cx).into_any_element());
-        div()
-            .id("project_panel")
-            .w_full()
-            .h_full()
-            .flex()
-            .flex_col()
-            .min_h(px(0.))
-            .bg(rgb(0xf1f5f9))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .border_b_1()
-                    .border_color(rgb(0xcbd5e1))
-                    .bg(rgb(0xffffff))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("工程文件"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x64748b))
-                            .child(format!("当前: {proj_name}")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(self.btn(
-                                "proj_new",
-                                "新建工程",
-                                false,
-                                |this, window, cx| this.request_new_project(window, cx),
-                                cx,
-                            ))
-                            .child(self.btn(
-                                "proj_open",
-                                "打开工程",
-                                false,
-                                |this, window, cx| this.open_project(window, cx),
-                                cx,
-                            ))
-                            .child(self.btn(
-                                "proj_save",
-                                apply_bg::with_mod("保存", "S"),
-                                true,
-                                |this, window, cx| this.save_project(window, cx),
-                                cx,
-                            ))
-                            .child(self.btn(
-                                "proj_save_as",
-                                "另存为",
-                                false,
-                                |this, window, cx| this.save_project_as(window, cx),
-                                cx,
-                            ))
-                            .child(self.btn(
-                                "proj_clear_video_cache",
-                                "清除视频缓存",
-                                false,
-                                |this, _, cx| this.clear_video_pool_cache(cx),
-                                cx,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .mt_2()
-                            .child("工程底色层"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x64748b))
-                            .child(bg_status),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(self.btn(
-                                "proj_bg_apply",
-                                "应用到工程组合",
-                                true,
-                                |this, _, cx| this.apply_project_bg(cx),
-                                cx,
-                            ))
-                            .child(self.btn(
-                                "proj_bg_clear",
-                                "取消工程底色",
-                                false,
-                                |this, _, cx| this.clear_project_bg(cx),
-                                cx,
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .id("project_apply_scroll")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_scroll()
-                    .child(apply_panel),
-            )
-    }
-
-    pub(super) fn clear_video_pool_cache(&mut self, cx: &mut Context<Self>) {
-        let dir = self.pool_cache_dir();
-        let _ = std::fs::remove_dir_all(&dir);
-        self.mark_video_pool_dirty_all();
-        self.score_video
-            .update(cx, |v, cx| v.set_pool(Vec::new(), cx));
-        self.status = format!("已清除视频缓存: {}", dir.display()).into();
-        self.hint = self.status.clone();
-        if self.side_tool == SideTool::Video {
-            self.sync_video_pool(cx);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn apply_project_bg(&mut self, cx: &mut Context<Self>) {
-        crate::trace::log("apply_bg: 点击应用到工程组合");
-        if self.doc.groups.is_empty() {
-            self.show_error(
-                "提示",
-                crate::error::Error::msg("当前没有输出组合. 请先分块/合并后再应用底色层."),
-                cx,
-            );
-            return;
-        }
-        let params = self.apply_bg.read(cx).snapshot_params(cx);
-        let (path, aw, ah) = match params {
-            Ok(v) => v,
-            Err(e) => {
-                self.show_error("无法应用底色", e, cx);
-                return;
-            }
-        };
-        crate::trace::log(&format!(
-            "apply_bg: 打开底色 {} 比例 {aw}:{ah}",
-            path.display()
-        ));
-        match image::open(&path) {
-            Ok(im) => {
-                let rgb = im.to_rgb8();
-                crate::trace::log(&format!(
-                    "apply_bg: 底色已解码 {}x{}",
-                    rgb.width(),
-                    rgb.height()
-                ));
-                match self
-                    .doc
-                    .set_project_bg(rgb, Some(path.clone()), aw, ah)
-                {
-                    Ok(()) => {
-                        // 试合成第一组, 尽早发现底色太小等问题
-                        if let Some(gid) = self.doc.groups.first().map(|g| g.id.clone()) {
-                            let _ = self.doc.ensure_group_pages(&gid);
-                            if let Err(e) = self.doc.render_group_final(&gid) {
-                                self.doc.clear_project_bg();
-                                self.doc.retain_window(
-                                    self.doc.current_page_index,
-                                    crate::page_cache::WINDOW_RADIUS,
-                                );
-                                self.show_error(
-                                    "底色不适用",
-                                    crate::error::Error::msg(format!(
-                                        "{e}\n已取消启用. 请换更大底色 (总谱按高度定画布时左右也要盖住) 或检查谱面尺寸."
-                                    )),
-                                    cx,
-                                );
-                                return;
-                            }
-                            self.doc.retain_window(
-                                self.doc.current_page_index,
-                                crate::page_cache::WINDOW_RADIUS,
-                            );
-                        }
-                        self.mark_dirty();
-                        self.mark_video_pool_dirty_all();
-                        self.status = format!(
-                            "已为 {} 个组合启用底色层 {} ({}:{})",
-                            self.doc.groups.len(),
-                            path.file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("bg"),
-                            aw,
-                            ah
-                        )
-                        .into();
-                        self.hint = self.status.clone();
-                        crate::trace::log("apply_bg: 即将刷新蒙版预览");
-                        self.force_refresh_mask_preview(cx);
-                        crate::trace::log("apply_bg: 即将同步视频池");
-                        self.sync_video_pool(cx);
-                        crate::trace::log("apply_bg: 应用到工程完成");
-                        cx.notify();
-                    }
-                    Err(e) => {
-                        self.show_error("无法应用底色", crate::error::Error::msg(e), cx);
-                    }
-                }
-            }
-            Err(e) => {
-                self.show_error("无法打开底色", crate::error::Error::image_open(&path, e), cx);
-            }
-        }
     }
 
     pub(super) fn clear_project_bg(&mut self, cx: &mut Context<Self>) {
@@ -773,6 +795,12 @@ impl ScoreSyncApp {
         }
         if matches!(self.dialog, Some(DialogKind::UnsavedNew)) {
             return self.unsaved_new_dialog(cx).into_any_element();
+        }
+        if self.bg.pick_open {
+            return self.bg_pick_overlay(cx).into_any_element();
+        }
+        if self.bg.batch_open {
+            return self.apply_bg_batch_overlay(cx).into_any_element();
         }
         if self.pdf_import.is_some() {
             return self.pdf_import_overlay(cx).into_any_element();
@@ -1250,5 +1278,99 @@ impl ScoreSyncApp {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HeaderGlyph {
+    NewDoc,
+    OpenFolder,
+    SaveDisk,
+    SaveAsDisk,
+}
+
+fn paint_header_glyph(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    glyph: HeaderGlyph,
+    color: gpui::Rgba,
+) {
+    let ox = f32::from(bounds.origin.x);
+    let oy = f32::from(bounds.origin.y);
+    let s = f32::from(bounds.size.width)
+        .min(f32::from(bounds.size.height))
+        .max(1.0);
+    let p = |x: f32, y: f32| point(px(ox + x / 16.0 * s), px(oy + y / 16.0 * s));
+    // 与问号圆框 border_1 同级细线, 不再用加粗描边.
+    let thick = px(1.);
+    let mut stroke = |pts: &[(f32, f32)], close: bool| {
+        if pts.is_empty() {
+            return;
+        }
+        let mut b = PathBuilder::stroke(thick);
+        b.move_to(p(pts[0].0, pts[0].1));
+        for &(x, y) in &pts[1..] {
+            b.line_to(p(x, y));
+        }
+        if close {
+            b.close();
+        }
+        if let Ok(path) = b.build() {
+            window.paint_path(path, color);
+        }
+    };
+    match glyph {
+        HeaderGlyph::NewDoc => {
+            // 折角纸, 开口轮廓, 两行字
+            stroke(
+                &[
+                    (10.0, 2.4),
+                    (4.6, 2.4),
+                    (4.6, 13.6),
+                    (11.6, 13.6),
+                    (11.6, 4.2),
+                    (10.0, 2.4),
+                ],
+                false,
+            );
+            stroke(&[(10.0, 2.4), (10.0, 4.2), (11.6, 4.2)], false);
+            stroke(&[(6.4, 7.4), (10.0, 7.4)], false);
+            stroke(&[(6.4, 10.2), (9.2, 10.2)], false);
+        }
+        HeaderGlyph::OpenFolder => {
+            stroke(&[(3.4, 5.6), (3.4, 3.8), (7.2, 3.8), (8.1, 5.6)], false);
+            stroke(
+                &[
+                    (3.4, 5.6),
+                    (3.4, 12.8),
+                    (12.6, 12.8),
+                    (12.6, 5.6),
+                    (3.4, 5.6),
+                ],
+                false,
+            );
+        }
+        HeaderGlyph::SaveDisk => paint_floppy(&mut stroke, false),
+        HeaderGlyph::SaveAsDisk => paint_floppy(&mut stroke, true),
+    }
+}
+
+fn paint_floppy(stroke: &mut impl FnMut(&[(f32, f32)], bool), save_as: bool) {
+    stroke(
+        &[
+            (4.4, 2.8),
+            (11.6, 2.8),
+            (11.6, 13.2),
+            (4.4, 13.2),
+            (4.4, 2.8),
+        ],
+        false,
+    );
+    stroke(&[(6.6, 2.8), (6.6, 5.4), (9.4, 5.4), (9.4, 2.8)], false);
+    stroke(&[(6.0, 8.2), (10.0, 8.2)], false);
+    stroke(&[(6.0, 10.4), (9.2, 10.4)], false);
+    if save_as {
+        stroke(&[(10.2, 6.8), (13.2, 3.8)], false);
+        stroke(&[(11.4, 3.8), (13.2, 3.8), (13.2, 5.6)], false);
     }
 }

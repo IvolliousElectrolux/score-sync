@@ -190,11 +190,20 @@ impl MaskToolApp {
         ((self.brush_size * 0.5).round() as i32).max(1)
     }
 
+    pub(super) fn brush_size_max(&self) -> f32 {
+        brush_size_max_for_image(self.img_w)
+    }
+
+    pub(super) fn clamp_brush_size(&mut self) {
+        let max = self.brush_size_max();
+        self.brush_size = self.brush_size.clamp(BRUSH_SIZE_MIN, max);
+    }
+
     pub(super) fn set_brush_size_from_x(&mut self, x: f32, cx: &mut Context<Self>) {
         let left = f32::from(self.brush_size_track.origin.x);
         let width = f32::from(self.brush_size_track.size.width).max(1.0);
         let t = ((x - left) / width).clamp(0.0, 1.0);
-        self.brush_size = BRUSH_SIZE_MIN + t * (BRUSH_SIZE_MAX - BRUSH_SIZE_MIN);
+        self.brush_size = brush_size_from_t(t, BRUSH_SIZE_MIN, self.brush_size_max());
         cx.notify();
     }
 
@@ -377,12 +386,19 @@ impl MaskToolApp {
         let mut now = self.snapshot();
         now.host_guide_token = token;
         self.redo_stack.push(now);
+        let layout_changed =
+            prev.block_layout != self.block_layout || prev.voff_target != self.voff_target;
         self.masks = prev.masks;
         self.block_layout = prev.block_layout;
         self.voff_target = prev.voff_target;
         self.guides = prev.guides;
         self.guide_selected.clear();
         self.selected.clear();
+        if layout_changed {
+            self.restore_preview_geom_from_layout();
+            self.brush_cursor = None;
+            self.poly_cursor = None;
+        }
         self.status = format!("已撤回. 蒙版 {} 个", self.masks.len()).into();
         if let Some(t) = token {
             self.guide_host_cmd = Some(GuideHostCmd::UndoGlobal(t));
@@ -404,12 +420,19 @@ impl MaskToolApp {
         if self.undo_stack.len() > HISTORY_LIMIT {
             self.undo_stack.remove(0);
         }
+        let layout_changed =
+            next.block_layout != self.block_layout || next.voff_target != self.voff_target;
         self.masks = next.masks;
         self.block_layout = next.block_layout;
         self.voff_target = next.voff_target;
         self.guides = next.guides;
         self.guide_selected.clear();
         self.selected.clear();
+        if layout_changed {
+            self.restore_preview_geom_from_layout();
+            self.brush_cursor = None;
+            self.poly_cursor = None;
+        }
         self.status = format!("已重做. 蒙版 {} 个", self.masks.len()).into();
         if let Some(t) = token {
             self.guide_host_cmd = Some(GuideHostCmd::RedoGlobal(t));

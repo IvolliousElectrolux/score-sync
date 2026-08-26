@@ -58,7 +58,7 @@ impl ScoreVideoApp {
             // 点击 (非拖动) 时向下展开该素材的图片预览; 手动加入时间轴请改为
             // 拖拽到左侧视频轨道上的具体位置.
             if expanded {
-                let img = self.image_for(&gid);
+                let img = self.image_for(&gid, cx);
                 entry = entry.child(
                     div()
                         .id(SharedString::from(format!("sv-pool-preview-{gid}")))

@@ -55,6 +55,8 @@ pub struct ApplyBgApp {
     running: bool,
     hint: SharedString,
     error_dialog: Option<(SharedString, SharedString)>,
+    /// 按下的按钮 id; 松开须仍在同一按钮才算点击.
+    btn_press: Option<&'static str>,
 }
 
 impl ApplyBgApp {
@@ -92,6 +94,7 @@ impl ApplyBgApp {
             )
             .into(),
             error_dialog: None,
+            btn_press: None,
         }
     }
 
@@ -279,11 +282,22 @@ impl ApplyBgApp {
             .child(
                 div()
                     .w(px(48.))
+                    .flex_shrink_0()
                     .text_color(rgb(0x334155))
                     .child(label),
             )
-            .child(div().flex_1().min_w_0().child(input))
-            .child(self.btn(btn_id, "…", move |this, window, cx| browse(this, window, cx), cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(input),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .child(self.btn(btn_id, "…", move |this, window, cx| browse(this, window, cx), cx)),
+            )
     }
 
     fn aspect_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -349,9 +363,30 @@ impl ApplyBgApp {
             .hover(|s| s.bg(rgb(0xcbd5e1)))
             .active(|s| s.bg(rgb(0x94a3b8)))
             .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.btn_press = Some(id);
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+                cx.listener(move |this, _, window, cx| {
+                    let press = this.btn_press.take();
+                    if press != Some(id) {
+                        return;
+                    }
+                    on_click(this, window, cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, _| {
+                    if this.btn_press == Some(id) {
+                        this.btn_press = None;
+                    }
+                }),
             )
     }
 
@@ -375,9 +410,30 @@ impl ApplyBgApp {
             .when(enabled, |d| {
                 d.cursor_pointer()
                     .hover(move |s| s.bg(hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.btn_press = Some("run");
+                            cx.stop_propagation();
+                        }),
+                    )
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+                        cx.listener(move |this, _, window, cx| {
+                            let press = this.btn_press.take();
+                            if press != Some("run") {
+                                return;
+                            }
+                            on_click(this, window, cx);
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| {
+                            if this.btn_press == Some("run") {
+                                this.btn_press = None;
+                            }
+                        }),
                     )
             })
             .child(label)

@@ -12,6 +12,7 @@
 //! - `history` 分块撤重
 //! - `host` 窗口外拖拽与分隔条
 
+mod bg;
 mod canvas;
 mod chrome;
 mod crop;
@@ -29,8 +30,6 @@ mod types;
 pub(crate) use types::*;
 
 use gpui::actions;
-use image::{Frame, ImageBuffer, RgbaImage};
-use smallvec::smallvec;
 
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::PathBuf;
@@ -73,8 +72,8 @@ pub(crate) use gpui::prelude::*;
 pub(crate) use gpui::{
     canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
     DispatchPhase, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
+    Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 pub(crate) use crate::config;
@@ -95,6 +94,8 @@ pub(crate) struct ScoreSyncApp {
     focus_handle: FocusHandle,
     doc: DocState,
     render_image: Option<Arc<RenderImage>>,
+    /// 待从 GPUI 图集卸掉的旧贴图 (下一帧 `render` 里 `drop_image`).
+    gpu_drop: Vec<Arc<RenderImage>>,
     img_w: u32,
     img_h: u32,
     zoom: f32,
@@ -106,13 +107,14 @@ pub(crate) struct ScoreSyncApp {
     hint: SharedString,
     region_panel_open: bool,
     side_width: f32,
-    /// 右侧工具: 分块 | 蒙版 | 工程
+    /// 右侧工具: 分块 | 底色 | 蒙版 | 视频
     side_tool: SideTool,
     /// 画布工具: 普通 / 添加新块 / 分割块
     canvas_tool: CanvasTool,
     mask_tool: Entity<MaskToolApp>,
     apply_bg: Entity<ApplyBgApp>,
     score_video: Entity<ScoreVideoApp>,
+    bg: bg::BgUi,
     /// 当前蒙版编辑目标: group_id (拼合图)
     mask_target: Option<String>,
     /// 当前蒙版预览图相对拼合图的横向/纵向偏移 (叠加工程底色补边时非零)
@@ -124,6 +126,11 @@ pub(crate) struct ScoreSyncApp {
     /// 当前蒙版编辑目标各分块的原始裁切片段缓存 (与 `group_member_pieces`
     /// 同序), 供拖动分块时每帧重拼预览图复用, 避免每帧重新从页图裁切.
     block_pieces_cache: Vec<(String, image::RgbImage)>,
+    /// 底色 GPU 贴图缓存 (`bg_gen` + 谱面宽 + 纵横比 → 已按目标页裁切的
+    /// `BlockBgTile`). 完整底色只留 `DocState::bg_image` 一份备份; 贴图
+    /// 用 [`apply_bg::process::crop_bg_to_page`] 裁出的恰好大小画布.
+    /// `bg_gen` 变了 (换了底色图) 或目标页尺寸变了才需要重算.
+    bg_tile_cache: Option<(u64, u32, mask_tool::gui::BlockBgTile)>,
     /// 上一次从蒙版工具读到并同步过的分块布局 (拖动分块时逐帧比较用).
     last_synced_block_layout: Vec<mask_tool::layout::BlockAdjust>,
     /// 上一次从蒙版工具读到并同步过的组合"目标纵向位置"
@@ -140,8 +147,15 @@ pub(crate) struct ScoreSyncApp {
     tab_menu: Option<TabContextMenu>,
     /// 页签悬停 1s 后的完整文件名提示
     tab_hover_idx: Option<usize>,
+    /// 标题栏图标悬停 (与页签共用 `tab_tooltip` / `tab_hover_gen`)
+    header_hover_id: Option<&'static str>,
     tab_hover_gen: u64,
     tab_tooltip: Option<TabTooltip>,
+    /// 标题栏图标屏幕 bounds, 供悬浮提示定位
+    header_btn_bounds: HashMap<String, Bounds<Pixels>>,
+    /// 最近一帧窗口客户区, 悬浮提示夹紧用
+    viewport_w: f32,
+    viewport_h: f32,
     /// 原子块 y0-y1 行内编辑
     edit_y_input: Entity<TextInput>,
     /// 正在编辑 y 的 region id
@@ -194,6 +208,8 @@ pub(crate) struct ScoreSyncApp {
     crop_histories: HashMap<String, CropHistory>,
     /// 删页/复制页等文档结构撤重 (与单页 regions 栈分开).
     page_struct_history: CropHistory,
+    /// 底色应用/取消/切换/改比例撤重.
+    bg_history: BgHistory,
     /// 蒙版「全局开启 / 全局对齐」等跨组合操作, 与当前页 `host_guide_token` 配对.
     guide_undo: Vec<GuideHistEntry>,
     guide_redo: Vec<GuideHistEntry>,
@@ -205,6 +221,15 @@ pub(crate) struct ScoreSyncApp {
     dirty: bool,
     /// 切页异步加载代数, 防止连切时旧结果覆盖
     page_load_gen: u64,
+    /// 当前页 GPU 贴图 (缩放 + BGRA 转换) 后台生成代数; 高清页这一步单独
+    /// 就要上百毫秒, 见 `refresh_render`/`mask_tool::gui::rgb_to_render_image`
+    /// 文档, 绝不能堵在界面线程上, 否则切页/撤重等"任何操作"都会卡顿.
+    render_gen: u64,
+    /// 蒙版预览后台生成代数, 见 `sync_mask_image` 文档
+    mask_sync_gen: u64,
+    /// 拖动分块松手后的最终预览图后台生成代数, 见
+    /// `sync_block_layout_from_mask_tool` 文档
+    block_preview_gen: u64,
     /// 全量灌入识别 sidecar 的代数, 防止重叠 hydrate 互相覆盖
     hydrate_gen: u64,
     /// PDF 导入代数: 新建/打开工程时自增, 后台渲染与 UI 登记都丢弃旧代
@@ -223,6 +248,8 @@ pub(crate) struct ScoreSyncApp {
     tab_add_press: bool,
     /// 按下发生在哪个页签的「×」上; 仅在同一叉上松开才关页 (拖到其他页签叉上松开不关).
     tab_close_press: Option<usize>,
+    /// 普通按钮按下 id; 松开时必须仍是同一按钮才算点击.
+    btn_press: Option<SharedString>,
     /// 启动检查到的更新; 等当前对话框关掉后再弹出.
     pending_update: Option<crate::update::UpdateInfo>,
     /// 页图未就绪, 等加载后再识别.
@@ -253,6 +280,21 @@ impl ScoreSyncApp {
             m
         });
         cx.observe(&mask_tool, |this, mt, cx| {
+            if this.side_tool == SideTool::Project {
+                let wheel = mt.update(cx, |m, _| m.take_preview_wheel());
+                if wheel != 0 {
+                    this.cycle_bg_preview_group(wheel, cx);
+                }
+                if let Some(rgb) = mt.update(cx, |m, _| m.take_host_pick_click()) {
+                    this.apply_bg_eyedropper(rgb, cx);
+                } else if this.bg.eyedropper_armed {
+                    if let Some(hover) = mt.read(cx).host_pick_hover() {
+                        this.preview_bg_eyedropper(hover, cx);
+                    }
+                }
+                cx.notify();
+                return;
+            }
             let dragging = mt.read(cx).is_block_dragging();
             this.sync_block_layout_from_mask_tool(&mt, cx);
             this.handle_guide_host_cmd(cx);
@@ -284,6 +326,7 @@ impl ScoreSyncApp {
                 d
             },
             render_image: None,
+            gpu_drop: Vec::new(),
             img_w: 0,
             img_h: 0,
             zoom: 1.0,
@@ -304,19 +347,25 @@ impl ScoreSyncApp {
             mask_tool,
             apply_bg,
             score_video,
+            bg: bg::BgUi::new(cx),
             mask_target: None,
             mask_preview_hoff: 0,
             mask_preview_voff: 0,
             block_stats_cache: std::collections::HashMap::new(),
             block_pieces_cache: Vec::new(),
+            bg_tile_cache: None,
             last_synced_block_layout: Vec::new(),
             last_synced_voff_target: 0,
             block_drag_was_active: false,
             dialog: None,
             tab_menu: None,
             tab_hover_idx: None,
+            header_hover_id: None,
             tab_hover_gen: 0,
             tab_tooltip: None,
+            header_btn_bounds: HashMap::new(),
+            viewport_w: 0.0,
+            viewport_h: 0.0,
             edit_y_input,
             region_y_edit: None,
             param_input,
@@ -347,6 +396,7 @@ impl ScoreSyncApp {
             video_sync_gen: 0,
             crop_histories: HashMap::new(),
             page_struct_history: CropHistory::default(),
+            bg_history: BgHistory::default(),
             guide_undo: Vec::new(),
             guide_redo: Vec::new(),
             next_guide_token: 1,
@@ -354,6 +404,9 @@ impl ScoreSyncApp {
             align_all_running: false,
             dirty: false,
             page_load_gen: 0,
+            render_gen: 0,
+            mask_sync_gen: 0,
+            block_preview_gen: 0,
             hydrate_gen: 0,
             pdf_load_gen: Arc::new(AtomicU64::new(0)),
             pdf_importing: false,
@@ -363,10 +416,12 @@ impl ScoreSyncApp {
             save_spin_phase: 0.0,
             tab_add_press: false,
             tab_close_press: None,
+            btn_press: None,
             pending_update: None,
             pending_redetect: false,
             group_by_page_cache: std::cell::RefCell::new(None),
         };
+        app.observe_bg_rgb_inputs(cx);
         if !initial.is_empty() {
             let projects: Vec<PathBuf> = initial
                 .iter()
@@ -397,6 +452,11 @@ impl ScoreSyncApp {
         app.start_update_check(cx);
         app
     }
+
+    /// 分块面板专属快捷键 (识别/开图/加块等). 蒙版、底色、视频和组织页面 overlay 都不走这套.
+    fn crop_keys_live(&self) -> bool {
+        self.side_tool == SideTool::Crop && self.page_organize.is_none()
+    }
 }
 
 impl Focusable for ScoreSyncApp {
@@ -407,6 +467,9 @@ impl Focusable for ScoreSyncApp {
 
 impl Render for ScoreSyncApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.flush_gpu_drops(window, cx);
+        self.viewport_w = f32::from(window.viewport_size().width);
+        self.viewport_h = f32::from(window.viewport_size().height);
         let title_core: SharedString = if let Some(page) = self.doc.current_page() {
             format!(
                 "曲谱同步 — [{}/{}] {}",
@@ -442,6 +505,8 @@ impl Render for ScoreSyncApp {
             "MaskTool"
         } else if video_mode {
             "ScoreVideo"
+        } else if self.side_tool == SideTool::Project {
+            "ScoreProject"
         } else {
             "ScoreSync"
         };
@@ -486,6 +551,14 @@ impl Render for ScoreSyncApp {
                         }
                     });
                 }
+                if this.drag.is_none() && this.side_tool == SideTool::Project {
+                    this.mask_tool.update(cx, |m, cx| {
+                        if m.needs_root_move_forward() {
+                            m.root_mouse_move(x, y, cx);
+                        }
+                    });
+                    this.apply_bg_palette_drag(x, y, cx);
+                }
                 this.apply_host_drag_at(x, y, cx);
             }))
             .on_mouse_up(
@@ -510,6 +583,12 @@ impl Render for ScoreSyncApp {
                         this.mask_tool
                             .update(cx, |m, cx| m.root_mouse_up(x, y, cx));
                     }
+                    if this.side_tool == SideTool::Project {
+                        let x = f32::from(ev.position.x);
+                        let y = f32::from(ev.position.y);
+                        this.mask_tool
+                            .update(cx, |m, cx| m.root_mouse_up(x, y, cx));
+                    }
                     this.finish_host_drag_at(f32::from(ev.position.x), f32::from(ev.position.y), cx);
                 }),
             )
@@ -523,7 +602,12 @@ impl Render for ScoreSyncApp {
                     );
                 }),
             )
-            .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.open_file(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
                 this.open_project(window, cx)
             }))
@@ -536,34 +620,87 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &SaveProjectAs, window, cx| {
                 this.save_project_as(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &DetectPage, _, cx| this.run_detect(cx)))
-            .on_action(cx.listener(|this, _: &DetectAll, _, cx| this.run_detect_all(cx)))
-            .on_action(cx.listener(|this, _: &ToggleAddBlock, _, cx| this.toggle_add_block(cx)))
+            .on_action(cx.listener(|this, _: &DetectPage, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.run_detect(cx)
+            }))
+            .on_action(cx.listener(|this, _: &DetectAll, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.run_detect_all(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleAddBlock, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.toggle_add_block(cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleSplitBlock, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
                 this.toggle_split_block(cx)
             }))
-            .on_action(cx.listener(|this, _: &MergeSelected, _, cx| this.merge_selected(cx)))
-            .on_action(cx.listener(|this, _: &PairUngrouped, _, cx| this.pair_ungrouped(cx)))
+            .on_action(cx.listener(|this, _: &MergeSelected, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.merge_selected(cx)
+            }))
+            .on_action(cx.listener(|this, _: &PairUngrouped, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.pair_ungrouped(cx)
+            }))
             .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
                 if this.page_organize.is_some() {
                     this.delete_organize_selected(cx);
                     return;
                 }
+                if !this.crop_keys_live() {
+                    return;
+                }
                 this.delete_selected(cx)
             }))
             .on_action(cx.listener(|this, _: &ExportGroups, window, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
                 this.export_groups_ui(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ResetGroups, _, cx| this.reset_groups(cx)))
-            .on_action(cx.listener(|this, _: &FitView, _, cx| this.fit_to_view(cx)))
+            .on_action(cx.listener(|this, _: &ResetGroups, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.reset_groups(cx)
+            }))
+            .on_action(cx.listener(|this, _: &FitView, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
+                this.fit_to_view(cx)
+            }))
             .on_action(cx.listener(|this, _: &OrganizePages, window, cx| {
+                if this.page_organize.is_none() && this.side_tool != SideTool::Crop {
+                    return;
+                }
                 this.toggle_page_organize(window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
             .on_action(cx.listener(|this, _: &ShareIntoGroup, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
                 this.share_into_group(cx)
             }))
             .on_action(cx.listener(|this, _: &UngroupActive, _, cx| {
+                if !this.crop_keys_live() {
+                    return;
+                }
                 this.ungroup_active(cx)
             }))
             .on_action(cx.listener(|this, _: &ConfirmParamEdit, window, cx| {
@@ -585,9 +722,6 @@ impl Render for ScoreSyncApp {
                 } else {
                     this.dismiss_blocking_overlays(cx);
                 }
-            }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::OpenFile, window, cx| {
-                this.mask_tool.update(cx, |m, cx| m.open_file(window, cx));
             }))
             .on_action(cx.listener(|this, _: &mask_tool::gui::ExportImage, window, cx| {
                 this.mask_tool.update(cx, |m, cx| m.export_image(window, cx));
@@ -688,8 +822,15 @@ impl Render for ScoreSyncApp {
                 let list: Vec<PathBuf> = paths
                     .paths()
                     .iter()
-                    .filter(|p| is_open_path(p) || is_project_path(p))
                     .cloned()
+                    .collect();
+                if this.bg.pick_open {
+                    this.apply_drop_as_bg(&list, cx);
+                    return;
+                }
+                let list: Vec<PathBuf> = list
+                    .into_iter()
+                    .filter(|p| is_open_path(p) || is_project_path(p))
                     .collect();
                 if list.is_empty() {
                     return;
@@ -764,29 +905,7 @@ impl Render for ScoreSyncApp {
                                 )
                             })
                             .child(div().flex_1().min_w(px(8.)))
-                            .child(
-                                div()
-                                    .id("help_header")
-                                    .flex_shrink_0()
-                                    .mr_2()
-                                    .w(px(22.))
-                                    .h(px(22.))
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(rgb(0x64748b))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_xs()
-                                    .text_color(rgb(0x334155))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0xe2e8f0)).border_color(rgb(0x334155)))
-                                    .child("?")
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| this.show_help(cx)),
-                                    ),
-                            ),
+                            .child(self.header_file_bar(cx)),
                     ),
             )
             .child(
@@ -821,7 +940,7 @@ impl Render for ScoreSyncApp {
             .child(self.dialog_overlay(window, cx))
             .child(self.tab_context_menu_overlay(cx))
             .child(self.guide_context_menu_overlay(cx))
-            .child(self.tab_tooltip_overlay())
+            .child(self.tab_tooltip_overlay(cx))
             .child(self.tab_drop_line_overlay())
             .child(self.tab_drag_ghost())
             .child(self.member_drag_ghost())
@@ -874,11 +993,13 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("p", mask_tool::gui::TogglePanMode, Some("MaskTool")),
             KeyBinding::new("escape", mask_tool::gui::CancelPolyDraft, Some("MaskTool")),
         ];
+        // 分块面板: Ctrl+O 打开图片/PDF. 蒙版/底色/视频不绑, 避免误开文件.
         keys.extend(apply_bg::bind_primary("o", OpenFile, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreSync")));
+        // 各面板通用: 保存 / 另存 / 打开工程 / 新建工程.
         keys.extend(apply_bg::bind_primary("s", SaveProject, None));
         keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, None));
         keys.extend(apply_bg::bind_primary("shift-o", OpenProject, None));
@@ -887,6 +1008,10 @@ pub fn run_gui(initial: Vec<PathBuf>) {
         keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreVideo")));
         keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreVideo")));
         keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreVideo")));
+        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreProject")));
+        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreProject")));
+        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreProject")));
+        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreProject")));
         keys.extend(apply_bg::bind_primary("m", PairUngrouped, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("z", Undo, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("y", Redo, Some("ScoreSync")));
@@ -896,7 +1021,6 @@ pub fn run_gui(initial: Vec<PathBuf>) {
         keys.extend(apply_bg::bind_primary("y", Redo, Some("PageOrganize")));
         keys.extend(apply_bg::bind_primary("shift-z", Redo, Some("PageOrganize")));
         keys.extend(apply_bg::bind_primary("a", SelectAllPageRegions, Some("PageOrganize")));
-        keys.extend(apply_bg::bind_primary("o", mask_tool::gui::OpenFile, Some("MaskTool")));
         keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("MaskTool")));
         keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("MaskTool")));
         keys.extend(apply_bg::bind_primary("s", SaveProject, Some("MaskTool")));

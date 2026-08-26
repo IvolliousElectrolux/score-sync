@@ -44,7 +44,7 @@ pub(crate) const MASK_TAB_SLOT_PX: f32 = 96.0;
 pub(crate) const MASK_BLOCK_ROW_PX: f32 = 28.0;
 pub(crate) const HELP_TEMPLATE: &str = "\
 【分块】快捷键:\n\
-  {m}O 打开图片/PDF | {ms}N 新建工程 | {ms}O 打开工程 | {m}S 保存工程 | {ms}S 另存工程\n\
+  {m}O 打开图片/PDF (仅本面板) | {ms}N 新建工程 | {ms}O 打开工程 | {m}S 保存工程 | {ms}S 另存工程\n\
   D 识别本页 | A 识别全部页\n\
   N 添加新块 | S 分割块 | M 合并组合 | {m}M 一键两两合并 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
   E 导出组合 | R 重置本页分组 | P 组织页面 | H / F1 操作说明\n\
@@ -52,8 +52,14 @@ pub(crate) const HELP_TEMPLATE: &str = "\
   {m}Z/Y 撤重 (按当前标签页独立记忆; 关闭页面亦可撤回)\n\
   滚轮上下平移画布, Shift+滚轮左右平移, {m}滚轮缩放\n\
 \n\
+【底色】 (右侧切到底色后):\n\
+  左侧预览底色+组合 (不可编辑, 滚轮切换组合);\n\
+  右侧「选择底色」导入图片, 「应用底色」/「取消底色」与「使用纯色底色」/「取消纯色底色」互斥;\n\
+  调色盘 HSV / RGB / 最近色, 滴管可从左侧预览取谱纸色;\n\
+  目标分辨率与批量加底色独立; {m}Z/Y 可撤回底色操作\n\
+\n\
 【蒙版】快捷键 (右侧切到蒙版后):\n\
-  初始为选择态 (不激活框选); 未选中蒙版时可直接拖动/拉伸「组合分块」\n\
+  初始为选择态 (不激活框选); 未选中蒙版时可直接拖动/拉伸「组合分块」 (拖动中贴图跟手, 松手后重拼)\n\
   B 框选 | L 折线 (逐点连线, 吸附首点闭环) | P 平移 | 画笔/橡皮 (侧栏, 可调色/粗细)\n\
   E 导出本页图片 | F 适应 | Delete 删除选中\n\
   {m}A 全选蒙版 | {m}Z/Y 撤重 (蒙版与分块微调共用, 按组合独立记忆, 切走再回来仍可撤)\n\
@@ -79,7 +85,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
   底部横条可整体拖动平移, 拖两端圆点改变缩放.\n\
 \n\
 操作步骤:\n\
-1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留当前页±4 (输出组合/蒙版页签仍列出全部).\n\
+1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存默认当前页±4, 高清页自动收到 ±2/±1 (输出组合/蒙版页签仍列出全部).\n\
 2. {m}S 保存为单个 .staffcrop 工程包 (zip), 下次可用 {ms}O 继续; {ms}N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
    「组织页面」(P) 用缩略图网格排序/删除, 比拖页签轻松; 无叉号, {m}点击多选 / Shift 连选, Delete 删选中, {m}Z/Y 撤重.\n\
@@ -97,18 +103,20 @@ pub(crate) const HELP_TEMPLATE: &str = "\
    左侧点选块或切回分块时, 列表会滚到对应组合.\n\
 9. 「蒙版」编辑当前组合的竖向拼合图; 组合标签与分块一致为「排序号. 来源号」\n\
    (共享脚注可在不同组画不同遮盖). 标签栏/侧栏切换组合; 与分块互相切换时会定位并滚动到对应组合.\n\
-   未选中蒙版时: 拖块本体上下移动, 拖上下边裁切/扩展 (先消耗块间空白, 底色实时重拼).\n\
+   未选中蒙版时: 拖块本体上下移动, 拖上下边裁切/扩展 (先消耗块间空白; 拖动中用分块贴图跟手, 松手后重拼含底色的整图).\n\
    「辅助线」按五线谱块数铺线 (两端距顶 5/17、距底 4/15, 拖动按比例联动, 非镜像);\n\
    默认识别为谱表的块才占线, 文字/脚注需在菜单里加根数才纳入对齐.\n\
    一块一个谱行组时用大括号尖 (不够到顶/底谱表则用该组重心); 一块多个谱行组时\n\
    用整块几何中心 (第一组顶线到末组底线的中点); 文字用上下边界中线.\n\
    「对齐」优先保持页宽; 对不齐则改按页高缩尺 (显示变窄). 「还原初始状态」清掉微调.\n\
    「全局开启」后左键开关作用于全部组合; 「同步同根数位置」把当前页线按高度比例映到同样根数的页;\n\
-   「全局对齐」后台把已铺线的组合都对齐.\n\
+   「全局对齐」后台把已铺线的组合都对齐 (与当页「对齐」同一套几何, 按原始条带算锚点).\n\
 10. 「导出组合」按「输出组合」列表顺序拼接并套用各组蒙版; 蒙版侧「导出本页图片」只导出当前组合.\n\
-11. 「工程」页「应用到工程组合」把工程底色作为可撤销的底层异步叠加到各输出组合 (不卡界面),\n\
-    「取消工程底色」还原为两层状态; 蒙版/视频里的预览也会实时带上这层底色.\n\
-12. 「视频」页: 上方预览窗 (悬浮显示可拖动的进度条), 下方视频/淡入淡出/音频三条轨道;\n\
+11. 「底色」右侧面板把底色作为可撤销的底层叠加到各输出组合 (不卡界面),\n\
+    「取消底色」还原为两层状态; 也可指定纯色 (与图片底色互斥); 蒙版/视频里的预览会实时带上这层底色.\n\
+    「批量加底色」弹窗仍可对目录里的谱面图做独立批处理 (比例与工程目标分辨率分开).\n\
+12. 「视频」页: 上方预览窗 (悬浮显示可拖动的进度条; 素材按自身比例装进 16:9, 竖图不拉扁),\n\
+    下方视频/淡入淡出/音频三条轨道;\n\
     右侧素材池按「输出组合」顺序显示, 点击展开该组合的预览, 拖到视频轨道指定位置即可插入;\n\
     「导入音频」可一次导入多段按顺序播放的音频 (wav/mp3/flac/ogg/m4a/aac, 如各乐章分轨); 「分割音频」按下后,\n\
     在音频轨道上点一下鼠标即可把该处的音频从此切开成两段 (命名为 原名-1 / 原名-2).\n\
@@ -123,9 +131,10 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 其他:\n\
   空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
   P 组织页面: 缩略图预览, 拖动排序, {m}点击多选 / Shift 连选, Delete 删除选中页.\n\
-  右侧顶栏可切换「分块 / 蒙版 / 工程 / 视频」四个面板.\n\
+  右侧顶栏可切换「分块 / 底色 / 蒙版 / 视频」四个面板.\n\
+  标题栏右侧图标: 新建 / 打开工程 / 保存 / 另存 ({ms}N / {ms}O / {m}S / {ms}S), 悬停显示名称; ? 为操作说明 (H / F1).\n\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
-  「工程」面板可「清除视频缓存」删除旁路 `.staffcrop.cache`.\n\
+  视频终稿缓存在工程旁 `.staffcrop.cache/pool/` (不打进 zip); 切到视频面板时按当前组合重建, 已删除组合的旧文件会清掉.\n\
   启动时若已联网会检查 GitHub 更新, 有新版本则弹出当前到最新之间的版本摘要.\n\
   PDF 导入会先弹出分辨率框 (默认按标记尺寸×3 光栅化; 扫描件若页内图像更大则按图像像素预填). 导出组合使用导入后的像素, 不会再放大.\n\
   PDF 导入依赖 pdfium、视频导出依赖 ffmpeg, 需把对应文件放在程序所在目录 (或系统 PATH) 下.";
@@ -161,10 +170,10 @@ pub(crate) enum AddAnchorRole {
 pub(crate) enum SideTool {
     /// 谱表分块: 原子块 / 组合 / 成员
     Crop,
+    /// 工程底色 (预览组合 + 右侧面板)
+    Project,
     /// 蒙版遮盖 (mask_tool)
     Mask,
-    /// 工程保存 / 加底色 (apply_bg)
-    Project,
     /// 视频轨道编辑与导出 (score_video)
     Video,
 }
@@ -214,6 +223,24 @@ pub(crate) struct GuideHistEntry {
 pub(crate) struct CropHistory {
     pub(crate) undo: Vec<CropSnap>,
     pub(crate) redo: Vec<CropSnap>,
+}
+
+/// 底色面板一次可撤操作: 启用/种类/来源/会话缓存/比例/取色.
+#[derive(Clone)]
+pub(crate) struct BgSnap {
+    pub(crate) enabled: bool,
+    pub(crate) is_solid: bool,
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) session_path: Option<PathBuf>,
+    pub(crate) aspect_w: u32,
+    pub(crate) aspect_h: u32,
+    pub(crate) color: [u8; 3],
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct BgHistory {
+    pub(crate) undo: Vec<BgSnap>,
+    pub(crate) redo: Vec<BgSnap>,
 }
 
 pub(crate) enum DragKind {
@@ -289,6 +316,9 @@ pub(crate) enum DragKind {
     TabHScroll {
         grab: f32,
     },
+    /// 底色侧栏内嵌调色盘
+    BgPaletteSb,
+    BgPaletteHue,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -334,10 +364,15 @@ pub(crate) struct TabContextMenu {
 }
 
 pub(crate) struct TabTooltip {
-    pub(crate) page_index: usize,
-    pub(crate) x: f32,
-    pub(crate) y: f32,
+    pub(crate) id: SharedString,
+    pub(crate) anchor_x: f32,
+    pub(crate) anchor_y: f32,
+    pub(crate) anchor_w: f32,
+    pub(crate) anchor_h: f32,
     pub(crate) text: SharedString,
+    /// 实测宽高; 0 表示还没量到, 先用估算.
+    pub(crate) measured_w: f32,
+    pub(crate) measured_h: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

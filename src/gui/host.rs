@@ -28,7 +28,7 @@ impl ScoreSyncApp {
             return;
         }
         match self.side_tool {
-            SideTool::Mask => {
+            SideTool::Mask | SideTool::Project => {
                 self.mask_tool
                     .update(cx, |m, cx| m.root_mouse_move(x, y, cx));
             }
@@ -50,7 +50,7 @@ impl ScoreSyncApp {
             return;
         }
         match self.side_tool {
-            SideTool::Mask => {
+            SideTool::Mask | SideTool::Project => {
                 self.mask_tool.update(cx, |m, cx| m.root_mouse_up(x, y, cx));
             }
             SideTool::Video => {
@@ -67,7 +67,9 @@ impl ScoreSyncApp {
         match self.drag {
             Some(DragKind::Scrollbar { .. })
             | Some(DragKind::TabHScroll { .. })
-            | Some(DragKind::SideResize { .. }) => {
+            | Some(DragKind::SideResize { .. })
+            | Some(DragKind::BgPaletteSb)
+            | Some(DragKind::BgPaletteHue) => {
                 self.apply_host_drag_at(x, y, cx);
                 true
             }
@@ -82,6 +84,9 @@ impl ScoreSyncApp {
             }
             Some(DragKind::SideResize { .. }) => {
                 self.apply_side_resize(x, cx);
+            }
+            Some(DragKind::BgPaletteSb | DragKind::BgPaletteHue) => {
+                self.apply_bg_palette_drag(x, y, cx);
             }
             Some(DragKind::TabHScroll { grab }) => {
                 let handle = self.tab_hscroll_handle();
@@ -176,7 +181,9 @@ impl ScoreSyncApp {
             | Some(DragKind::GroupReorder { .. })
             | Some(DragKind::Scrollbar { .. })
             | Some(DragKind::SideResize { .. })
-            | Some(DragKind::TabHScroll { .. }) => {}
+            | Some(DragKind::TabHScroll { .. })
+            | Some(DragKind::BgPaletteSb)
+            | Some(DragKind::BgPaletteHue) => {}
             _ => return,
         }
         match self.drag.take() {
@@ -239,7 +246,9 @@ impl ScoreSyncApp {
             Some(
                 DragKind::Scrollbar { .. }
                 | DragKind::SideResize { .. }
-                | DragKind::TabHScroll { .. },
+                | DragKind::TabHScroll { .. }
+                | DragKind::BgPaletteSb
+                | DragKind::BgPaletteHue,
             ) => {
                 cx.notify();
             }

@@ -8,7 +8,7 @@ impl ScoreSyncApp {
     /// 页签水平滚动条拖拽用的 handle: 蒙版面板用独立的 `mask_tab_scroll`,
     /// 其余面板 (分块/工程) 用 `tab_scroll`; 两者互不干扰, 切面板不抽搐.
     pub(super) fn tab_hscroll_handle(&self) -> ScrollHandle {
-        if self.side_tool == SideTool::Mask {
+        if self.uses_mask_canvas() {
             self.mask_tab_scroll.clone()
         } else {
             self.tab_scroll.clone()
@@ -104,7 +104,7 @@ impl ScoreSyncApp {
                 self.refresh_render(cx);
             }
         } else {
-            self.render_image = None;
+            self.retire_current_render_image();
             self.img_w = self.doc.pages[index].width();
             self.img_h = self.doc.pages[index].height();
             self.request_page_window(cx);
@@ -189,6 +189,7 @@ impl ScoreSyncApp {
             return;
         }
         self.tab_hover_idx = Some(idx);
+        self.header_hover_id = None;
         self.tab_tooltip = None;
         self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
         let gen = self.tab_hover_gen;
@@ -204,21 +205,27 @@ impl ScoreSyncApp {
                 if show == full {
                     return;
                 }
-                let (x, y) = view
+                let (ax, ay, aw, ah) = view
                     .tab_bounds
                     .get(&idx)
                     .map(|b| {
                         (
                             f32::from(b.origin.x),
-                            f32::from(b.origin.y) + f32::from(b.size.height) + 6.0,
+                            f32::from(b.origin.y),
+                            f32::from(b.size.width),
+                            f32::from(b.size.height),
                         )
                     })
-                    .unwrap_or((0.0, 0.0));
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
                 view.tab_tooltip = Some(TabTooltip {
-                    page_index: idx,
-                    x,
-                    y,
+                    id: format!("tab-{idx}").into(),
+                    anchor_x: ax,
+                    anchor_y: ay,
+                    anchor_w: aw,
+                    anchor_h: ah,
                     text: full,
+                    measured_w: 0.0,
+                    measured_h: 0.0,
                 });
                 cx.notify();
             })
@@ -228,10 +235,14 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn clear_tab_hover(&mut self, cx: &mut Context<Self>) {
-        if self.tab_hover_idx.is_none() && self.tab_tooltip.is_none() {
+        if self.tab_hover_idx.is_none()
+            && self.header_hover_id.is_none()
+            && self.tab_tooltip.is_none()
+        {
             return;
         }
         self.tab_hover_idx = None;
+        self.header_hover_id = None;
         self.tab_tooltip = None;
         self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
         cx.notify();
@@ -277,7 +288,7 @@ impl ScoreSyncApp {
         (start, end.max(start).min(n))
     }
 
-    /// 将分块页签滚到指定页. 仅在切入分块/工程面板时用, 点选页签本身不要滚.
+    /// 将分块页签滚到指定页. 仅在切入分块面板时用, 点选页签本身不要滚.
     pub(super) fn scroll_page_tabs_to_index(&self, ix: usize) {
         let n = self.doc.pages.len();
         if n == 0 {
@@ -294,7 +305,7 @@ impl ScoreSyncApp {
             .set_offset(point(px(-target), px(0.)));
     }
     pub(super) fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.side_tool == SideTool::Mask {
+        if self.uses_mask_canvas() {
             self.mask_group_tab_bar(cx).into_any_element()
         } else {
             self.page_tab_bar(cx).into_any_element()
@@ -880,15 +891,27 @@ impl ScoreSyncApp {
             .into_any_element()
     }
 
-    pub(super) fn tab_tooltip_overlay(&self) -> impl IntoElement {
+    pub(super) fn tab_tooltip_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(ref tip) = self.tab_tooltip else {
             return div().into_any_element();
         };
+        let (x, y) = hover_tooltip_pos(
+            tip.anchor_x,
+            tip.anchor_y,
+            tip.anchor_w,
+            tip.anchor_h,
+            tip.text.as_ref(),
+            tip.measured_w,
+            tip.measured_h,
+            self.viewport_w,
+            self.viewport_h,
+        );
+        let entity = cx.entity();
         div()
-            .id(SharedString::from(format!("tab-tooltip-{}", tip.page_index)))
+            .id(SharedString::from(format!("hover-tooltip-{}", tip.id)))
             .absolute()
-            .left(px(tip.x))
-            .top(px(tip.y))
+            .left(px(x))
+            .top(px(y))
             .px_2()
             .py_1()
             .rounded_sm()
@@ -899,6 +922,30 @@ impl ScoreSyncApp {
             .text_xs()
             .whitespace_nowrap()
             .shadow_sm()
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            let Some(tip) = this.tab_tooltip.as_mut() else {
+                                return;
+                            };
+                            let w = f32::from(bounds.size.width);
+                            let h = f32::from(bounds.size.height);
+                            if (w - tip.measured_w).abs() > 0.5
+                                || (h - tip.measured_h).abs() > 0.5
+                            {
+                                tip.measured_w = w;
+                                tip.measured_h = h;
+                                cx.notify();
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
             .child(tip.text.clone())
             .into_any_element()
     }
@@ -966,6 +1013,49 @@ impl ScoreSyncApp {
             )
             .into_any_element()
     }
+}
+
+/// 悬浮提示: 左上角对齐锚点右下角 (偏右下); 超出窗口则贴边, 只用实测/紧估算宽度.
+pub(super) fn hover_tooltip_pos(
+    ax: f32,
+    ay: f32,
+    aw: f32,
+    ah: f32,
+    text: &str,
+    measured_w: f32,
+    measured_h: f32,
+    view_w: f32,
+    view_h: f32,
+) -> (f32, f32) {
+    const PAD: f32 = 2.0;
+    const GAP: f32 = 2.0;
+    let (est_w, est_h) = estimate_hover_tooltip_size(text);
+    let tw = if measured_w > 1.0 { measured_w } else { est_w };
+    let th = if measured_h > 1.0 { measured_h } else { est_h };
+    let vw = if view_w > 32.0 { view_w } else { 4096.0 };
+    let vh = if view_h > 32.0 { view_h } else { 4096.0 };
+
+    let mut x = ax + aw;
+    if x + tw > vw - PAD {
+        x = vw - PAD - tw;
+    }
+    x = x.max(PAD);
+
+    let mut y = ay + ah + GAP;
+    if y + th > vh - PAD {
+        y = ay - GAP - th;
+    }
+    y = y.clamp(PAD, (vh - PAD - th).max(PAD));
+    (x, y)
+}
+
+fn estimate_hover_tooltip_size(text: &str) -> (f32, f32) {
+    // text_xs ≈ 12px: 汉字满宽, 西文半宽; 外加 padding/border.
+    let mut w = 0.0;
+    for c in text.chars() {
+        w += if (c as u32) > 0x7f { 12.0 } else { 6.5 };
+    }
+    (w + 18.0, 22.0)
 }
 
 /// 末尾 `_p` + 数字起至文件名结束, 例如 `_p007.png` / `_p007_copy.png`.
@@ -1078,5 +1168,31 @@ mod tests {
         let (show, _) = format_page_tab_caption("", "2", title);
         assert_eq!(show, "2:Bach贝多芬F……_p002.png");
         assert_eq!(str_cols("Bach贝多芬F"), TAB_LABEL_NAME_COLS);
+    }
+
+    #[test]
+    fn hover_tooltip_stays_inside_window() {
+        const PAD: f32 = 2.0;
+        let text = "另存工程 (Ctrl+Shift+S)";
+        let (tw, th) = estimate_hover_tooltip_size(text);
+        // 右侧按钮: 默认从图标右下角出发, 超出则贴窗口右缘 (2px), 不留大空档
+        let (x, y) = hover_tooltip_pos(970.0, 8.0, 22.0, 22.0, text, tw, th, 1000.0, 800.0);
+        assert!(x >= PAD);
+        assert!((x + tw - (1000.0 - PAD)).abs() < 0.6);
+        assert!(y >= 8.0 + 22.0);
+        assert!(y + th <= 800.0 - PAD + 0.5);
+        // 中间: 提示左上角在锚点右下角
+        let new_text = "新建工程 (Ctrl+Shift+N)";
+        let (nw, nh) = estimate_hover_tooltip_size(new_text);
+        let (x_mid, y_mid) =
+            hover_tooltip_pos(800.0, 8.0, 22.0, 22.0, new_text, nw, nh, 1200.0, 800.0);
+        assert!((x_mid - 822.0).abs() < 0.6);
+        assert!((y_mid - (8.0 + 22.0 + 2.0)).abs() < 0.6);
+        // 底部贴边时翻到锚点上方
+        let (x2, y2) =
+            hover_tooltip_pos(20.0, 780.0, 40.0, 22.0, text, tw, th, 1000.0, 800.0);
+        assert!(x2 >= PAD);
+        assert!(y2 + th <= 780.0 + 0.5);
+        assert!(y2 >= PAD);
     }
 }

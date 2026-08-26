@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use image::RgbImage;
 
@@ -54,8 +55,9 @@ pub struct Page {
     pub path: PathBuf,
     /// 会话 tmp (或工程解压落盘) 上的 PNG 备份
     pub disk_path: PathBuf,
-    /// 仅内存窗口内有值; 窗口外为 None
-    pub image: Option<RgbImage>,
+    /// 仅内存窗口内有值; 窗口外为 None. `Arc` 让后台任务廉价共享同一份
+    /// 像素, 切蒙版/底色时不必在界面线程再 memcpy 一整页.
+    pub image: Option<Arc<RgbImage>>,
     /// 卸载后仍可用的尺寸缓存
     pub img_w: u32,
     pub img_h: u32,
@@ -193,6 +195,131 @@ pub fn parse_color_hex(s: &str) -> u32 {
     u32::from_str_radix(s, 16).unwrap_or(0x3498db)
 }
 
+/// 裁出 `img` 的 `[y0, y0+height)` 整行条带 (宽度不变), 按行整块
+/// `copy_from_slice`, 不用 `image::imageops::crop_imm().to_image()`
+/// (内部逐像素调用 get_pixel/put_pixel; 高清扫描页整页宽度的裁切这样
+/// 调用开销很可观, 是切到蒙版/底色面板时卡顿的根因之一, 见
+/// `apply_bg::process::crop_fast`/`mask_tool::layout::blit_rows` 同样的
+/// 考量). 供 [`DocState::crop_region`] 与「全局对齐」后台任务复用.
+pub(crate) fn crop_band_fast(img: &RgbImage, y0: u32, height: u32) -> RgbImage {
+    let w = img.width();
+    let h = img.height();
+    let y0 = y0.min(h);
+    let height = height.min(h.saturating_sub(y0));
+    let mut out = RgbImage::new(w, height);
+    let row_bytes = w as usize * 3;
+    let src: &[u8] = img;
+    let dst: &mut [u8] = &mut out;
+    for row in 0..height as usize {
+        let s0 = (y0 as usize + row) * row_bytes;
+        let d0 = row * row_bytes;
+        dst[d0..d0 + row_bytes].copy_from_slice(&src[s0..s0 + row_bytes]);
+    }
+    out
+}
+
+/// `DocState::compose_group_impl` 的 `&self` 无关核心: 按 `layout` 竖向拼合
+/// 已裁切好的成员片段. 拆出来是为了让 [`GroupRenderJob::render`] 能在不
+/// 持有 `&DocState` 的情况下 (例如后台线程) 复用同一套拼接逻辑.
+///
+/// 统一走 [`mask_tool::layout::stitch_with_stats`] 的整行 `copy_from_slice`
+/// 快路径, 不再对"无布局微调"单独维护一份 `image::imageops::replace`
+/// 慢路径 (内部逐像素 get_pixel/put_pixel, 高清页多块组合这样拼一次
+/// 开销很可观——这正是切到蒙版/底色面板时卡顿的根因之一, 见
+/// `score_sync::gui::sync::sync_mask_image` 文档). `layout` 为空时各块
+/// 间距/扩展均为 0, `PieceStats` 不会被实际读取, 用零成本的占位统计即可,
+/// 不必为此扫描像素.
+pub(crate) fn compose_parts_impl(
+    parts: &[(String, image::RgbImage)],
+    layout: &[BlockAdjust],
+    ink_threshold: i32,
+    stats: Option<&std::collections::HashMap<String, mask_tool::layout::PieceStats>>,
+) -> Option<image::RgbImage> {
+    if parts.is_empty() {
+        return None;
+    }
+    if layout.is_empty() && parts.len() == 1 {
+        let max_w = parts.iter().map(|(_, p)| p.width()).max().unwrap_or(1);
+        if parts[0].1.width() == max_w {
+            return Some(parts[0].1.clone());
+        }
+    }
+    let piece_stats: Vec<mask_tool::layout::PieceStats> = parts
+        .iter()
+        .map(|(rid, img)| {
+            stats
+                .and_then(|cache| cache.get(rid).copied())
+                .unwrap_or_else(|| {
+                    if layout.is_empty() {
+                        mask_tool::layout::PieceStats::default()
+                    } else {
+                        mask_tool::layout::compute_piece_stats(img, ink_threshold)
+                    }
+                })
+        })
+        .collect();
+    Some(mask_tool::layout::stitch_with_stats(parts, &piece_stats, layout))
+}
+
+/// 底色合成所需的快照 (见 [`GroupRenderJob`]).
+struct GroupRenderBg {
+    image: Arc<RgbImage>,
+    aspect_w: u32,
+    aspect_h: u32,
+    voff_shift: i64,
+    leading_gap: u32,
+    trailing_gap: u32,
+}
+
+/// `DocState::render_group_final` 所需只读数据的快照, 由
+/// [`DocState::prepare_group_render_job`] 在主线程一次性收集 (裁切片段的
+/// 浅拷贝 + 一些小块元数据, 很快); [`Self::render`] 之后可以放到后台线程
+/// 执行真正耗时的拼合 + 蒙版叠加 + 底色合成裁切, 不再堵在界面线程上
+/// (视频素材池批量重渲染「输出组合」终稿正是这个场景, 见
+/// `score_sync::gui::sync::sync_video_pool`).
+pub struct GroupRenderJob {
+    parts: Vec<(String, image::RgbImage)>,
+    block_layout: Vec<BlockAdjust>,
+    ink_threshold: i32,
+    masks: Vec<MaskRect>,
+    mask_opacity: f32,
+    content_scale: f32,
+    bg_enabled: bool,
+    bg: Option<GroupRenderBg>,
+}
+
+impl GroupRenderJob {
+    /// 纯计算, 不接触 `DocState`, 可安全放到非主线程跑.
+    pub fn render(&self) -> Result<RgbImage, String> {
+        let mut combined =
+            compose_parts_impl(&self.parts, &self.block_layout, self.ink_threshold, None)
+                .ok_or_else(|| "无成员片段".to_string())?;
+        if !self.masks.is_empty() {
+            mask_tool::mask::apply_masks_to_sheet(
+                &mut combined,
+                &self.masks,
+                self.content_scale,
+                self.mask_opacity,
+            );
+        }
+        if self.bg_enabled {
+            let Some(bg) = &self.bg else {
+                return Err("已启用底色但缺少底色图".into());
+            };
+            combined = apply_bg::process::composite_and_crop(
+                &combined,
+                &bg.image,
+                bg.aspect_w,
+                bg.aspect_h,
+                bg.voff_shift,
+                bg.leading_gap,
+                bg.trailing_gap,
+            )?;
+        }
+        Ok(combined)
+    }
+}
+
 /// 应用级文档状态 (页 / 组 / 选中).
 #[derive(Clone, Default)]
 pub struct DocState {
@@ -205,7 +332,8 @@ pub struct DocState {
     pub ink_threshold: i32,
     /// 旧工程字段, 识别已不再使用.
     pub staff_grouping: StaffGrouping,
-    /// 组合蒙版: key = group_id, 坐标相对该组竖向拼合图
+    /// 组合蒙版: key = group_id, 坐标相对预览画布上的谱面原点
+    /// (flush 时已减去 hoff/voff; 谱面高于页面缩小时为缩小后的显示像素)
     pub group_masks: HashMap<String, Vec<MaskRect>>,
     /// 组合内分块的位置/尺寸微调 (蒙版编辑用, 只影响拼合图): key = group_id,
     /// value 与该组 `region_ids` 一一对应 (缺省即视为无调整).
@@ -234,11 +362,15 @@ pub struct DocState {
     pub groups_manual_order: bool,
     /// 工程级底色层 (底层); 不改写页图, 导出/终稿合成时才叠上
     pub bg_enabled: bool,
-    pub bg_image: Option<RgbImage>,
+    pub bg_image: Option<Arc<RgbImage>>,
     /// 仅用于 UI 显示来源路径
     pub bg_source_path: Option<PathBuf>,
     pub bg_aspect_w: u32,
     pub bg_aspect_h: u32,
+    /// `bg_image` 每次被替换 (`set_project_bg`/`clear_project_bg`) 时自增,
+    /// 供 GUI 侧给「底色 GPU 贴图」做缓存判重: 完整底色只备份这一份,
+    /// 贴图按目标页裁切后再缩放, 见 [`mask_tool::gui::BlockBgTile::from_full`].
+    pub bg_gen: u64,
     /// 视频面板时间轴的纯数据快照 (实际编辑态在 `score_video::ScoreVideoApp`
     /// 里, 这里只是保存/载入工程时的中转载体).
     pub video_state: TimelineSnapshot,
@@ -297,6 +429,7 @@ impl DocState {
             bg_source_path: self.bg_source_path.clone(),
             bg_aspect_w: self.bg_aspect_w,
             bg_aspect_h: self.bg_aspect_h,
+            bg_gen: self.bg_gen,
             video_state: self.video_state.clone(),
             rid_page: HashMap::new(),
         }
@@ -510,41 +643,6 @@ impl DocState {
         self.ingest_region_staff_anchors(computed);
     }
 
-    pub fn guided_groups_anchors_ready(&self) -> bool {
-        self.groups.iter().all(|g| {
-            if self.get_group_guides(&g.id).lines.is_empty() {
-                return true;
-            }
-            g.region_ids
-                .iter()
-                .all(|rid| self.region_staff_anchors.contains_key(rid))
-        })
-    }
-
-    pub fn block_align_anchors_for_group(
-        &self,
-        group_id: &str,
-    ) -> Option<Vec<mask_tool::staff::BlockAlignAnchor>> {
-        let heights = self.group_member_heights(group_id);
-        if heights.is_empty() {
-            return None;
-        }
-        let layout = self.get_block_layout(group_id);
-        let spans = mask_tool::layout::compute_spans(&heights, layout);
-        let mut out = Vec::with_capacity(spans.len());
-        for (rid, y0, y1) in spans {
-            let piece_y = self.region_staff_anchors.get(&rid).copied().flatten();
-            let extra = mask_tool::layout::BlockAdjust::find(layout, &rid)
-                .map(|a| a.extra_top)
-                .unwrap_or(0);
-            let span_h = (y1 - y0 + 1) as i32;
-            out.push(mask_tool::staff::block_anchor_from_piece_y(
-                rid, piece_y, extra, span_h,
-            ));
-        }
-        Some(out)
-    }
-
     /// 全局开启: 缺线的组合用预计算默认值填上. 不读页图.
     pub fn apply_guides_global_on(&mut self) {
         self.guides_global = true;
@@ -571,7 +669,7 @@ impl DocState {
         if let Some(page) = self.pages.get_mut(page_idx) {
             page.img_w = w;
             page.img_h = h;
-            page.image = Some(img);
+            page.image = Some(Arc::new(img));
         }
         Ok(())
     }
@@ -590,6 +688,17 @@ impl DocState {
                 page.img_h = img.height();
             }
         }
+    }
+
+    /// 按当前页体积决定内存窗口半径 (高清页小于默认 ±4).
+    pub fn memory_window_radius(&self) -> usize {
+        let b = self.current_page().map(|p| p.estimated_bytes()).unwrap_or(0);
+        crate::page_cache::window_radius_for_bytes(b)
+    }
+
+    /// 只留当前页附近的解码像素, 半径见 [`Self::memory_window_radius`].
+    pub fn retain_memory_window(&mut self) {
+        self.retain_window(self.current_page_index, self.memory_window_radius());
     }
 
     /// 内存只保留 `center ± radius` 页的像素.
@@ -635,13 +744,12 @@ impl DocState {
         let (pi, r) = self.find_region(region_id)?;
         let page = self.pages.get(pi)?;
         let img = page.image.as_ref()?;
-        let w = page.width();
         let y0 = r.y0.max(0) as u32;
         let y1 = (r.y1 as u32).min(page.height().saturating_sub(1));
         if y1 < y0 {
             return None;
         }
-        Some(image::imageops::crop_imm(img, 0, y0, w, y1 - y0 + 1).to_image())
+        Some(crop_band_fast(img, y0, y1 - y0 + 1))
     }
 
     /// 组内各成员的原始裁切片段 (未应用 `group_block_layout` 微调), 与
@@ -660,7 +768,10 @@ impl DocState {
 
     /// 按组内成员顺序竖向拼合 (与导出一致, 不含蒙版). 若该组存在蒙版编辑时
     /// 的分块位置/尺寸微调 (`group_block_layout`), 在此一并应用; 否则走原
-    /// 有的纯拼接快速路径 (性能/结果与旧版本完全一致).
+    /// 有的纯拼接快速路径 (性能/结果与旧版本完全一致). 导出终稿走带底色/
+    /// 蒙版合成的 `render_group_final`, 这个不缓存统计的简单版本目前只在
+    /// 测试里直接练到 `compose_parts_impl`, 保留作为公开的轻量入口.
+    #[allow(dead_code)]
     pub fn compose_group(&self, group_id: &str) -> Option<image::RgbImage> {
         let parts = self.group_member_pieces(group_id);
         self.compose_group_impl(group_id, &parts, None)
@@ -686,49 +797,7 @@ impl DocState {
         parts: &[(String, image::RgbImage)],
         stats: Option<&std::collections::HashMap<String, mask_tool::layout::PieceStats>>,
     ) -> Option<image::RgbImage> {
-        if parts.is_empty() {
-            return None;
-        }
-        let layout = self.get_block_layout(group_id);
-        if layout.is_empty() {
-            let max_w = parts.iter().map(|(_, p)| p.width()).max().unwrap_or(1);
-            if parts.len() == 1 && parts[0].1.width() == max_w {
-                return Some(parts[0].1.clone());
-            }
-            let total_h: u32 = parts.iter().map(|(_, p)| p.height()).sum();
-            let mut combined =
-                image::RgbImage::from_pixel(max_w, total_h, image::Rgb([255, 255, 255]));
-            let mut yy = 0u32;
-            for (_, p) in parts {
-                let src = if p.width() != max_w {
-                    let mut canvas = image::RgbImage::from_pixel(
-                        max_w,
-                        p.height(),
-                        image::Rgb([255, 255, 255]),
-                    );
-                    image::imageops::replace(&mut canvas, p, 0, 0);
-                    canvas
-                } else {
-                    p.clone()
-                };
-                image::imageops::replace(&mut combined, &src, 0, yy as i64);
-                yy += p.height();
-            }
-            return Some(combined);
-        }
-        let piece_stats: Vec<mask_tool::layout::PieceStats> = parts
-            .iter()
-            .map(|(rid, img)| {
-                stats
-                    .and_then(|cache| cache.get(rid).copied())
-                    .unwrap_or_else(|| mask_tool::layout::compute_piece_stats(img, self.ink_threshold))
-            })
-            .collect();
-        Some(mask_tool::layout::stitch_with_stats(
-            parts,
-            &piece_stats,
-            layout,
-        ))
+        compose_parts_impl(parts, self.get_block_layout(group_id), self.ink_threshold, stats)
     }
 
     /// 组合最前面那个块自己的 `gap_before` (人为拖动第一块腾出的、没有
@@ -789,11 +858,12 @@ impl DocState {
         if aspect_w == 0 || aspect_h == 0 {
             return Err("比例宽高必须为正整数".into());
         }
-        self.bg_image = Some(image);
+        self.bg_image = Some(Arc::new(image));
         self.bg_source_path = source;
         self.bg_aspect_w = aspect_w;
         self.bg_aspect_h = aspect_h;
         self.bg_enabled = true;
+        self.bg_gen = self.bg_gen.wrapping_add(1);
         self.seed_guide_defaults();
         Ok(())
     }
@@ -803,12 +873,16 @@ impl DocState {
         self.bg_enabled = false;
         self.bg_image = None;
         self.bg_source_path = None;
+        self.bg_gen = self.bg_gen.wrapping_add(1);
         self.seed_guide_defaults();
     }
 
     /// 拼合图预览 (供蒙版/视频面板显示): 若已启用工程底色, 叠加底色预览
     /// (contain: 上下或左右补边, 不烧入蒙版). 返回 (预览图, 谱面在预览图
-    /// 中的横向/纵向偏移, 供调用方换算蒙版坐标).
+    /// 中的横向/纵向偏移, 供调用方换算蒙版坐标). GUI 侧统一走下面
+    /// 复用裁切片段/统计缓存的 `..._with_parts_and_stats`, 这个简单版本
+    /// 保留作为公开的轻量入口 (含测试覆盖).
+    #[allow(dead_code)]
     pub fn compose_group_preview(&self, group_id: &str) -> Option<(RgbImage, i64, i64)> {
         self.compose_group_preview_from(group_id, self.compose_group(group_id))
     }
@@ -858,29 +932,49 @@ impl DocState {
     }
 
     /// 终稿合成: 拼合 → 蒙版 → (可选) 底色底层裁切.
+    ///
+    /// 蒙版存在「预览画布 − hoff/voff」坐标系. 谱面高于页面被缩小装进画布时,
+    /// 先除以 `content_scale` 映回未缩放拼合图再盖上, 然后按原图等比合成,
+    /// 避免视频里遮盖偏移, 也不把谱面拉进画布坐标系里变形.
     pub fn render_group_final(&self, group_id: &str) -> Result<Option<RgbImage>, String> {
-        let Some(mut combined) = self.compose_group(group_id) else {
-            return Ok(None);
-        };
-        let masks = self.get_group_masks(group_id);
-        if !masks.is_empty() {
-            mask_tool::mask::apply_masks_rgb(&mut combined, masks, self.mask_prefs.mask_opacity);
+        match self.prepare_group_render_job(group_id) {
+            Some(job) => job.render().map(Some),
+            None => Ok(None),
         }
-        if self.bg_enabled {
-            let Some(bg) = self.bg_image.as_ref() else {
-                return Err("已启用底色但缺少底色图".into());
-            };
-            combined = apply_bg::process::composite_and_crop(
-                &combined,
-                bg,
-                self.bg_aspect_w,
-                self.bg_aspect_h,
-                self.get_group_voff_shift(group_id),
-                self.group_leading_gap(group_id),
-                self.group_trailing_gap(group_id),
-            )?;
+    }
+
+    /// 见 [`GroupRenderJob`] 文档: 收集渲染某组合终稿所需的只读快照 (裁切
+    /// 片段的浅拷贝 + 蒙版/底色等小块元数据), 供调用方挪到后台线程调用
+    /// [`GroupRenderJob::render`], 主线程这一步应该很快.
+    pub fn prepare_group_render_job(&self, group_id: &str) -> Option<GroupRenderJob> {
+        let parts = self.group_member_pieces(group_id);
+        if parts.is_empty() {
+            return None;
         }
-        Ok(Some(combined))
+        let block_layout = self.get_block_layout(group_id).to_vec();
+        let masks = self.get_group_masks(group_id).to_vec();
+        let content_scale = self
+            .group_preview_frame(group_id)
+            .map(|f| f.content_scale)
+            .unwrap_or(1.0);
+        let bg = self.bg_image.as_ref().map(|bg| GroupRenderBg {
+            image: bg.clone(),
+            aspect_w: self.bg_aspect_w,
+            aspect_h: self.bg_aspect_h,
+            voff_shift: self.get_group_voff_shift(group_id),
+            leading_gap: self.group_leading_gap(group_id),
+            trailing_gap: self.group_trailing_gap(group_id),
+        });
+        Some(GroupRenderJob {
+            parts,
+            block_layout,
+            ink_threshold: self.ink_threshold,
+            masks,
+            mask_opacity: self.mask_prefs.mask_opacity,
+            content_scale,
+            bg_enabled: self.bg_enabled,
+            bg,
+        })
     }
 
     pub fn current_page(&self) -> Option<&Page> {
@@ -1195,7 +1289,7 @@ impl DocState {
             id: new_id(),
             path,
             disk_path,
-            image: Some(image),
+            image: Some(Arc::new(image)),
             img_w: w,
             img_h: h,
             regions: HashMap::new(),
@@ -1206,7 +1300,7 @@ impl DocState {
             self.current_page_index = idx;
         }
         self.detect_page(idx, true);
-        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.retain_memory_window();
         Ok(idx)
     }
 
@@ -1240,7 +1334,7 @@ impl DocState {
             crate::trace::log(&format!("doc: detect_page idx={idx} 结束"));
         }
         if run_detect {
-            self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+            self.retain_memory_window();
         }
         Ok(idx)
     }
@@ -1597,7 +1691,7 @@ impl DocState {
         let n = self.pages.len();
         for i in 0..n {
             self.detect_page(i, false);
-            self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+            self.retain_memory_window();
         }
         self.rebuild_all_groups();
     }
@@ -2153,7 +2247,7 @@ impl DocState {
         } else {
             self.current_page_index = 0;
         }
-        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.retain_memory_window();
         self.rebuild_rid_index();
         dead_pids
     }
@@ -2172,7 +2266,7 @@ impl DocState {
             self.current_page_index += 1;
         }
         self.sort_groups();
-        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.retain_memory_window();
         self.rebuild_rid_index();
     }
 
@@ -2216,7 +2310,7 @@ impl DocState {
             }
         }
         self.sort_groups();
-        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.retain_memory_window();
         self.rebuild_rid_index();
     }
 
@@ -2316,7 +2410,7 @@ impl DocState {
             self.sort_groups();
         }
         self.current_page_index = insert_at;
-        self.retain_window(self.current_page_index, crate::page_cache::WINDOW_RADIUS);
+        self.retain_memory_window();
         self.rebuild_rid_index();
         Some(insert_at)
     }
@@ -2698,11 +2792,11 @@ mod tests {
     fn compose_group_with_layout_applies_gap_and_extend() {
         let mut doc = DocState::new();
         let mut page = stub_page(100);
-        page.image = Some(image::RgbImage::from_pixel(
+        page.image = Some(Arc::new(image::RgbImage::from_pixel(
             80,
             100,
             image::Rgb([250, 250, 250]),
-        ));
+        )));
         let page_id = page.id.clone();
         doc.pages.push(page);
         let r0 = Region {
@@ -2883,4 +2977,85 @@ mod tests {
         doc.apply_guides_global_on();
         assert_eq!(doc.get_group_guides(&gid).lines.len(), 1);
     }
+
+    #[test]
+    fn render_final_mask_stays_on_scaled_stain() {
+        // 高谱面会缩小装进 16:9 页面. 蒙版按编辑器习惯存在「预览画布 − 偏移」
+        // 坐标系; 终稿先除以 content_scale 盖到未缩放拼合图, 再等比合成.
+        let mut doc = DocState::new();
+        doc.bg_aspect_w = 16;
+        doc.bg_aspect_h = 9;
+        let sw = 200u32;
+        let sh = 250u32;
+        let stain = (100u32, 200u32);
+        let mut sheet = image::RgbImage::from_pixel(sw, sh, image::Rgb([180, 180, 180]));
+        sheet.put_pixel(stain.0, stain.1, image::Rgb([255, 0, 0]));
+        let mut page = stub_page(sh);
+        page.img_w = sw;
+        page.image = Some(Arc::new(sheet));
+        let page_id = page.id.clone();
+        doc.pages.push(page);
+        doc.pages[0].regions.insert(
+            "r0".into(),
+            Region {
+                id: "r0".into(),
+                page_id,
+                y0: 0,
+                y1: (sh - 1) as i32,
+                kind: "system".into(),
+                color: "#e74c3c".into(),
+            },
+        );
+        doc.rebuild_rid_index();
+        doc.groups.push(Group {
+            id: "g1".into(),
+            region_ids: vec!["r0".into()],
+            name: String::new(),
+        });
+        doc.bg_enabled = true;
+        doc.bg_image = Some(Arc::new(image::RgbImage::from_pixel(800, 800, image::Rgb([10, 20, 30]))));
+
+        let frame = doc.group_preview_frame("g1").unwrap();
+        assert!(frame.content_scale < 1.0);
+        let stored_x = ((stain.0 as f32) * frame.content_scale).round() as i32;
+        let stored_y = ((stain.1 as f32) * frame.content_scale).round() as i32;
+        doc.set_group_masks(
+            "g1",
+            vec![MaskRect {
+                id: "cover".into(),
+                x0: stored_x - 2,
+                y0: stored_y - 2,
+                x1: stored_x + 2,
+                y1: stored_y + 2,
+                brush_points: Vec::new(),
+                brush_radius: 0,
+                color: [255, 255, 255],
+                poly_points: Vec::new(),
+                opacity: 1.0,
+                bound_block: None,
+            }],
+        );
+
+        let out = doc.render_group_final("g1").unwrap().unwrap();
+        let cx = (frame.hoff as i32 + stored_x).max(0) as u32;
+        let cy = (frame.voff as i32 + stored_y).max(0) as u32;
+        let covered = out.get_pixel(cx, cy);
+        assert!(
+            covered[0] > 200 && covered[1] > 200 && covered[2] > 200,
+            "污点对应画布位置应为白蒙版, 得到 {covered:?} at ({cx},{cy})"
+        );
+        // 旧实现会把蒙版打在未缩放拼合图的 (stored_x, stored_y), 缩小后
+        // 出现在更靠近原点处; 那里应仍是谱面灰, 不是白块.
+        let ghost_x = (frame.hoff as f32 + stored_x as f32 * frame.content_scale).round() as u32;
+        let ghost_y = (frame.voff as f32 + stored_y as f32 * frame.content_scale).round() as u32;
+        if ghost_x != cx || ghost_y != cy {
+            let ghost = out.get_pixel(ghost_x, ghost_y);
+            assert!(
+                ghost[0] < 220,
+                "旧偏移位置不该被蒙上, 得到 {ghost:?} at ({ghost_x},{ghost_y})"
+            );
+        }
+    }
+
 }
+

@@ -142,6 +142,43 @@ pub fn page_size(sw: u32, aspect_w: u32, aspect_h: u32) -> (u32, u32) {
     (sw, h.max(1))
 }
 
+/// 完整底色上、按谱面宽与纵横比定下的目标页矩形 `(left, top, w, h)`.
+/// 画布大小只跟谱面宽有关, 跟谱面高无关. 底色装不下该页时返回 `None`.
+pub fn bg_page_rect(
+    bw: u32,
+    bh: u32,
+    aspect_w: u32,
+    aspect_h: u32,
+    sheet_w: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    if aspect_w == 0 || aspect_h == 0 || sheet_w == 0 {
+        return None;
+    }
+    let (page_w, page_h) = page_size(sheet_w, aspect_w, aspect_h);
+    if bw < page_w || bh < page_h {
+        return None;
+    }
+    let (left, top, right, bottom) = clamp_centered_rect(bw, bh, page_w, page_h);
+    Some((
+        left.max(0) as u32,
+        top.max(0) as u32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
+}
+
+/// 从完整底色备份裁出目标页 (恰好 [`page_size`] 那一块).
+/// 绘制/贴图用这一块, 不要把整张扫描图送去缩放.
+pub fn crop_bg_to_page(
+    bg: &RgbImage,
+    aspect_w: u32,
+    aspect_h: u32,
+    sheet_w: u32,
+) -> Option<RgbImage> {
+    let (left, top, w, h) = bg_page_rect(bg.width(), bg.height(), aspect_w, aspect_h, sheet_w)?;
+    Some(crop_fast(bg, left, top, w, h))
+}
+
 fn clamp_centered_rect(bw: u32, bh: u32, crop_w: u32, crop_h: u32) -> (i64, i64, i64, i64) {
     let cx = (bw / 2) as i64;
     let cy = (bh / 2) as i64;
@@ -323,20 +360,18 @@ pub fn preview_frame(
     if aspect_w == 0 || aspect_h == 0 {
         return fallback;
     }
-    let (page_w, page_h) = page_size(sw, aspect_w, aspect_h);
-    if bw < page_w || bh < page_h {
+    let Some((bg_left, bg_top, canvas_w, canvas_h)) =
+        bg_page_rect(bw, bh, aspect_w, aspect_h, sw)
+    else {
         return fallback;
-    }
-    let content_scale = if sh > page_h {
-        page_h as f32 / sh as f32
+    };
+    let content_scale = if sh > canvas_h {
+        canvas_h as f32 / sh as f32
     } else {
         1.0
     };
     let disp_w = ((sw as f32) * content_scale).round() as i64;
     let disp_h = ((sh as f32) * content_scale).round() as i64;
-    let (left, top, right, bottom) = clamp_centered_rect(bw, bh, page_w, page_h);
-    let canvas_w = (right - left) as u32;
-    let canvas_h = (bottom - top) as u32;
     let hoff = ((canvas_w as i64 - disp_w) / 2).max(0);
     let vmax = (canvas_h as i64 - disp_h).max(0);
     let voff = if content_scale < 1.0 {
@@ -345,15 +380,15 @@ pub fn preview_frame(
         0
     } else {
         let oy = ((bh as i64) - sh as i64) / 2;
-        (oy - top + voff_shift).clamp(0, vmax)
+        (oy - bg_top as i64 + voff_shift).clamp(0, vmax)
     };
     PreviewFrame {
         canvas_w,
         canvas_h,
         hoff,
         voff,
-        bg_left: left.max(0) as u32,
-        bg_top: top.max(0) as u32,
+        bg_left,
+        bg_top,
         shows_bg: true,
         content_scale,
     }
@@ -684,5 +719,30 @@ mod tests {
         assert!(just_before > 0);
         assert_eq!(at_boundary, 0);
         assert_eq!(just_after, 0);
+    }
+
+    #[test]
+    fn crop_bg_to_page_matches_preview_canvas() {
+        let mut bg = solid(800, 800, 10, 20, 30);
+        bg.put_pixel(400, 400, Rgb([1, 2, 3]));
+        let sheet_w = 200u32;
+        let crop = crop_bg_to_page(&bg, 16, 9, sheet_w).expect("bg covers page");
+        let frame = preview_frame(sheet_w, 400, 800, 800, 16, 9, 0);
+        assert_eq!(crop.dimensions(), (frame.canvas_w, frame.canvas_h));
+        let tall_frame = preview_frame(sheet_w, 2500, 800, 800, 16, 9, 0);
+        assert_eq!(
+            (crop.width(), crop.height()),
+            (tall_frame.canvas_w, tall_frame.canvas_h)
+        );
+        let cx = 400u32 - frame.bg_left;
+        let cy = 400u32 - frame.bg_top;
+        assert_eq!(*crop.get_pixel(cx, cy), Rgb([1, 2, 3]));
+    }
+
+    #[test]
+    fn crop_bg_to_page_rejects_undersized_bg() {
+        let bg = solid(100, 50, 10, 20, 30);
+        assert!(crop_bg_to_page(&bg, 16, 9, 200).is_none());
+        assert!(bg_page_rect(100, 50, 16, 9, 200).is_none());
     }
 }
