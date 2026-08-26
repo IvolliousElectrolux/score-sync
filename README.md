@@ -53,8 +53,8 @@ cargo run -r -- path\to\project.staffcrop
 发布构建产物: `target/release/score_sync.exe` (Windows) 或 `target/release/score_sync` (macOS).
 GitHub Actions 工作流 `.github/workflows/macos.yml` 在打 `v*` 标签或手动
 `workflow_dispatch` 时于 macos-14 上编译 arm64 与 x64 (x64 交叉编译, 不再等
-macos-13), 并上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`, 以及
-`warp_staffcrop_timeline-<ver>-macos-arm64.zip`.
+macos-13), 并上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`.
+时间轴对齐小工具只在 v1.3.10 发过, 之后不再随版附带.
 
 ## 工程格式
 
@@ -121,7 +121,7 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 - 视频: 预览按采样寻址, 长音频暂停后再播不再跳点; 导出按时间轴逐帧写出, 翻页不再越到后面越漂
 - 页签: 紧凑页签始终能滚到当前页
 - 视频: 去掉底部状态栏, 出错只走弹窗
-- 工具: 独立「工程时间轴对齐」(`tools/warp_staffcrop_timeline.py`) 按 t' = a·t + b 重写旧工程; Release 附 Windows / macOS 可执行文件
+- 工具: 独立「工程时间轴对齐」(`tools/warp_staffcrop_timeline.py`) 按 t' = a·t + b 重写旧工程; 可执行文件只在 v1.3.10 的 Release 里, 之后不再随版附带
 
 ### 1.3.9
 - 分块: 重新识别后清掉对不上任何块的幽灵组合 (列表里的 p0c*)
