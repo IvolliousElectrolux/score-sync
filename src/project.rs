@@ -112,10 +112,14 @@ struct ProjectBg {
     enabled: bool,
     aspect_w: u32,
     aspect_h: u32,
-    /// zip 内相对路径, 如 `bg.png`
+    /// zip 内相对路径, 如 `bg.png`; 纯色可为空
+    #[serde(default)]
     image: String,
     #[serde(default)]
     source_path: Option<String>,
+    /// 纯色底色 RGB; 旧工程没有该字段.
+    #[serde(default)]
+    solid_rgb: Option<[u8; 3]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -262,17 +266,31 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     let mut selected: Vec<String> = doc.selected_region_ids.iter().cloned().collect();
     selected.sort();
 
-    let bg_meta = if doc.bg_enabled && doc.bg_image.is_some() {
-        Some(ProjectBg {
-            enabled: true,
-            aspect_w: doc.bg_aspect_w,
-            aspect_h: doc.bg_aspect_h,
-            image: "bg.png".into(),
-            source_path: doc
-                .bg_source_path
-                .as_ref()
-                .map(|p| p.display().to_string()),
-        })
+    let bg_meta = if doc.bg_enabled {
+        if let Some(c) = doc.bg_solid {
+            Some(ProjectBg {
+                enabled: true,
+                aspect_w: doc.bg_aspect_w,
+                aspect_h: doc.bg_aspect_h,
+                image: String::new(),
+                source_path: None,
+                solid_rgb: Some(c),
+            })
+        } else if doc.bg_image.is_some() {
+            Some(ProjectBg {
+                enabled: true,
+                aspect_w: doc.bg_aspect_w,
+                aspect_h: doc.bg_aspect_h,
+                image: "bg.png".into(),
+                source_path: doc
+                    .bg_source_path
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
+                solid_rgb: None,
+            })
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -509,6 +527,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         groups_manual_order: true,
         bg_enabled: false,
         bg_image: None,
+        bg_solid: None,
         bg_source_path: None,
         bg_aspect_w: 2560,
         bg_aspect_h: 1440,
@@ -538,15 +557,26 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
     };
     if let Some(bg) = meta.bg {
         if bg.enabled {
-            let png = read_zip_entry(&mut zip, &bg.image)?;
-            let image = image::load_from_memory(&png)
-                .map_err(|e| format!("解码底色失败: {e}"))?
-                .to_rgb8();
-            doc.bg_image = Some(Arc::new(image));
-            doc.bg_enabled = true;
             doc.bg_aspect_w = bg.aspect_w.max(1);
             doc.bg_aspect_h = bg.aspect_h.max(1);
             doc.bg_source_path = bg.source_path.map(PathBuf::from);
+            if let Some(c) = bg.solid_rgb {
+                doc.bg_solid = Some(c);
+                doc.bg_enabled = true;
+            } else if !bg.image.is_empty() {
+                let png = read_zip_entry(&mut zip, &bg.image)?;
+                let image = image::load_from_memory(&png)
+                    .map_err(|e| format!("解码底色失败: {e}"))?
+                    .to_rgb8();
+                if doc.bg_source_path.is_none() && image.width() > 0 && image.height() > 0 {
+                    let p = image.get_pixel(image.width() / 2, image.height() / 2);
+                    doc.bg_solid = Some([p[0], p[1], p[2]]);
+                    doc.bg_enabled = true;
+                } else {
+                    doc.bg_image = Some(Arc::new(image));
+                    doc.bg_enabled = true;
+                }
+            }
         }
     }
     if doc.current_page_index >= doc.pages.len() {

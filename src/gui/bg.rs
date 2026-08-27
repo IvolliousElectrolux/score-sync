@@ -3,7 +3,7 @@
 use super::*;
 use super::ScoreSyncApp;
 use apply_bg::process::is_image;
-use image::{Frame, ImageBuffer, Rgb, RgbaImage};
+use image::{Frame, ImageBuffer, RgbaImage};
 use mask_tool::color_prefs::{hsv_to_rgb, rgb_to_hsv};
 use smallvec::smallvec;
 use std::path::Path;
@@ -184,24 +184,24 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn sync_bg_ui_from_doc(&mut self, cx: &mut Context<Self>) {
-        if let Some(img) = self.doc.bg_image.as_ref() {
+        if let Some(c) = self.doc.bg_solid {
+            self.bg.applied_is_solid = self.doc.bg_enabled;
+            self.set_bg_picker_rgb(c, true, cx);
+        } else if let Some(img) = self.doc.bg_image.as_ref() {
             let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
             self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
-            self.bg.applied_is_solid =
-                self.doc.bg_enabled && self.doc.bg_source_path.is_none();
-            if !self.bg.applied_is_solid {
-                self.bg.cached_image = Some((**img).clone());
-                self.bg.cached_source_path = self.doc.bg_source_path.clone();
-                if !self
-                    .bg
-                    .cached_session_path
-                    .as_ref()
-                    .map(|p| p.is_file())
-                    .unwrap_or(false)
-                {
-                    if let Ok(p) = crate::page_cache::write_rgb_png(img, "bg_cache") {
-                        self.bg.cached_session_path = Some(p);
-                    }
+            self.bg.applied_is_solid = false;
+            self.bg.cached_image = Some((**img).clone());
+            self.bg.cached_source_path = self.doc.bg_source_path.clone();
+            if !self
+                .bg
+                .cached_session_path
+                .as_ref()
+                .map(|p| p.is_file())
+                .unwrap_or(false)
+            {
+                if let Ok(p) = crate::page_cache::write_rgb_png(img, "bg_cache") {
+                    self.bg.cached_session_path = Some(p);
                 }
             }
             let p = img.get_pixel(img.width() / 2, img.height() / 2);
@@ -227,6 +227,38 @@ impl ScoreSyncApp {
         self.bg.rebuild_sb_image();
         if sync_inputs {
             self.sync_bg_rgb_inputs(cx);
+        }
+        self.sync_live_solid_bg(cx);
+    }
+
+    /// 纯色已启用时, 取色立刻改预览/终稿颜色, 不造整张底色图.
+    fn sync_live_solid_bg(&mut self, cx: &mut Context<Self>) {
+        if !(self.doc.bg_enabled && self.bg.applied_is_solid) {
+            return;
+        }
+        let color = self.bg.color;
+        if self.doc.bg_solid == Some(color) {
+            return;
+        }
+        self.doc.update_bg_solid_color(color);
+        self.mark_dirty();
+        self.mark_video_pool_dirty_all();
+        self.score_video.update(cx, |v, _| v.set_fade_bg_rgb(color));
+        if let Some((g, _, tile)) = self.bg_tile_cache.as_mut() {
+            *g = self.doc.bg_gen;
+            if tile.solid.is_some() {
+                tile.recolor_solid(color);
+            }
+        }
+        let recolored = self.mask_tool.update(cx, |m, cx| {
+            let ok = m.recolor_host_bg_solid(color);
+            if ok {
+                cx.notify();
+            }
+            ok
+        });
+        if !recolored {
+            self.refresh_bg_preview_layer(cx);
         }
     }
 
@@ -316,6 +348,9 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn apply_bg_eyedropper(&mut self, rgb: [u8; 3], cx: &mut Context<Self>) {
+        if self.doc.bg_enabled && self.bg.applied_is_solid && rgb != self.bg.color {
+            self.push_bg_undo();
+        }
         self.set_bg_picker_rgb(rgb, true, cx);
         self.push_bg_recent(rgb);
         self.bg.eyedropper_armed = false;
@@ -569,25 +604,35 @@ impl ScoreSyncApp {
         let color = self.bg.picker_rgb();
         self.bg.color = color;
         self.push_bg_recent(color);
-        let (w, h) = self.solid_bg_size();
-        let img = image::RgbImage::from_pixel(w, h, Rgb(color));
-        self.apply_project_bg_image(img, None, cx);
-    }
-
-    fn solid_bg_size(&self) -> (u32, u32) {
+        if self.doc.groups.is_empty() {
+            self.show_error(
+                "提示",
+                crate::error::Error::msg("当前没有输出组合. 请先分块/合并后再应用底色层."),
+                cx,
+            );
+            return;
+        }
         let aw = self.doc.bg_aspect_w.max(1);
         let ah = self.doc.bg_aspect_h.max(1);
-        let max_w = self
-            .doc
-            .pages
-            .iter()
-            .map(|p| p.width())
-            .max()
-            .unwrap_or(aw)
-            .max(aw);
-        let w = max_w.saturating_mul(2).max(2560).min(8192);
-        let h = ((w as u64 * ah as u64) / aw as u64).max(1).min(8192) as u32;
-        (w, h)
+        if let Err(e) = self.doc.set_project_bg_solid(color, aw, ah) {
+            self.show_error("无法应用底色", crate::error::Error::msg(e), cx);
+            return;
+        }
+        self.bg.applied_is_solid = true;
+        self.mark_dirty();
+        self.mark_video_pool_dirty_all();
+        self.status = format!(
+            "已为 {} 个组合启用底色层 纯色 ({}:{})",
+            self.doc.groups.len(),
+            aw,
+            ah
+        )
+        .into();
+        self.hint = self.status.clone();
+        self.score_video.update(cx, |v, _| v.set_fade_bg_rgb(color));
+        self.refresh_bg_preview_layer(cx);
+        self.sync_video_pool(cx);
+        cx.notify();
     }
 
     fn apply_project_bg_image(
@@ -606,32 +651,32 @@ impl ScoreSyncApp {
         }
         let aw = self.doc.bg_aspect_w.max(1);
         let ah = self.doc.bg_aspect_h.max(1);
+        if let Some(gid) = self.doc.groups.first().map(|g| g.id.clone()) {
+            let sheet_w = self.doc.group_sheet_width(&gid);
+            if apply_bg::process::bg_page_rect(rgb.width(), rgb.height(), aw, ah, sheet_w).is_none()
+            {
+                self.show_error(
+                    "底色不适用",
+                    crate::error::Error::msg(format!(
+                        "底色 ({}x{}) 无法完全盖住页面.\n请换更大底色 (总谱按高度定画布时左右也要盖住) 或检查谱面尺寸.",
+                        rgb.width(),
+                        rgb.height()
+                    )),
+                    cx,
+                );
+                return;
+            }
+        }
         match self.doc.set_project_bg(rgb, source.clone(), aw, ah) {
             Ok(()) => {
-                if let Some(gid) = self.doc.groups.first().map(|g| g.id.clone()) {
-                    let _ = self.doc.ensure_group_pages(&gid);
-                    if let Err(e) = self.doc.render_group_final(&gid) {
-                        self.doc.clear_project_bg();
-                        self.doc.retain_memory_window();
-                        self.show_error(
-                            "底色不适用",
-                            crate::error::Error::msg(format!(
-                                "{e}\n已取消启用. 请换更大底色 (总谱按高度定画布时左右也要盖住) 或检查谱面尺寸."
-                            )),
-                            cx,
-                        );
-                        return;
-                    }
-                    self.doc.retain_memory_window();
-                }
-                self.bg.applied_is_solid = source.is_none();
+                self.bg.applied_is_solid = false;
                 self.mark_dirty();
                 self.mark_video_pool_dirty_all();
                 let name = source
                     .as_ref()
                     .and_then(|p| p.file_name())
                     .and_then(|s| s.to_str())
-                    .unwrap_or("纯色");
+                    .unwrap_or("底色");
                 self.status = format!(
                     "已为 {} 个组合启用底色层 {} ({}:{})",
                     self.doc.groups.len(),
@@ -648,7 +693,7 @@ impl ScoreSyncApp {
                     let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
                     self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
                 }
-                self.force_refresh_mask_preview(cx);
+                self.refresh_bg_preview_layer(cx);
                 self.sync_video_pool(cx);
                 cx.notify();
             }
@@ -667,6 +712,7 @@ impl ScoreSyncApp {
         self.bg.picker_v = (1.0 - (y - top) / h).clamp(0.0, 1.0);
         self.bg.color = self.bg.picker_rgb();
         self.sync_bg_rgb_inputs(cx);
+        self.sync_live_solid_bg(cx);
         cx.notify();
     }
 
@@ -677,6 +723,7 @@ impl ScoreSyncApp {
         self.bg.rebuild_sb_image();
         self.bg.color = self.bg.picker_rgb();
         self.sync_bg_rgb_inputs(cx);
+        self.sync_live_solid_bg(cx);
         cx.notify();
     }
 
@@ -738,11 +785,11 @@ impl ScoreSyncApp {
             }
         } else {
             self.bg.applied_is_solid = false;
-            if self.doc.bg_enabled || self.doc.bg_image.is_some() {
+            if self.doc.bg_enabled || self.doc.bg_image.is_some() || self.doc.bg_solid.is_some() {
                 self.doc.clear_project_bg();
                 self.mark_dirty();
                 self.mark_video_pool_dirty_all();
-                self.force_refresh_mask_preview(cx);
+                self.refresh_bg_preview_layer(cx);
                 self.sync_video_pool(cx);
             }
         }
@@ -1065,6 +1112,10 @@ impl ScoreSyncApp {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
+                        if this.doc.bg_enabled && this.bg.applied_is_solid && color != this.bg.color
+                        {
+                            this.push_bg_undo();
+                        }
                         this.set_bg_picker_rgb(color, true, cx);
                         this.push_bg_recent(color);
                         cx.notify();
@@ -1189,6 +1240,9 @@ impl ScoreSyncApp {
                                 MouseButton::Left,
                                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
+                                    if this.doc.bg_enabled && this.bg.applied_is_solid {
+                                        this.push_bg_undo();
+                                    }
                                     this.drag = Some(DragKind::BgPaletteSb);
                                     this.set_bg_palette_sb(
                                         f32::from(ev.position.x),
@@ -1274,6 +1328,9 @@ impl ScoreSyncApp {
                                 MouseButton::Left,
                                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
+                                    if this.doc.bg_enabled && this.bg.applied_is_solid {
+                                        this.push_bg_undo();
+                                    }
                                     this.drag = Some(DragKind::BgPaletteHue);
                                     this.set_bg_palette_hue(f32::from(ev.position.y), cx);
                                 }),

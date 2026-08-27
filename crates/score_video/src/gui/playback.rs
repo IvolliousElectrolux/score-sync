@@ -49,6 +49,7 @@ impl ScoreVideoApp {
         // 素材内容可能已变化但 group_id 不变, 因此整体清空缓存; 正在后台
         // 解码的旧内容用 `pool_gen` 标记过期, 回来时会被丢弃 (见 `image_for`).
         self.pool_gen = self.pool_gen.wrapping_add(1);
+        self.item_gen.clear();
         self.render_cache.clear();
         self.image_loading.clear();
         self.pool = pool;
@@ -58,6 +59,48 @@ impl ScoreVideoApp {
             }
         }
         cx.notify();
+    }
+
+    /// 写入/覆盖若干素材, 不 bump `pool_gen` (其它条目正在解码的缩略图仍有效).
+    /// `order` 给出输出组合顺序, 用于把新条目插到正确位置.
+    pub fn upsert_pool_items(
+        &mut self,
+        items: Vec<MaterialItem>,
+        order: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        for item in items {
+            let gid = item.group_id.clone();
+            *self.item_gen.entry(gid.clone()).or_insert(0) += 1;
+            self.render_cache.remove(&gid);
+            self.image_loading.remove(&gid);
+            if let Some(old) = self.pool.iter_mut().find(|m| m.group_id == gid) {
+                *old = item;
+            } else {
+                self.pool.push(item);
+            }
+        }
+        self.pool.sort_by_key(|m| {
+            order
+                .iter()
+                .position(|id| id == &m.group_id)
+                .unwrap_or(usize::MAX)
+        });
+        if let Some(gid) = &self.expanded_pool {
+            if !self.pool.iter().any(|m| &m.group_id == gid) {
+                self.expanded_pool = None;
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn set_pool_status(&mut self, status: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.pool_status = status.into();
+        cx.notify();
+    }
+
+    pub fn pool_len(&self) -> usize {
+        self.pool.len()
     }
 
     /// 仅在播放期间才启动的进度 ticker (每次开始播放时新建一个).
@@ -115,6 +158,7 @@ impl ScoreVideoApp {
             return None;
         };
         let gen = self.pool_gen;
+        let item_gen = self.item_gen.get(group_id).copied().unwrap_or(0);
         let gid = group_id.to_string();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
@@ -141,7 +185,9 @@ impl ScoreVideoApp {
         cx.spawn(async move |this, cx| {
             let render = rx.recv().await.ok().flatten();
             this.update(cx, |view, cx| {
-                if view.pool_gen != gen {
+                if view.pool_gen != gen
+                    || view.item_gen.get(&gid).copied().unwrap_or(0) != item_gen
+                {
                     view.image_loading.remove(&gid); // 素材池已整体刷新, 这份结果作废
                     return;
                 }

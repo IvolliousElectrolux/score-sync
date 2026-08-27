@@ -161,6 +161,46 @@ pub fn load_rgb(path: &Path) -> Result<RgbImage, String> {
         .map(|i| i.to_rgb8())
 }
 
+/// 「组织页面」缩略图最长边 (像素). 与 GUI `ORG_THUMB_MAX_SIDE` 相同.
+pub const ORG_THUMB_SIDE: u32 = 192;
+
+/// 会话页图旁的组织缩略图: `foo.png` → `foo.org.jpg`.
+pub fn org_thumb_path(disk_png: &Path) -> PathBuf {
+    let stem = disk_png
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("page");
+    disk_png.with_file_name(format!("{stem}.org.jpg"))
+}
+
+/// 按最长边缩小 (已小于等于目标则 clone). 大图用 `thumbnail` 整数抽样, 比
+/// Triangle 整页卷积快一个数量级, 192px 预览足够.
+pub fn shrink_rgb_max(rgb: &RgbImage, max_side: u32) -> RgbImage {
+    let w = rgb.width().max(1);
+    let h = rgb.height().max(1);
+    let m = w.max(h);
+    if m <= max_side {
+        return rgb.clone();
+    }
+    let tw = ((w as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+    let th = ((h as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+    image::imageops::thumbnail(rgb, tw, th)
+}
+
+/// 把已缩好的组织缩略图写成 JPEG sidecar.
+pub fn save_org_thumb(thumb: &RgbImage, disk_png: &Path) -> Result<(), String> {
+    let path = org_thumb_path(disk_png);
+    thumb
+        .save_with_format(&path, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("写组织缩略图失败: {e}"))
+}
+
+/// 从全分辨率页图写出组织缩略图 sidecar (导入/写 PNG 时顺手做, 打开弹窗就不用再解全图).
+pub fn write_org_thumb(rgb: &RgbImage, disk_png: &Path) -> Result<(), String> {
+    let thumb = shrink_rgb_max(rgb, ORG_THUMB_SIDE);
+    save_org_thumb(&thumb, disk_png)
+}
+
 /// 复制一份会话内页图文件 (用于「复制本页」).
 pub fn duplicate_disk_png(src: &Path) -> Result<PathBuf, String> {
     let name = src
@@ -171,7 +211,12 @@ pub fn duplicate_disk_png(src: &Path) -> Result<PathBuf, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("page");
-    ingest_file(src, &format!("{stem}_copy.png"))
+    let dest = ingest_file(src, &format!("{stem}_copy.png"))?;
+    let src_thumb = org_thumb_path(src);
+    if src_thumb.is_file() {
+        let _ = std::fs::copy(&src_thumb, org_thumb_path(&dest));
+    }
+    Ok(dest)
 }
 
 /// 工程旁视频池缓存目录: `foo.staffcrop` → `foo.staffcrop.cache`.
@@ -270,6 +315,8 @@ fn windows_available_memory() -> Option<u64> {
 #[cfg(test)]
 mod window_radius_tests {
     use super::window_radius_for_bytes;
+    use super::org_thumb_path;
+    use std::path::PathBuf;
 
     #[test]
     fn small_pages_keep_default_radius() {
@@ -284,5 +331,14 @@ mod window_radius_tests {
     #[test]
     fn huge_pages_shrink_to_one() {
         assert_eq!(window_radius_for_bytes(80 * 1024 * 1024), 1);
+    }
+
+    #[test]
+    fn org_thumb_sidecar_keeps_stem() {
+        let p = PathBuf::from("tmp/Chopin_p012.png");
+        assert_eq!(
+            org_thumb_path(&p).file_name().and_then(|s| s.to_str()),
+            Some("Chopin_p012.org.jpg")
+        );
     }
 }

@@ -211,7 +211,15 @@ impl ScoreVideoApp {
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(0xcbd5e1))
-                    .child(format!("素材池 ({} 个输出组合, 可拖入视频轨道)", self.pool.len())),
+                    .child(if self.pool_status.is_empty() {
+                        format!("素材池 ({} 个输出组合, 可拖入视频轨道)", self.pool.len())
+                    } else {
+                        format!(
+                            "素材池 ({} 个输出组合) — {}",
+                            self.pool.len(),
+                            self.pool_status
+                        )
+                    }),
             )
             .child(list_row)
             .child(

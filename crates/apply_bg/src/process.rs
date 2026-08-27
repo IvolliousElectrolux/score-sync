@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use image::{DynamicImage, RgbImage};
+use image::{DynamicImage, Rgb, RgbImage};
 use rayon::prelude::*;
 
 /// 默认裁切比例 (16:9).
@@ -474,6 +474,71 @@ pub fn composite_preview(
     Ok((canvas, frame.hoff, frame.voff))
 }
 
+/// 纯色底色终稿: 不造整张底色图, 按 [`preview_frame`] 的画布直接填色再叠谱面.
+/// `src_w`/`src_h` 只参与几何 (与图片底色的完整备份尺寸同角色).
+pub fn composite_solid(
+    sheet: &RgbImage,
+    color: [u8; 3],
+    src_w: u32,
+    src_h: u32,
+    aspect_w: u32,
+    aspect_h: u32,
+    voff_shift: i64,
+    top_transparent: u32,
+    bottom_transparent: u32,
+) -> Result<RgbImage, String> {
+    if aspect_w == 0 || aspect_h == 0 {
+        return Err("比例宽高必须为正整数".into());
+    }
+    let (sw, sh) = sheet.dimensions();
+    let frame = preview_frame(sw, sh, src_w, src_h, aspect_w, aspect_h, voff_shift);
+    if !frame.shows_bg {
+        return Ok(sheet.clone());
+    }
+    let mut canvas = RgbImage::from_pixel(frame.canvas_w, frame.canvas_h, Rgb(color));
+    overlay_sheet(
+        &mut canvas,
+        sheet,
+        frame.hoff,
+        frame.voff,
+        top_transparent,
+        bottom_transparent,
+        frame.content_scale,
+    );
+    Ok(canvas)
+}
+
+/// 纯色底色预览: 几何与 [`composite_solid`] / [`preview_frame`] 一致.
+pub fn composite_preview_solid(
+    sheet: &RgbImage,
+    color: [u8; 3],
+    src_w: u32,
+    src_h: u32,
+    aspect_w: u32,
+    aspect_h: u32,
+    voff_shift: i64,
+    top_transparent: u32,
+    bottom_transparent: u32,
+) -> Result<(RgbImage, i64, i64), String> {
+    let canvas = composite_solid(
+        sheet,
+        color,
+        src_w,
+        src_h,
+        aspect_w,
+        aspect_h,
+        voff_shift,
+        top_transparent,
+        bottom_transparent,
+    )?;
+    let (sw, sh) = sheet.dimensions();
+    let frame = preview_frame(sw, sh, src_w, src_h, aspect_w, aspect_h, voff_shift);
+    if !frame.shows_bg {
+        return Ok((canvas, 0, 0));
+    }
+    Ok((canvas, frame.hoff, frame.voff))
+}
+
 fn process_one(
     path: &Path,
     bg: &RgbImage,
@@ -642,6 +707,22 @@ mod tests {
         assert!(frame_t.content_scale < 1.0);
         assert!((frame_t.content_scale - 1125.0 / 2500.0).abs() < 1e-6);
         assert_eq!((frame_t.canvas_w, frame_t.canvas_h), (2000, 1125));
+    }
+
+    #[test]
+    fn composite_solid_matches_image_fill() {
+        let color = [10u8, 20, 30];
+        let bg = solid(8000, 8000, color[0], color[1], color[2]);
+        let wide = solid(2000, 400, 200, 200, 200);
+        let from_img = composite_and_crop(&wide, &bg, 16, 9, 0, 0, 0).unwrap();
+        let from_solid = composite_solid(&wide, color, 8000, 8000, 16, 9, 0, 0, 0).unwrap();
+        assert_eq!(from_img.dimensions(), from_solid.dimensions());
+        assert_eq!(from_img.get_pixel(0, 0), from_solid.get_pixel(0, 0));
+        let (pw, hoff, voff) =
+            composite_preview_solid(&wide, color, 8000, 8000, 16, 9, 0, 0, 0).unwrap();
+        assert_eq!(pw.dimensions(), from_solid.dimensions());
+        assert_eq!(hoff, 0);
+        assert!(voff > 0);
     }
 
     #[test]

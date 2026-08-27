@@ -759,18 +759,19 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn clear_project_bg(&mut self, cx: &mut Context<Self>) {
-        if !self.doc.bg_enabled && self.doc.bg_image.is_none() {
+        if !self.doc.bg_enabled && self.doc.bg_image.is_none() && self.doc.bg_solid.is_none() {
             self.status = "当前未启用工程底色层.".into();
             self.hint = self.status.clone();
             cx.notify();
             return;
         }
         self.doc.clear_project_bg();
+        self.bg.applied_is_solid = false;
         self.mark_dirty();
         self.mark_video_pool_dirty_all();
         self.status = "已取消工程底色层.".into();
         self.hint = self.status.clone();
-        self.force_refresh_mask_preview(cx);
+        self.refresh_bg_preview_layer(cx);
         self.sync_video_pool(cx);
         cx.notify();
     }
@@ -778,6 +779,7 @@ impl ScoreSyncApp {
     /// 强制重新拼合并加载蒙版预览图 (绕过 `load_rgb` 的 session_key 缓存),
     /// 用于底色启用/取消后需要刷新预览的场景. 会先落盘当前蒙版编辑, 再清空
     /// 内嵌工具视图, 避免清空动作把待落盘的蒙版一并清没.
+    #[allow(dead_code)]
     pub(super) fn force_refresh_mask_preview(&mut self, cx: &mut Context<Self>) {
         self.flush_mask_to_doc(cx);
         self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));

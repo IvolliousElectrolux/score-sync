@@ -219,6 +219,8 @@ pub struct MaskToolApp {
     pub(crate) host_pick_armed: bool,
     pub(crate) host_pick_hover: Option<[u8; 3]>,
     pub(crate) host_pick_click: Option<[u8; 3]>,
+    /// 嵌入宿主时「导出本页」选出的路径; 宿主 `take` 后按终稿拼合写出.
+    pub(crate) pending_export_path: Option<PathBuf>,
 }
 
 
@@ -326,6 +328,7 @@ impl MaskToolApp {
             host_pick_armed: false,
             host_pick_hover: None,
             host_pick_click: None,
+            pending_export_path: None,
         };
         app.rebuild_hue_image();
         app.rebuild_sb_image();
@@ -333,6 +336,10 @@ impl MaskToolApp {
             app.load_image(path, cx);
         }
         app
+    }
+
+    pub fn is_canvas_loading(&self) -> bool {
+        self.canvas_loading
     }
 
     pub fn focus_handle_ref(&self) -> &FocusHandle {
@@ -396,6 +403,15 @@ impl MaskToolApp {
 
     pub fn take_host_pick_click(&mut self) -> Option<[u8; 3]> {
         self.host_pick_click.take()
+    }
+
+    pub fn take_export_path(&mut self) -> Option<PathBuf> {
+        self.pending_export_path.take()
+    }
+
+    pub fn set_status_text(&mut self, s: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.status = s.into();
+        cx.notify();
     }
 
     pub fn host_pick_hover(&self) -> Option<[u8; 3]> {

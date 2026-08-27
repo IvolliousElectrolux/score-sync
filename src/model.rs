@@ -263,7 +263,10 @@ pub(crate) fn compose_parts_impl(
 
 /// 底色合成所需的快照 (见 [`GroupRenderJob`]).
 struct GroupRenderBg {
-    image: Arc<RgbImage>,
+    image: Option<Arc<RgbImage>>,
+    solid: Option<[u8; 3]>,
+    src_w: u32,
+    src_h: u32,
     aspect_w: u32,
     aspect_h: u32,
     voff_shift: i64,
@@ -303,18 +306,41 @@ impl GroupRenderJob {
             );
         }
         if self.bg_enabled {
-            let Some(bg) = &self.bg else {
-                return Err("已启用底色但缺少底色图".into());
-            };
-            combined = apply_bg::process::composite_and_crop(
-                &combined,
-                &bg.image,
-                bg.aspect_w,
-                bg.aspect_h,
-                bg.voff_shift,
-                bg.leading_gap,
-                bg.trailing_gap,
-            )?;
+            if let Some(bg) = &self.bg {
+                let composed = if let Some(color) = bg.solid {
+                    apply_bg::process::composite_solid(
+                        &combined,
+                        color,
+                        bg.src_w,
+                        bg.src_h,
+                        bg.aspect_w,
+                        bg.aspect_h,
+                        bg.voff_shift,
+                        bg.leading_gap,
+                        bg.trailing_gap,
+                    )
+                } else if let Some(img) = bg.image.as_ref() {
+                    apply_bg::process::composite_and_crop(
+                        &combined,
+                        img,
+                        bg.aspect_w,
+                        bg.aspect_h,
+                        bg.voff_shift,
+                        bg.leading_gap,
+                        bg.trailing_gap,
+                    )
+                } else {
+                    Ok(combined.clone())
+                };
+                match composed {
+                    Ok(c) => combined = c,
+                    Err(e) => {
+                        crate::trace::log(&format!(
+                            "GroupRenderJob: 底色合成失败, 用纯谱面: {e}"
+                        ));
+                    }
+                }
+            }
         }
         Ok(combined)
     }
@@ -363,6 +389,8 @@ pub struct DocState {
     /// 工程级底色层 (底层); 不改写页图, 导出/终稿合成时才叠上
     pub bg_enabled: bool,
     pub bg_image: Option<Arc<RgbImage>>,
+    /// 纯色底色: 有值时不持有整张 `bg_image`, 预览画色块, 终稿按页填色.
+    pub bg_solid: Option<[u8; 3]>,
     /// 仅用于 UI 显示来源路径
     pub bg_source_path: Option<PathBuf>,
     pub bg_aspect_w: u32,
@@ -426,6 +454,7 @@ impl DocState {
             groups_manual_order: self.groups_manual_order,
             bg_enabled: self.bg_enabled,
             bg_image: self.bg_image.clone(),
+            bg_solid: self.bg_solid,
             bg_source_path: self.bg_source_path.clone(),
             bg_aspect_w: self.bg_aspect_w,
             bg_aspect_h: self.bg_aspect_h,
@@ -539,12 +568,12 @@ impl DocState {
                 content_scale: 1.0,
             });
         }
-        let bg = self.bg_image.as_ref()?;
+        let (bw, bh) = self.bg_src_size()?;
         Some(apply_bg::process::preview_frame(
             sw,
             sh,
-            bg.width(),
-            bg.height(),
+            bw,
+            bh,
             self.bg_aspect_w,
             self.bg_aspect_h,
             self.get_group_voff_shift(group_id),
@@ -777,11 +806,9 @@ impl DocState {
         self.compose_group_impl(group_id, &parts, None)
     }
 
-    /// 同 `compose_group`, 但各块裁切片段与背景色统计都由调用方预先准备
-    /// 并缓存好 (`parts` 须与 `group_member_pieces` 同序; `stats` 为
-    /// `region_id` -> 统计量). 拖动分块时宿主每帧都要重新拼合预览图,
-    /// 用这个版本可以避免每帧重新从页图裁切 + 重新扫描像素算统计 (这两步
-    /// 才是真正耗时的部分, 拼接本身只是内存搬运).
+    /// 同 `compose_group`, 但各块裁切片段与背景色统计都由调用方预先准备.
+    /// 预览已改为三层贴图, 这条路径留给测试 / 需要整图像素的调用方.
+    #[allow(dead_code)]
     pub fn compose_group_with_parts_and_stats(
         &self,
         group_id: &str,
@@ -859,6 +886,7 @@ impl DocState {
             return Err("比例宽高必须为正整数".into());
         }
         self.bg_image = Some(Arc::new(image));
+        self.bg_solid = None;
         self.bg_source_path = source;
         self.bg_aspect_w = aspect_w;
         self.bg_aspect_h = aspect_h;
@@ -868,10 +896,62 @@ impl DocState {
         Ok(())
     }
 
+    /// 启用纯色底色层. 不分配整张底色图.
+    pub fn set_project_bg_solid(
+        &mut self,
+        color: [u8; 3],
+        aspect_w: u32,
+        aspect_h: u32,
+    ) -> Result<(), String> {
+        if aspect_w == 0 || aspect_h == 0 {
+            return Err("比例宽高必须为正整数".into());
+        }
+        self.bg_image = None;
+        self.bg_solid = Some(color);
+        self.bg_source_path = None;
+        self.bg_aspect_w = aspect_w;
+        self.bg_aspect_h = aspect_h;
+        self.bg_enabled = true;
+        self.bg_gen = self.bg_gen.wrapping_add(1);
+        self.seed_guide_defaults();
+        Ok(())
+    }
+
+    /// 已启用纯色时只改颜色 (几何不变, 不重算辅助线).
+    pub fn update_bg_solid_color(&mut self, color: [u8; 3]) {
+        self.bg_solid = Some(color);
+        self.bg_gen = self.bg_gen.wrapping_add(1);
+    }
+
+    /// 预览/合成用的底色源尺寸. 纯色没有像素备份, 用能盖住各页的虚拟画布.
+    pub fn bg_src_size(&self) -> Option<(u32, u32)> {
+        if !self.bg_enabled {
+            return None;
+        }
+        if let Some(img) = self.bg_image.as_ref() {
+            return Some((img.width(), img.height()));
+        }
+        if self.bg_solid.is_some() {
+            let aw = self.bg_aspect_w.max(1);
+            let ah = self.bg_aspect_h.max(1);
+            let max_w = self
+                .pages
+                .iter()
+                .map(|p| p.width())
+                .max()
+                .unwrap_or(aw)
+                .max(aw)
+                .max(1);
+            return Some(apply_bg::process::page_size(max_w, aw, ah));
+        }
+        None
+    }
+
     /// 取消工程底色层.
     pub fn clear_project_bg(&mut self) {
         self.bg_enabled = false;
         self.bg_image = None;
+        self.bg_solid = None;
         self.bg_source_path = None;
         self.bg_gen = self.bg_gen.wrapping_add(1);
         self.seed_guide_defaults();
@@ -887,9 +967,8 @@ impl DocState {
         self.compose_group_preview_from(group_id, self.compose_group(group_id))
     }
 
-    /// 同 `compose_group_preview`, 但拼合图用调用方预先缓存好裁切片段与
-    /// 背景色统计的 `compose_group_with_parts_and_stats` 算出 (拖动分块
-    /// 时每帧调用, 避免卡顿).
+    /// 同 `compose_group_preview`, 但拼合图用调用方预先缓存好的裁切片段.
+    #[allow(dead_code)]
     pub fn compose_group_preview_with_parts_and_stats(
         &self,
         group_id: &str,
@@ -911,12 +990,31 @@ impl DocState {
         if !self.bg_enabled {
             return Some((sheet, 0, 0));
         }
-        let Some(bg) = self.bg_image.as_ref() else {
-            return Some((sheet, 0, 0));
-        };
         let voff_shift = self.get_group_voff_shift(group_id);
         let top_transparent = self.group_leading_gap(group_id);
         let bottom_transparent = self.group_trailing_gap(group_id);
+        if let Some(color) = self.bg_solid {
+            let Some((bw, bh)) = self.bg_src_size() else {
+                return Some((sheet, 0, 0));
+            };
+            return match apply_bg::process::composite_preview_solid(
+                &sheet,
+                color,
+                bw,
+                bh,
+                self.bg_aspect_w,
+                self.bg_aspect_h,
+                voff_shift,
+                top_transparent,
+                bottom_transparent,
+            ) {
+                Ok((canvas, hoff, voff)) => Some((canvas, hoff, voff)),
+                Err(_) => Some((sheet, 0, 0)),
+            };
+        }
+        let Some(bg) = self.bg_image.as_ref() else {
+            return Some((sheet, 0, 0));
+        };
         match apply_bg::process::composite_preview(
             &sheet,
             bg,
@@ -957,8 +1055,11 @@ impl DocState {
             .group_preview_frame(group_id)
             .map(|f| f.content_scale)
             .unwrap_or(1.0);
-        let bg = self.bg_image.as_ref().map(|bg| GroupRenderBg {
-            image: bg.clone(),
+        let bg = self.bg_src_size().map(|(src_w, src_h)| GroupRenderBg {
+            image: self.bg_image.clone(),
+            solid: self.bg_solid,
+            src_w,
+            src_h,
             aspect_w: self.bg_aspect_w,
             aspect_h: self.bg_aspect_h,
             voff_shift: self.get_group_voff_shift(group_id),
@@ -1284,6 +1385,7 @@ impl DocState {
             .and_then(|s| s.to_str())
             .unwrap_or("page.png");
         let disk_path = crate::page_cache::write_rgb_png(&image, name)?;
+        let _ = crate::page_cache::write_org_thumb(&image, &disk_path);
         let (w, h) = (image.width(), image.height());
         let page = Page {
             id: new_id(),

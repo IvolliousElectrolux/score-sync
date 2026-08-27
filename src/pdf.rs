@@ -475,6 +475,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
         image
             .save(&out_path)
             .map_err(|e| crate::error::Error::msg(format!("写临时 PNG 失败: {e}")))?;
+        let _ = crate::page_cache::write_org_thumb(&image, &out_path);
         crate::trace::log(&format!("pdf: 识别 {}/{total} …", done + 1));
         crate::detect_cache::detect_and_save(&image, &out_path, ink_threshold, margin);
         crate::trace::log(&format!("pdf: 已写+识别 {}/{total} → 回传 UI", done + 1));

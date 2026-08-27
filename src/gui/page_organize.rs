@@ -4,6 +4,7 @@ use super::*;
 use super::ScoreSyncApp;
 use image::{Frame, ImageBuffer, RgbaImage};
 use smallvec::smallvec;
+use std::sync::atomic::AtomicUsize;
 
 pub(super) struct OrganizeDrag {
     from: usize,
@@ -24,21 +25,7 @@ pub(super) struct PageOrganizeState {
     selected: HashSet<String>,
     anchor: Option<String>,
     cell_bounds: HashMap<usize, Bounds<Pixels>>,
-    thumbs: HashMap<String, Arc<RenderImage>>,
-    thumb_gen: u64,
     drag: Option<OrganizeDrag>,
-}
-
-fn thumbnail_rgb(rgb: image::RgbImage, max_side: u32) -> image::RgbImage {
-    let w = rgb.width().max(1);
-    let h = rgb.height().max(1);
-    let m = w.max(h);
-    if m <= max_side {
-        return rgb;
-    }
-    let tw = ((w as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
-    let th = ((h as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
-    image::imageops::resize(&rgb, tw, th, image::imageops::FilterType::Triangle)
 }
 
 fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
@@ -130,8 +117,6 @@ impl ScoreSyncApp {
             selected,
             anchor: cur,
             cell_bounds: HashMap::new(),
-            thumbs: HashMap::new(),
-            thumb_gen: 0,
             drag: None,
         });
         self.focus_handle.focus(window);
@@ -146,15 +131,19 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn close_page_organize(&mut self, cx: &mut Context<Self>) {
-        if let Some(st) = self.page_organize.as_mut() {
-            st.thumb_gen = st.thumb_gen.wrapping_add(1);
-        }
         self.page_organize = None;
         if matches!(self.drag, Some(DragKind::Scrollbar { which: ScrollList::PageOrganize, .. })) {
             self.drag = None;
         }
         self.try_show_update_dialog(cx);
         cx.notify();
+    }
+
+    pub(super) fn clear_org_thumbs(&mut self) {
+        self.org_thumb_gen = self.org_thumb_gen.wrapping_add(1);
+        for (_, img) in std::mem::take(&mut self.org_thumbs) {
+            self.gpu_drop.push(img);
+        }
     }
 
     pub(super) fn select_all_organize_pages(&mut self, cx: &mut Context<Self>) {
@@ -189,8 +178,10 @@ impl ScoreSyncApp {
         let dead = self.doc.close_pages_at(&idxs);
         for id in &dead {
             self.crop_histories.remove(id);
+            if let Some(img) = self.org_thumbs.remove(id) {
+                self.gpu_drop.push(img);
+            }
             if let Some(st) = self.page_organize.as_mut() {
-                st.thumbs.remove(id);
                 st.selected.remove(id);
             }
         }
@@ -257,45 +248,124 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
-    fn request_organize_thumbs(&mut self, cx: &mut Context<Self>) {
-        let Some(st) = self.page_organize.as_mut() else {
-            return;
-        };
-        let jobs: Vec<(String, PathBuf)> = self
+    pub(super) fn request_organize_thumbs(&mut self, cx: &mut Context<Self>) {
+        enum OrgThumbJob {
+            Jpeg { id: String, jpeg: PathBuf },
+            Mem { id: String, rgb: Arc<image::RgbImage>, disk: PathBuf },
+            Png { id: String, png: PathBuf },
+        }
+        let jobs: Vec<OrgThumbJob> = self
             .doc
             .pages
             .iter()
-            .filter(|p| !st.thumbs.contains_key(&p.id))
-            .map(|p| (p.id.clone(), p.disk_path.clone()))
+            .filter(|p| !self.org_thumbs.contains_key(&p.id))
+            .map(|p| {
+                let jpeg = crate::page_cache::org_thumb_path(&p.disk_path);
+                if jpeg.is_file() {
+                    OrgThumbJob::Jpeg {
+                        id: p.id.clone(),
+                        jpeg,
+                    }
+                } else if let Some(rgb) = p.image.clone() {
+                    OrgThumbJob::Mem {
+                        id: p.id.clone(),
+                        rgb,
+                        disk: p.disk_path.clone(),
+                    }
+                } else {
+                    OrgThumbJob::Png {
+                        id: p.id.clone(),
+                        png: p.disk_path.clone(),
+                    }
+                }
+            })
             .collect();
         if jobs.is_empty() {
             cx.notify();
             return;
         }
-        let gen = st.thumb_gen.wrapping_add(1);
-        st.thumb_gen = gen;
+        let gen = self.org_thumb_gen.wrapping_add(1);
+        self.org_thumb_gen = gen;
+        let peak = self
+            .doc
+            .pages
+            .iter()
+            .map(|p| p.estimated_bytes())
+            .max()
+            .unwrap_or(32 * 1024 * 1024);
+        let mem_n = crate::page_cache::concurrency_for_peak(peak);
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let workers = mem_n.min(cores).min(jobs.len()).max(1);
         let (tx, rx) = async_channel::unbounded::<(String, Arc<RenderImage>)>();
-        std::thread::spawn(move || {
-            for (id, path) in jobs {
-                let Ok(rgb) = crate::page_cache::load_rgb(&path) else {
-                    continue;
-                };
-                let thumb = thumbnail_rgb(rgb, ORG_THUMB_MAX_SIDE);
-                let _ = tx.send_blocking((id, rgb_to_render_image(&thumb)));
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            while let Ok((id, img)) = rx.recv().await {
-                this.update(cx, |view, cx| {
-                    if let Some(st) = view.page_organize.as_mut() {
-                        if st.thumb_gen == gen {
-                            st.thumbs.insert(id, img);
-                            cx.notify();
+        let jobs = Arc::new(jobs);
+        let next = Arc::new(AtomicUsize::new(0));
+        for _ in 0..workers {
+            let jobs = jobs.clone();
+            let next = next.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= jobs.len() {
+                        break;
+                    }
+                    let rendered = match &jobs[i] {
+                        OrgThumbJob::Jpeg { id, jpeg } => crate::page_cache::load_rgb(jpeg)
+                            .ok()
+                            .map(|rgb| (id.clone(), rgb_to_render_image(&rgb))),
+                        OrgThumbJob::Mem { id, rgb, disk } => {
+                            let thumb =
+                                crate::page_cache::shrink_rgb_max(rgb, ORG_THUMB_MAX_SIDE);
+                            let _ = crate::page_cache::save_org_thumb(&thumb, disk);
+                            Some((id.clone(), rgb_to_render_image(&thumb)))
                         }
+                        OrgThumbJob::Png { id, png } => crate::page_cache::load_rgb(png)
+                            .ok()
+                            .map(|rgb| {
+                                let thumb = crate::page_cache::shrink_rgb_max(
+                                    &rgb,
+                                    ORG_THUMB_MAX_SIDE,
+                                );
+                                let _ = crate::page_cache::save_org_thumb(&thumb, png);
+                                (id.clone(), rgb_to_render_image(&thumb))
+                            }),
+                    };
+                    if let Some(item) = rendered {
+                        let _ = tx.send_blocking(item);
+                    }
+                }
+            });
+        }
+        drop(tx);
+        cx.spawn(async move |this, cx| {
+            let mut n = 0u32;
+            while let Ok((id, img)) = rx.recv().await {
+                n += 1;
+                let flush = n == 1 || n % 4 == 0;
+                this.update(cx, |view, cx| {
+                    if view.org_thumb_gen != gen {
+                        return;
+                    }
+                    if !view.doc.pages.iter().any(|p| p.id == id) {
+                        return;
+                    }
+                    if let Some(old) = view.org_thumbs.insert(id, img) {
+                        view.gpu_drop.push(old);
+                    }
+                    if flush && view.page_organize.is_some() {
+                        cx.notify();
                     }
                 })
                 .ok();
             }
+            this.update(cx, |view, cx| {
+                if view.org_thumb_gen == gen && view.page_organize.is_some() {
+                    cx.notify();
+                }
+            })
+            .ok();
         })
         .detach();
         cx.notify();
@@ -517,7 +587,7 @@ impl ScoreSyncApp {
                     truncate_name(&p.title(), 16),
                     st.selected.contains(&p.id),
                     current_id.as_deref() == Some(p.id.as_str()),
-                    st.thumbs.get(&p.id).cloned(),
+                    self.org_thumbs.get(&p.id).cloned(),
                 )
             })
             .collect();
@@ -934,7 +1004,7 @@ impl ScoreSyncApp {
             .doc
             .pages
             .get(*from)
-            .and_then(|p| st.thumbs.get(&p.id).cloned());
+            .and_then(|p| self.org_thumbs.get(&p.id).cloned());
         let gx = *origin_x + (*x - *start_x);
         let gy = *origin_y + (*y - *start_y);
         let label = format!("{}", *from + 1);

@@ -4,22 +4,13 @@ use super::*;
 use super::ScoreSyncApp;
 
 /// `sync_video_pool` 每个分片在主线程收集好、交给后台线程处理的一条素材.
-/// `Rebuild` 情形下 `job` 为 `None` 表示该组合当前没有可用成员片段
-/// (`prepare_group_render_job` 判定为空), 后台线程直接跳过.
-enum VideoPoolGatherEntry {
-    Existing {
-        gid: String,
-        label: String,
-        cache_path: PathBuf,
-        w: u32,
-        h: u32,
-    },
-    Rebuild {
-        gid: String,
-        label: String,
-        cache_path: PathBuf,
-        job: Option<crate::model::GroupRenderJob>,
-    },
+/// `job` 为 `None` 表示该组合当前没有可用成员片段
+/// (`prepare_group_render_job` 判定为空); 后台若渲染失败会尝试沿用已有缓存.
+struct VideoPoolRebuildEntry {
+    gid: String,
+    label: String,
+    cache_path: PathBuf,
+    job: Option<crate::model::GroupRenderJob>,
 }
 
 /// 蒙版/底色预览后台任务的一条成员: 已在内存的页图只带 `Arc` (不拷像素),
@@ -35,13 +26,12 @@ struct MaskPreviewMemberSnap {
 
 struct MaskPreviewBuilt {
     loaded_pages: Vec<(usize, Arc<image::RgbImage>)>,
-    pieces: Vec<(String, image::RgbImage)>,
-    stats: HashMap<String, mask_tool::layout::PieceStats>,
-    rgb: image::RgbImage,
-    render: Arc<RenderImage>,
+    piece_sizes: Vec<(String, u32, u32)>,
     piece_ys: HashMap<String, Option<i32>>,
     tiles: Vec<mask_tool::gui::BlockTile>,
     bg_tile: Option<mask_tool::gui::BlockBgTile>,
+    canvas_w: u32,
+    canvas_h: u32,
     hoff: i64,
     voff: i64,
 }
@@ -75,20 +65,21 @@ fn collect_mask_preview_members(
         .collect()
 }
 
-/// 磁盘解码 + 条带裁切 + 拼合 + 底色合成 + GPU 贴图 (含按目标页裁切的
-/// `BlockBgTile::from_full`)
-/// 全部在这里跑, 调用方必须是后台线程.
+/// 磁盘解码 + 条带裁切 + 分块/底色缩略图贴图, 全部在后台线程跑.
+/// 预览不再把底色烧进整张拼合图: 画布用三层 GPU 贴图 (底色 / 组合 /
+/// 画迹), 逻辑尺寸只来自 `preview_frame`. 终稿拼合仍走 `GroupRenderJob`.
 fn build_mask_preview(
     members: Vec<MaskPreviewMemberSnap>,
     ink_threshold: i32,
     layout: Vec<mask_tool::layout::BlockAdjust>,
     bg_enabled: bool,
     bg_image: Option<Arc<image::RgbImage>>,
+    bg_solid: Option<[u8; 3]>,
+    bg_src_w: u32,
+    bg_src_h: u32,
     bg_aspect_w: u32,
     bg_aspect_h: u32,
     voff_shift: i64,
-    leading_gap: u32,
-    trailing_gap: u32,
     compute_bg_tile: bool,
 ) -> Result<MaskPreviewBuilt, String> {
     let mut loaded_pages = Vec::new();
@@ -115,27 +106,25 @@ fn build_mask_preview(
             mask_tool::layout::compute_piece_stats(img, ink_threshold),
         );
     }
-    let sheet = crate::model::compose_parts_impl(&pieces, &layout, ink_threshold, Some(&stats))
-        .ok_or_else(|| "无法拼合该组合".to_string())?;
-    let (rgb, hoff, voff) = if bg_enabled {
-        if let Some(bg) = bg_image.as_ref() {
-            match apply_bg::process::composite_preview(
-                &sheet,
-                bg,
-                bg_aspect_w,
-                bg_aspect_h,
-                voff_shift,
-                leading_gap,
-                trailing_gap,
-            ) {
-                Ok((canvas, h, v)) => (canvas, h, v),
-                Err(_) => (sheet, 0, 0),
-            }
-        } else {
-            (sheet, 0, 0)
-        }
+    let heights: Vec<(String, u32)> = pieces
+        .iter()
+        .map(|(rid, img)| (rid.clone(), img.height()))
+        .collect();
+    let sheet_w = pieces.iter().map(|(_, img)| img.width()).max().unwrap_or(1);
+    let sheet_h = mask_tool::layout::sheet_height(&heights, &layout);
+    let (canvas_w, canvas_h, hoff, voff) = if bg_enabled && bg_src_w > 0 && bg_src_h > 0 {
+        let frame = apply_bg::process::preview_frame(
+            sheet_w,
+            sheet_h,
+            bg_src_w,
+            bg_src_h,
+            bg_aspect_w,
+            bg_aspect_h,
+            voff_shift,
+        );
+        (frame.canvas_w, frame.canvas_h, frame.hoff, frame.voff)
     } else {
-        (sheet, 0, 0)
+        (sheet_w.max(1), sheet_h.max(1), 0, 0)
     };
     let piece_ys = mask_tool::staff::piece_staff_ys_from_parts(&pieces, ink_threshold);
     let tiles: Vec<mask_tool::gui::BlockTile> = pieces
@@ -146,23 +135,36 @@ fn build_mask_preview(
         })
         .collect();
     let bg_tile = if compute_bg_tile {
-        let sheet_w = pieces.iter().map(|(_, img)| img.width()).max().unwrap_or(1);
-        bg_image.and_then(|img| {
-            mask_tool::gui::BlockBgTile::from_full(&img, bg_aspect_w, bg_aspect_h, sheet_w)
-        })
+        if let Some(color) = bg_solid {
+            mask_tool::gui::BlockBgTile::from_solid(
+                color,
+                bg_aspect_w,
+                bg_aspect_h,
+                sheet_w,
+                bg_src_w,
+                bg_src_h,
+            )
+        } else {
+            bg_image.and_then(|img| {
+                mask_tool::gui::BlockBgTile::from_full(&img, bg_aspect_w, bg_aspect_h, sheet_w)
+            })
+        }
     } else {
         None
     };
-    let render = mask_tool::gui::rgb_to_render_image(&rgb);
+    let piece_sizes: Vec<(String, u32, u32)> = pieces
+        .iter()
+        .map(|(rid, img)| (rid.clone(), img.width(), img.height()))
+        .collect();
+    drop(pieces);
     Ok(MaskPreviewBuilt {
         loaded_pages,
-        pieces,
-        stats,
-        rgb,
-        render,
+        piece_sizes,
         piece_ys,
         tiles,
         bg_tile,
+        canvas_w,
+        canvas_h,
         hoff,
         voff,
     })
@@ -184,6 +186,115 @@ impl ScoreSyncApp {
             return None;
         }
         Some(tile.clone())
+    }
+
+    fn sync_mask_preview_offsets(&mut self) {
+        if let Some(gid) = self.mask_target.as_ref() {
+            if let Some(f) = self.doc.group_preview_frame(gid) {
+                self.mask_preview_hoff = f.hoff;
+                self.mask_preview_voff = f.voff;
+                return;
+            }
+        }
+        self.mask_preview_hoff = 0;
+        self.mask_preview_voff = 0;
+    }
+
+    /// 只换底色层, 不 `clear_view` / 不重解码谱面. 纯色在界面线程即时完成;
+    /// 图片底色缩略图仍丢到后台.
+    pub(super) fn refresh_bg_preview_layer(&mut self, cx: &mut Context<Self>) {
+        if !self.uses_mask_canvas() {
+            return;
+        }
+        let loading = self.mask_tool.read(cx).is_canvas_loading();
+        let has_tiles = self.mask_tool.read(cx).has_block_tiles();
+        if loading || !has_tiles || self.mask_target.is_none() {
+            self.sync_mask_image(cx);
+            return;
+        }
+        let Some(gid) = self.mask_target.clone() else {
+            self.sync_mask_image(cx);
+            return;
+        };
+        let heights = self.doc.group_member_heights(&gid);
+        let layout = self.doc.get_block_layout(&gid).to_vec();
+        let intended = self.intended_voff_target(&gid, &heights, &layout);
+        let bg_applied = self.doc.bg_enabled;
+        if !bg_applied {
+            self.bg_tile_cache = None;
+            self.mask_tool.update(cx, |m, cx| {
+                m.apply_host_bg_tile(None, intended, false);
+                cx.notify();
+            });
+            self.sync_mask_preview_offsets();
+            return;
+        }
+        let sheet_w = self.doc.group_sheet_width(&gid);
+        let aw = self.doc.bg_aspect_w;
+        let ah = self.doc.bg_aspect_h;
+        let gen = self.doc.bg_gen;
+        if let Some(color) = self.doc.bg_solid {
+            let (src_w, src_h) = self.doc.bg_src_size().unwrap_or((sheet_w.max(1), 1));
+            if let Some(tile) =
+                mask_tool::gui::BlockBgTile::from_solid(color, aw, ah, sheet_w, src_w, src_h)
+            {
+                self.bg_tile_cache = Some((gen, sheet_w, tile.clone()));
+                self.mask_tool.update(cx, |m, cx| {
+                    m.apply_host_bg_tile(Some(tile), intended, true);
+                    cx.notify();
+                });
+                self.sync_mask_preview_offsets();
+                return;
+            }
+        }
+        if let Some(cached) = self.cached_bg_tile(gen, aw, ah, sheet_w) {
+            self.mask_tool.update(cx, |m, cx| {
+                m.apply_host_bg_tile(Some(cached), intended, true);
+                cx.notify();
+            });
+            self.sync_mask_preview_offsets();
+            return;
+        }
+        let Some(img) = self.doc.bg_image.clone() else {
+            self.bg_tile_cache = None;
+            self.mask_tool.update(cx, |m, cx| {
+                m.apply_host_bg_tile(None, intended, false);
+                cx.notify();
+            });
+            self.sync_mask_preview_offsets();
+            return;
+        };
+        self.mask_sync_gen = self.mask_sync_gen.wrapping_add(1);
+        let mask_gen = self.mask_sync_gen;
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let tile = mask_tool::gui::BlockBgTile::from_full(&img, aw, ah, sheet_w);
+            let _ = tx.send_blocking(tile);
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(tile) = rx.recv().await else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                if view.mask_sync_gen != mask_gen {
+                    return;
+                }
+                if let Some(t) = tile.clone() {
+                    view.bg_tile_cache = Some((gen, sheet_w, t));
+                }
+                let heights = view.doc.group_member_heights(&gid);
+                let layout = view.doc.get_block_layout(&gid).to_vec();
+                let intended = view.intended_voff_target(&gid, &heights, &layout);
+                view.mask_tool.update(cx, |m, cx| {
+                    m.apply_host_bg_tile(tile, intended, true);
+                    cx.notify();
+                });
+                view.sync_mask_preview_offsets();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn retire_current_render_image(&mut self) {
@@ -615,10 +726,10 @@ impl ScoreSyncApp {
         }
     }
 
-    /// 切蒙版目标 (含侧栏面板首次切入). 磁盘解码、条带裁切、底色合成、
-    /// 谱表锚点扫描、`BlockBgTile::from_full` 等 GPU 贴图转换全部在后台
-    /// 线程; 界面线程只先挂「加载中」占位并收集廉价快照 (页图 `Arc` /
-    /// 磁盘路径). `mask_sync_gen` 保证连续切换时旧结果不会晚到覆盖新目标.
+    /// 切蒙版目标 (含侧栏面板首次切入). 磁盘解码、条带裁切、分块/底色
+    /// 缩略图贴图全部在后台线程; 界面线程只先挂「加载中」占位.
+    /// 预览分三层画, 不在这里烧底色. `mask_sync_gen` 保证连续切换时旧
+    /// 结果不会晚到覆盖新目标.
     pub(super) fn sync_mask_image(&mut self, cx: &mut Context<Self>) {
         if !self.uses_mask_canvas() {
             return;
@@ -656,7 +767,7 @@ impl ScoreSyncApp {
     /// 对齐/全局撤重后刷新当前蒙版预览, 不 `invalidate_session`, 以免冲掉撤重栈.
     ///
     /// 与 `sync_mask_image` 同一套后台生成套路 (谱表锚点扫描 + 各分块/
-    /// 底色 GPU 贴图转换全部挪到后台线程), 复用同一个 `mask_sync_gen`
+    /// 底色缩略图贴图全部挪到后台线程), 复用同一个 `mask_sync_gen`
     /// 代次判重, 避免全局对齐/撤重这类批量操作后卡在界面线程上.
     pub(super) fn refresh_mask_preview_keep_history(&mut self, cx: &mut Context<Self>) {
         if self.side_tool != SideTool::Mask {
@@ -677,9 +788,9 @@ impl ScoreSyncApp {
         self.spawn_mask_preview(gen, gid, label, true, cx);
     }
 
-    /// 收集廉价快照后把解码/裁切/合成/`BlockBgTile::from_full` 全部丢到后台.
+    /// 收集廉价快照后把解码/裁切/缩略图贴图全部丢到后台.
     /// `keep_history`: 对齐/撤重后刷新, 不 `clear_view`, 用
-    /// `replace_session_image_with_render` 保住撤重栈.
+    /// `replace_layered_preview` 保住撤重栈.
     fn spawn_mask_preview(
         &mut self,
         gen: u64,
@@ -717,15 +828,21 @@ impl ScoreSyncApp {
         } else {
             None
         };
-        let bg_image = if self.doc.bg_enabled {
+        let (bg_src_w, bg_src_h) = if let Some(t) = cached_bg_tile.as_ref() {
+            (t.src_width, t.src_height)
+        } else {
+            self.doc.bg_src_size().unwrap_or((0, 0))
+        };
+        let bg_solid = self.doc.bg_solid;
+        let compute_bg_tile = bg_applied
+            && cached_bg_tile.is_none()
+            && (self.doc.bg_image.is_some() || bg_solid.is_some());
+        let bg_image = if compute_bg_tile && bg_solid.is_none() {
             self.doc.bg_image.clone()
         } else {
             None
         };
-        let compute_bg_tile = bg_applied && cached_bg_tile.is_none() && bg_image.is_some();
         let voff_shift = self.doc.get_group_voff_shift(&gid);
-        let leading_gap = self.doc.group_leading_gap(&gid);
-        let trailing_gap = self.doc.group_trailing_gap(&gid);
         let doc_masks = self.doc.get_group_masks(&gid).to_vec();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
@@ -735,11 +852,12 @@ impl ScoreSyncApp {
                 block_layout.clone(),
                 bg_applied,
                 bg_image,
+                bg_solid,
+                bg_src_w,
+                bg_src_h,
                 bg_aspect_w,
                 bg_aspect_h,
                 voff_shift,
-                leading_gap,
-                trailing_gap,
                 compute_bg_tile,
             );
             let _ = tx.send_blocking((result, block_layout));
@@ -775,12 +893,11 @@ impl ScoreSyncApp {
                     view.doc.seed_region_anchors_for_page(idx);
                 }
                 let heights: Vec<(String, u32)> = built
-                    .pieces
+                    .piece_sizes
                     .iter()
-                    .map(|(rid, img)| (rid.clone(), img.height()))
+                    .map(|(rid, _, h)| (rid.clone(), *h))
                     .collect();
-                view.block_stats_cache = built.stats;
-                view.block_pieces_cache = built.pieces;
+                view.block_piece_sizes = built.piece_sizes;
                 view.mask_preview_hoff = built.hoff;
                 view.mask_preview_voff = built.voff;
                 if let Some(t) = built.bg_tile.clone() {
@@ -798,17 +915,17 @@ impl ScoreSyncApp {
                 view.mask_tool.update(cx, |m, cx| {
                     m.set_embed_side_width(side_w);
                     if keep_history {
-                        m.replace_session_image_with_render(
-                            built.rgb,
-                            built.render,
+                        m.replace_layered_preview(
+                            built.canvas_w,
+                            built.canvas_h,
                             masks,
                             guides,
                             cx,
                         );
                     } else {
-                        m.load_rgb_with_render(
-                            built.rgb,
-                            built.render,
+                        m.load_layered_preview(
+                            built.canvas_w,
+                            built.canvas_h,
                             gid,
                             masks,
                             guides,
@@ -845,24 +962,24 @@ impl ScoreSyncApp {
         if !self.doc.bg_enabled {
             return 0;
         }
-        let Some(bg) = self.doc.bg_image.as_ref() else {
+        let Some((bw, bh)) = self.doc.bg_src_size() else {
             return 0;
         };
-        if self.block_pieces_cache.is_empty() {
+        if self.block_piece_sizes.is_empty() {
             return 0;
         }
         let heights: Vec<(String, u32)> = self
-            .block_pieces_cache
+            .block_piece_sizes
             .iter()
-            .map(|(rid, img)| (rid.clone(), img.height()))
+            .map(|(rid, _, h)| (rid.clone(), *h))
             .collect();
-        let sw = self.block_pieces_cache.iter().map(|(_, img)| img.width()).max().unwrap_or(1);
+        let sw = self.block_piece_sizes.iter().map(|(_, w, _)| *w).max().unwrap_or(1);
         let sh = mask_tool::layout::sheet_height(&heights, layout);
         let natural = apply_bg::process::natural_voff(
             sw,
             sh,
-            bg.width(),
-            bg.height(),
+            bw,
+            bh,
             self.doc.bg_aspect_w,
             self.doc.bg_aspect_h,
         );
@@ -881,7 +998,7 @@ impl ScoreSyncApp {
         if !self.doc.bg_enabled {
             return 0;
         }
-        let Some(bg) = self.doc.bg_image.as_ref() else {
+        let Some((bw, bh)) = self.doc.bg_src_size() else {
             return 0;
         };
         if heights.is_empty() {
@@ -892,8 +1009,8 @@ impl ScoreSyncApp {
         let natural = apply_bg::process::natural_voff(
             sw,
             sh,
-            bg.width(),
-            bg.height(),
+            bw,
+            bh,
             self.doc.bg_aspect_w,
             self.doc.bg_aspect_h,
         );
@@ -901,9 +1018,8 @@ impl ScoreSyncApp {
     }
 
     /// 蒙版拖动分块时 (`MaskToolApp::block_layout` 逐帧变化): 拖动过程中
-    /// 只把布局写回文档, 画面由蒙版工具用已缓存的分块 GPU 贴图跟手绘制,
-    /// 避免每帧整图重拼 + 重新上传贴图. 松手 (或撤销/重做) 后再合成一次
-    /// 含底色的最终预览图回填.
+    /// 只把布局写回文档, 画面由蒙版工具用已缓存的分块 GPU 贴图跟手绘制.
+    /// 底色 / 组合 / 画迹始终分三层显示, 松手后不必再拼一张含底色的整图.
     pub(super) fn sync_block_layout_from_mask_tool(
         &mut self,
         mt: &Entity<MaskToolApp>,
@@ -944,61 +1060,17 @@ impl ScoreSyncApp {
         self.doc.set_block_layout(&gid, layout);
         self.doc.set_group_voff_shift(&gid, voff_shift);
         // 先跟蒙版工具当前画布对齐 (拖动中的 live geom, 或撤重刚还原的
-        // geom). 合成结果的 hoff/voff 可能仍有一点点差, 等贴图回来再用
-        // *当时* 的 preview_offsets 补位移, 不能用过期的 mask_preview
-        // (撤重后快照里的蒙版已经是旧坐标系, 再按「合成−拖后预览」挪
-        // 一次会把画笔整体偏掉).
+        // geom). 预览始终用三层贴图, 不必再拼一张含底色的整图回填.
         self.mask_preview_hoff = cur_hoff;
         self.mask_preview_voff = cur_voff;
-        if dragging && has_tiles && !drag_ended {
+        if has_tiles {
+            if !dragging {
+                mt.update(cx, |m, _| m.release_block_tile_preview());
+                self.mark_video_pool_dirty_group(&gid);
+            }
             return;
         }
-        let Some((rgb, hoff, voff)) = self.doc.compose_group_preview_with_parts_and_stats(
-            &gid,
-            &self.block_pieces_cache,
-            &self.block_stats_cache,
-        ) else {
-            mt.update(cx, |m, _| m.release_block_tile_preview());
-            return;
-        };
-        // 拼合本身只是内存搬运 (见 `compose_group_with_parts_and_stats`
-        // 文档), 但 GPU 贴图转换 (`rgb_to_render_image`) 大图上百毫秒;
-        // 松开拖动那一刻若在界面线程上做就会明显卡一拍. 挪到后台线程,
-        // 完成前画面用分块贴图保持拖动/撤重后的最后一帧, 完成后蒙版位移
-        // 与新贴图一起换上 (不拆开两步, 避免中途出现蒙版/画面对不上).
-        self.block_preview_gen = self.block_preview_gen.wrapping_add(1);
-        let gen = self.block_preview_gen;
-        let mt = mt.clone();
-        let gid2 = gid.clone();
-        let (tx, rx) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let render = mask_tool::gui::rgb_to_render_image(&rgb);
-            let _ = tx.send_blocking((rgb, render));
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok((rgb, render)) = rx.recv().await else {
-                this.update(cx, |_, cx| {
-                    mt.update(cx, |m, _| m.release_block_tile_preview());
-                })
-                .ok();
-                return;
-            };
-            this.update(cx, |view, cx| {
-                if view.block_preview_gen != gen {
-                    return; // 又拖了一次/切走了, 这份结果已经过期
-                }
-                mt.update(cx, |m, cx| {
-                    let (h, v) = m.preview_offsets();
-                    m.shift_masks((hoff - h) as i32, (voff - v) as i32);
-                    m.update_base_image_with_render(rgb, render, hoff, voff, cx);
-                });
-                view.mask_preview_hoff = hoff;
-                view.mask_preview_voff = voff;
-                view.mark_video_pool_dirty_group(&gid2);
-            })
-            .ok();
-        })
-        .detach();
+        mt.update(cx, |m, _| m.release_block_tile_preview());
     }
 
     pub(super) fn resolve_mask_target(&self) -> Option<String> {
@@ -1068,6 +1140,62 @@ impl ScoreSyncApp {
         }
     }
 
+    /// 蒙版侧「导出本页」: 预览是三层贴图, 这里才按终稿拼合 (蒙版 + 底色).
+    pub(super) fn export_mask_group_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.flush_mask_to_doc(cx);
+        let Some(gid) = self.mask_target.clone() else {
+            self.mask_tool.update(cx, |m, cx| {
+                m.set_status_text("没有可导出的组合", cx);
+            });
+            return;
+        };
+        let _ = self.doc.ensure_group_pages(&gid);
+        let job = self.doc.prepare_group_render_job(&gid);
+        self.doc.retain_memory_window();
+        let Some(job) = job else {
+            self.mask_tool.update(cx, |m, cx| {
+                m.set_status_text("无法拼合该组合", cx);
+            });
+            return;
+        };
+        self.mask_tool.update(cx, |m, cx| {
+            m.set_status_text("正在导出…", cx);
+        });
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = job.render().and_then(|rgb| {
+                let format = match path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("jpg") | Some("jpeg") => image::ImageFormat::Jpeg,
+                    _ => image::ImageFormat::Png,
+                };
+                rgb.save_with_format(&path, format)
+                    .map_err(|e| format!("保存失败: {e}"))?;
+                Ok(path)
+            });
+            let _ = tx.send_blocking(result);
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.recv().await else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                view.mask_tool.update(cx, |m, cx| {
+                    match result {
+                        Ok(p) => m.set_status_text(format!("已保存: {}", p.display()), cx),
+                        Err(e) => m.set_status_text(e, cx),
+                    }
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// `scroll_other`: 点顶部页签时滚侧栏列表定位; 点侧栏自身则两边都不滚.
     pub(super) fn set_mask_target(&mut self, group_id: String, scroll_other: bool, cx: &mut Context<Self>) {
         if self.mask_target.as_ref() == Some(&group_id) {
@@ -1100,7 +1228,12 @@ impl ScoreSyncApp {
             self.bg.pick_open = false;
             self.bg.batch_open = false;
         }
+        let was_mask_canvas = self.uses_mask_canvas();
         self.side_tool = tool;
+        // 离开蒙版/底色时丢掉还在跑的预览线程, 避免和视频池终稿抢 CPU/内存.
+        if was_mask_canvas && !self.uses_mask_canvas() {
+            self.mask_sync_gen = self.mask_sync_gen.wrapping_add(1);
+        }
         match tool {
             SideTool::Crop => {
                 // 回到分块: 定位到当前蒙版组合所在页并选中该组
@@ -1141,7 +1274,6 @@ impl ScoreSyncApp {
                     "左侧预览组合 (滚轮切换). 右侧选择底色图或纯色, 再应用/取消.".into();
             }
             SideTool::Video => {
-                self.sync_video_pool(cx);
                 self.score_video
                     .read(cx)
                     .focus_handle_ref()
@@ -1151,6 +1283,7 @@ impl ScoreSyncApp {
                 self.hint =
                     "N 插入下一张组合 | 空格播放/暂停 | ←→ 快退快进 | I/O 标记淡入淡出."
                         .into();
+                self.sync_video_pool(cx);
             }
         }
         cx.notify();
@@ -1158,25 +1291,26 @@ impl ScoreSyncApp {
 
     /// 把「输出组合」渲染为终稿写入工程旁持久缓存, 再同步给视频素材池 (LRU 热加载).
     ///
-    /// 每个分片 (chunk) 分两步: 主线程只做必须串行、但很快的部分 (保证
-    /// 页图在内存窗口内 + 收集渲染快照, 见 `DocState::prepare_group_render_job`
-    /// 文档), 拿到快照后立即收窗口释放内存; 真正耗时的拼合 + 蒙版叠加 +
-    /// 底色合成 + PNG 编码 (单张终稿加起来能有两三百毫秒) 全部挪到后台
-    /// 线程. 原实现把这些都堵在 `this.update` 里同步做, 只是分片之间让
-    /// 一下, 分片内部仍是实打实的界面线程卡顿——切到视频面板 (尤其首次,
-    /// 全部组合都要重渲) 会明显卡好一阵.
+    /// 先用磁盘缓存的 PNG 头立刻填池 (预览马上有画面), 再只对脏/缺失的组合
+    /// 后台重渲, 每完成一个分片就 `upsert` 进池. 原先要等全部 chunk 结束才
+    /// `set_pool`, 任一组合卡住或 `job.render` panic 就会一直黑屏、素材池 0 张.
     pub(super) fn sync_video_pool(&mut self, cx: &mut Context<Self>) {
         self.video_sync_gen = self.video_sync_gen.wrapping_add(1);
         let gen = self.video_sync_gen;
         let group_ids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
         let (aw, ah) = (self.doc.bg_aspect_w, self.doc.bg_aspect_h);
-        let fade_bg = sample_paper_rgb(self.doc.bg_image.as_deref());
+        let fade_bg = self.doc.bg_solid.unwrap_or_else(|| {
+            sample_paper_rgb(self.doc.bg_image.as_deref())
+        });
         self.score_video.update(cx, |v, _| {
             v.set_aspect(aw, ah);
             v.set_fade_bg_rgb(fade_bg);
         });
         if group_ids.is_empty() {
-            self.score_video.update(cx, |v, cx| v.set_pool(Vec::new(), cx));
+            self.score_video.update(cx, |v, cx| {
+                v.set_pool(Vec::new(), cx);
+                v.set_pool_status("", cx);
+            });
             return;
         }
         let cache_root = self.pool_cache_dir().join("pool");
@@ -1187,7 +1321,55 @@ impl ScoreSyncApp {
         );
         let all_dirty = self.video_pool_all_dirty;
         let dirty_set = self.video_pool_dirty.clone();
-        // 估算并发: 取当前页峰值近似
+
+        let mut cached_items: Vec<MaterialItem> = Vec::new();
+        let mut rebuild_ids: Vec<String> = Vec::new();
+        for (idx, gid) in group_ids.iter().enumerate() {
+            let cache_path = cache_root.join(format!("{gid}.png"));
+            let need_rebuild = all_dirty || dirty_set.contains(gid) || !cache_path.is_file();
+            if let Ok((w, h)) = image::image_dimensions(&cache_path) {
+                let label = self
+                    .doc
+                    .groups
+                    .get(idx)
+                    .map(|g| g.display_name(idx))
+                    .unwrap_or_else(|| gid.clone());
+                cached_items.push(MaterialItem {
+                    group_id: gid.clone(),
+                    label: label.into(),
+                    width: w,
+                    height: h,
+                    cache_path,
+                });
+            }
+            if need_rebuild {
+                rebuild_ids.push(gid.clone());
+            }
+        }
+        let cached_n = cached_items.len();
+        self.score_video.update(cx, |v, cx| {
+            v.set_pool(cached_items, cx);
+        });
+
+        if rebuild_ids.is_empty() {
+            self.video_pool_all_dirty = false;
+            self.video_pool_dirty.clear();
+            self.score_video
+                .update(cx, |v, cx| v.set_pool_status("", cx));
+            self.status = format!("视频工具 (素材 {cached_n} 张)").into();
+            return;
+        }
+
+        let rebuild_n = rebuild_ids.len();
+        self.score_video.update(cx, |v, cx| {
+            v.set_pool_status(format!("正在更新 {rebuild_n} 张…"), cx);
+        });
+        self.status = if cached_n > 0 {
+            format!("视频工具 (已显示缓存 {cached_n} 张, 后台更新 {rebuild_n} 张)").into()
+        } else {
+            format!("视频工具 (正在生成素材 0/{rebuild_n})").into()
+        };
+
         let peak = self
             .doc
             .pages
@@ -1197,8 +1379,9 @@ impl ScoreSyncApp {
         let conc = crate::page_cache::concurrency_for_peak(peak.max(128 * 1024 * 1024));
 
         cx.spawn(async move |this, cx| {
-            let mut items: Vec<MaterialItem> = Vec::with_capacity(group_ids.len());
-            for (chunk_i, chunk) in group_ids.chunks(conc.max(1)).enumerate() {
+            let mut done = 0usize;
+            let total = rebuild_ids.len();
+            for (chunk_i, chunk) in rebuild_ids.chunks(conc.max(1)).enumerate() {
                 if chunk_i > 0 {
                     cx.background_executor()
                         .timer(Duration::from_millis(1))
@@ -1220,72 +1403,116 @@ impl ScoreSyncApp {
                         };
                         let label = view.doc.groups[idx].display_name(idx);
                         let cache_path = cache_root.join(format!("{gid}.png"));
-                        let need_rebuild =
-                            all_dirty || dirty_set.contains(gid) || !cache_path.is_file();
-                        if need_rebuild {
-                            let _ = view.doc.ensure_group_pages(gid);
-                            let job = view.doc.prepare_group_render_job(gid);
-                            view.doc.retain_memory_window();
-                            out.push(VideoPoolGatherEntry::Rebuild {
-                                gid: gid.clone(),
-                                label,
-                                cache_path,
-                                job,
-                            });
-                        } else if let Ok((w, h)) = image::image_dimensions(&cache_path) {
-                            out.push(VideoPoolGatherEntry::Existing {
-                                gid: gid.clone(),
-                                label,
-                                cache_path,
-                                w,
-                                h,
-                            });
-                        }
+                        let _ = view.doc.ensure_group_pages(gid);
+                        let job = view.doc.prepare_group_render_job(gid);
+                        view.doc.retain_memory_window();
+                        out.push(VideoPoolRebuildEntry {
+                            gid: gid.clone(),
+                            label,
+                            cache_path,
+                            job,
+                        });
                     }
                     Some(out)
                 });
                 let Ok(Some(gathered)) = gathered else {
-                    crate::trace::log(&format!("video_pool: chunk {} 结束 cancelled=true", chunk_i + 1));
+                    crate::trace::log(&format!(
+                        "video_pool: chunk {} 结束 cancelled=true",
+                        chunk_i + 1
+                    ));
                     return;
                 };
                 let (tx, rx) = async_channel::bounded(1);
                 std::thread::spawn(move || {
                     let mut chunk_items = Vec::with_capacity(gathered.len());
                     for entry in gathered {
-                        match entry {
-                            VideoPoolGatherEntry::Existing { gid, label, cache_path, w, h } => {
-                                chunk_items.push(MaterialItem {
-                                    group_id: gid,
+                        let VideoPoolRebuildEntry {
+                            gid,
+                            label,
+                            cache_path,
+                            job,
+                        } = entry;
+                        let mut item = None;
+                        if let Some(job) = job {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                job.render()
+                            })) {
+                                Ok(Ok(rgb)) => {
+                                    if rgb.save(&cache_path).is_ok() {
+                                        item = Some(MaterialItem {
+                                            group_id: gid.clone(),
+                                            label: label.clone().into(),
+                                            width: rgb.width(),
+                                            height: rgb.height(),
+                                            cache_path: cache_path.clone(),
+                                        });
+                                    } else {
+                                        crate::trace::log(&format!(
+                                            "video_pool: {gid} 写入缓存失败"
+                                        ));
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    crate::trace::log(&format!(
+                                        "video_pool: {gid} render 失败: {e}"
+                                    ));
+                                }
+                                Err(_) => {
+                                    crate::trace::log(&format!(
+                                        "video_pool: {gid} render panic, 跳过"
+                                    ));
+                                }
+                            }
+                        } else {
+                            crate::trace::log(&format!(
+                                "video_pool: {gid} 无成员片段, 跳过渲染"
+                            ));
+                        }
+                        if item.is_none() {
+                            if let Ok((w, h)) = image::image_dimensions(&cache_path) {
+                                item = Some(MaterialItem {
+                                    group_id: gid.clone(),
                                     label: label.into(),
                                     width: w,
                                     height: h,
                                     cache_path,
                                 });
+                            } else {
+                                crate::trace::log(&format!(
+                                    "video_pool: {gid} 无缓存且渲染失败, 跳过"
+                                ));
                             }
-                            VideoPoolGatherEntry::Rebuild { gid, label, cache_path, job } => {
-                                let Some(job) = job else { continue };
-                                let Ok(rgb) = job.render() else { continue };
-                                if rgb.save(&cache_path).is_err() {
-                                    continue;
-                                }
-                                chunk_items.push(MaterialItem {
-                                    group_id: gid,
-                                    label: label.into(),
-                                    width: rgb.width(),
-                                    height: rgb.height(),
-                                    cache_path,
-                                });
-                            }
+                        }
+                        if let Some(it) = item {
+                            chunk_items.push(it);
                         }
                     }
                     let _ = tx.send_blocking(chunk_items);
                 });
                 let Ok(chunk_items) = rx.recv().await else {
+                    crate::trace::log(&format!(
+                        "video_pool: chunk {} 工作线程通道关闭",
+                        chunk_i + 1
+                    ));
                     return;
                 };
-                items.extend(chunk_items);
+                done += chunk.len();
                 let still_current = this
-                    .update(cx, |view, _| view.video_sync_gen == gen)
+                    .update(cx, |view, cx| {
+                        if view.video_sync_gen != gen {
+                            return false;
+                        }
+                        view.score_video.update(cx, |v, cx| {
+                            v.upsert_pool_items(chunk_items, &group_ids, cx);
+                            if done < total {
+                                v.set_pool_status(format!("正在更新 {done}/{total}…"), cx);
+                            }
+                        });
+                        let n = view.score_video.read(cx).pool_len();
+                        view.status = format!("视频工具 (素材 {n} 张, 更新 {done}/{total})").into();
+                        cx.notify();
+                        true
+                    })
                     .unwrap_or(false);
                 crate::trace::log(&format!(
                     "video_pool: chunk {} 结束 cancelled={}",
@@ -1301,7 +1528,10 @@ impl ScoreSyncApp {
                 if view.video_sync_gen == gen {
                     view.video_pool_all_dirty = false;
                     view.video_pool_dirty.clear();
-                    view.score_video.update(cx, |v, cx| v.set_pool(items, cx));
+                    let n = view.score_video.read(cx).pool_len();
+                    view.score_video
+                        .update(cx, |v, cx| v.set_pool_status("", cx));
+                    view.status = format!("视频工具 (素材 {n} 张)").into();
                     cx.notify();
                 }
             })
@@ -1700,18 +1930,23 @@ mod mask_preview_wait_probe {
             Vec::new(),
             bg_on,
             Some(bg_arc.clone()),
+            None,
+            bg_arc.width(),
+            bg_arc.height(),
             aspect_w,
             aspect_h,
             voff_shift,
-            0,
-            0,
             true,
         )
         .expect("build_mask_preview");
-        step("build_mask_preview 全流水线 (页已在内存)", t0);
+        step("build_mask_preview 全流水线 (页已在内存, 三层缩略图)", t0);
         black_box(&built);
+        eprintln!(
+            "         画布 {}x{}  hoff={} voff={}",
+            built.canvas_w, built.canvas_h, built.hoff, built.voff
+        );
 
-        eprintln!("--- 只为第一帧画面必需的子集 (裁切+合成+一张预览贴图) ---");
+        eprintln!("--- 旧路径对照: 整图合成 + Triangle 贴图 (已不再走) ---");
         let page2 = decode_rgb(&page_png);
         let piece2 = crate::model::crop_band_fast(&page2, y0, height);
         pieces[0].1 = piece2;

@@ -334,10 +334,13 @@ impl MaskToolApp {
     }
 
     pub(super) fn sample_image_rgb(&self, ix: f32, iy: f32) -> Option<[u8; 3]> {
-        let img = self.rgb_image.as_ref()?;
         if self.img_w == 0 || self.img_h == 0 {
             return None;
         }
+        if !self.block_tiles.is_empty() {
+            return self.sample_layered_rgb(ix, iy);
+        }
+        let img = self.rgb_image.as_ref()?;
         let x = ix.round().clamp(0.0, (self.img_w - 1) as f32) as u32;
         let y = iy.round().clamp(0.0, (self.img_h - 1) as f32) as u32;
         let p = img.get_pixel(x, y);

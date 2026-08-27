@@ -58,13 +58,18 @@ impl MaskToolApp {
         self.pan.x = self.pan.x.clamp(pan_x_min, pan_x_max);
         self.pan.y = self.pan.y.clamp(pan_y_min, pan_y_max);
     }
+    /// 独立打开的整图, 或嵌入宿主时的三层贴图, 都算画布已就绪.
+    pub(super) fn has_canvas_preview(&self) -> bool {
+        self.render_image.is_some() || !self.block_tiles.is_empty()
+    }
+
     pub(super) fn on_view_mouse_down(
         &mut self,
         ev: &MouseDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.render_image.is_none() {
+        if !self.has_canvas_preview() {
             return;
         }
         if ev.click_count >= 2 && ev.button == MouseButton::Left {
@@ -748,7 +753,7 @@ impl MaskToolApp {
     }
 
     pub(super) fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.render_image.is_none() {
+        if !self.has_canvas_preview() {
             return;
         }
         if self.preview_only && !apply_bg::is_primary_mod(&ev.modifiers) {
@@ -1324,9 +1329,9 @@ impl MaskToolApp {
     }
 }
 
-/// 拖动分块时的实时预览: 用加载时上传好的分块/底色 GPU 贴图按当前
-/// layout 摆放, 间隙与扩展区用纯色块填充. 不再每帧生成整张预览图、也不
-/// 再往 GPUI 图集上传新贴图 (那才是卡顿的主因).
+/// 预览始终分三层画: 底色 GPU 贴图、分块谱面贴图、上面的画迹/蒙版.
+/// 用加载时上传好的缩略图按当前 layout 摆放, 间隙与扩展区用纯色块填充.
+/// 不再每帧生成整张预览图, 也不把底色烧进组合.
 fn paint_live_block_tiles(
     window: &mut Window,
     img_bounds: Bounds<Pixels>,
@@ -1374,15 +1379,27 @@ fn paint_live_block_tiles(
     window.with_content_mask(Some(ContentMask { bounds: img_bounds }), |window| {
         if shows_bg {
             if let Some(bg) = bg {
-                // 贴图已是目标页裁切, 铺满预览画布; 不再用完整底色的
-                // bg_left/bg_top 做原点平移 (那会把已裁画布再错位一次).
-                let _ = window.paint_image(
-                    img_bounds,
-                    Corners::default(),
-                    bg.image.clone(),
-                    0,
-                    false,
-                );
+                if let Some(c) = bg.solid {
+                    let fill = rgb(color_rgb_u32(c));
+                    window.paint_quad(quad(
+                        img_bounds,
+                        px(0.),
+                        fill,
+                        px(0.),
+                        fill,
+                        Default::default(),
+                    ));
+                } else {
+                    // 贴图已是目标页裁切, 铺满预览画布; 不再用完整底色的
+                    // bg_left/bg_top 做原点平移 (那会把已裁画布再错位一次).
+                    let _ = window.paint_image(
+                        img_bounds,
+                        Corners::default(),
+                        bg.image.clone(),
+                        0,
+                        false,
+                    );
+                }
             }
         } else {
             let white = rgb(0xffffff);

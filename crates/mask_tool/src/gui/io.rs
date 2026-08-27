@@ -144,11 +144,76 @@ impl MaskToolApp {
     }
 
     /// 立刻清空画布并挂「加载中」占位, 像素由宿主在后台生成完再
-    /// [`Self::load_rgb_with_render`]. 界面线程只做这一步, 好让面板/组合
+    /// [`Self::load_layered_preview`]. 界面线程只做这一步, 好让面板/组合
     /// 切换先跟手画出来.
     pub fn begin_preview_load(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.clear_view(message, cx);
         self.canvas_loading = true;
+        cx.notify();
+    }
+
+    /// 嵌入宿主: 只建立会话/蒙版/画布逻辑尺寸, 画面用随后
+    /// [`Self::set_block_tiles`] 的三层贴图, 不接收一张烧好底色的整图.
+    pub fn load_layered_preview(
+        &mut self,
+        canvas_w: u32,
+        canvas_h: u32,
+        session_key: String,
+        masks: Vec<MaskRect>,
+        guides: GuideState,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.stash_history();
+        let (w, h) = (canvas_w.max(1), canvas_h.max(1));
+        self.image_path = None;
+        self.session_key = Some(session_key.clone());
+        self.rgb_image = None;
+        self.replace_render_image(None);
+        self.img_w = w;
+        self.img_h = h;
+        self.clamp_brush_size();
+        self.masks = masks;
+        self.guides = guides;
+        self.guide_selected.clear();
+        self.selected.clear();
+        self.restore_history_for(&session_key);
+        self.zoom = 1.0;
+        self.pan = point(0.0, 0.0);
+        self.user_zoomed = false;
+        self.drag = None;
+        self.poly_draft = None;
+        self.poly_cursor = None;
+        self.block_drag_freeze = None;
+        self.status = format!("{label} ({w}×{h}) · 蒙版 {} 个", self.masks.len()).into();
+        self.hint = format!(
+            "编辑: {label}\n蒙版坐标相对本组合拼合图; 各组合独立 (共享脚注可在不同组画不同遮盖)."
+        )
+        .into();
+        self.canvas_loading = false;
+        cx.notify();
+    }
+
+    /// 对齐/全局撤重后刷新当前会话预览, 不碰撤重栈、缩放和平移.
+    pub fn replace_layered_preview(
+        &mut self,
+        canvas_w: u32,
+        canvas_h: u32,
+        masks: Vec<MaskRect>,
+        guides: GuideState,
+        cx: &mut Context<Self>,
+    ) {
+        let (w, h) = (canvas_w.max(1), canvas_h.max(1));
+        self.rgb_image = None;
+        self.replace_render_image(None);
+        self.img_w = w;
+        self.img_h = h;
+        self.clamp_brush_size();
+        self.masks = masks;
+        self.guides = guides;
+        self.guide_selected.clear();
+        self.canvas_loading = false;
+        self.block_drag_freeze = None;
         cx.notify();
     }
 
@@ -296,6 +361,34 @@ impl MaskToolApp {
     }
 
     pub fn export_image(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.embed_side_width > 1.0 {
+            // 嵌入时预览是三层贴图, 整图像素在宿主那边; 这里只弹路径,
+            // 宿主取出后按终稿拼合 (蒙版 + 底色).
+            if self.session_key.is_none() {
+                self.status = "请先打开图片.".into();
+                cx.notify();
+                return;
+            }
+            let file_name = "masked.png".to_string();
+            Self::spawn_native_dialog(
+                cx,
+                move || {
+                    rfd::FileDialog::new()
+                        .set_title("导出已遮盖图片")
+                        .add_filter("PNG", &["png"])
+                        .add_filter("JPEG", &["jpg", "jpeg"])
+                        .set_file_name(file_name)
+                        .save_file()
+                },
+                |this, path, cx| {
+                    if let Some(path) = path {
+                        this.pending_export_path = Some(path);
+                        cx.notify();
+                    }
+                },
+            );
+            return;
+        }
         if self.rgb_image.is_none() {
             self.status = "请先打开图片.".into();
             cx.notify();

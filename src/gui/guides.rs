@@ -320,9 +320,9 @@ impl ScoreSyncApp {
         current: Option<(mask_tool::staff::AlignGroupInput, i64)>,
     ) -> AlignAllJob {
         let bg = if self.doc.bg_enabled {
-            self.doc.bg_image.as_ref().map(|bg| AlignBg {
-                bw: bg.width(),
-                bh: bg.height(),
+            self.doc.bg_src_size().map(|(bw, bh)| AlignBg {
+                bw,
+                bh,
                 aspect_w: self.doc.bg_aspect_w,
                 aspect_h: self.doc.bg_aspect_h,
             })
@@ -504,7 +504,7 @@ impl ScoreSyncApp {
         if !self.doc.bg_enabled {
             return 0;
         }
-        let Some(bg) = self.doc.bg_image.as_ref() else {
+        let Some((bw, bh)) = self.doc.bg_src_size() else {
             return 0;
         };
         if heights.is_empty() {
@@ -515,8 +515,8 @@ impl ScoreSyncApp {
         let natural = apply_bg::process::natural_voff(
             sw,
             sh,
-            bg.width(),
-            bg.height(),
+            bw,
+            bh,
             self.doc.bg_aspect_w,
             self.doc.bg_aspect_h,
         );

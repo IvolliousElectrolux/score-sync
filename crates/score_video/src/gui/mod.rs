@@ -87,6 +87,11 @@ pub struct ScoreVideoApp {
     /// 素材池整体刷新代数 (`set_pool` 自增), 防止某个素材后台解码到一半
     /// 素材池又整体换了一批 (同 group_id 但内容已变), 旧结果晚到写脏缓存.
     pool_gen: u64,
+    /// 单条素材内容世代: `upsert_pool_items` 覆盖某 group 时自增, 避免
+    /// 旧解码任务在 `pool_gen` 未变时把过期图写进缓存.
+    item_gen: HashMap<String, u64>,
+    /// 素材池标题旁的短状态 (如「正在更新 3/12」); 空串则不显示.
+    pool_status: SharedString,
     timeline: Timeline,
     audio: AudioEngine,
     aspect_w: u32,
@@ -158,6 +163,8 @@ impl ScoreVideoApp {
             render_cache: std::collections::HashMap::new(),
             image_loading: std::collections::HashSet::new(),
             pool_gen: 0,
+            item_gen: HashMap::new(),
+            pool_status: SharedString::default(),
             timeline: Timeline::new(),
             audio: AudioEngine::new(),
             aspect_w: 16,

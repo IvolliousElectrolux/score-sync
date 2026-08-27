@@ -334,6 +334,7 @@ impl ScoreSyncApp {
                             view.pdf_importing = false;
                             view.refresh_render(cx);
                             view.start_hydrate_all(true, cx);
+                            view.request_organize_thumbs(cx);
                         }
                     }
                 })
@@ -486,6 +487,7 @@ impl ScoreSyncApp {
                         view.doc = doc;
                         view.project_path = Some(path.clone());
                         view.dirty = false;
+                        view.clear_org_thumbs();
                         view.video_pool_all_dirty = false;
                         view.video_pool_dirty.clear();
                         config::remember_last_project(&path);
@@ -592,6 +594,7 @@ impl ScoreSyncApp {
         self.doc.mask_prefs = mask_prefs.clone();
         self.project_path = None;
         self.dirty = false;
+        self.clear_org_thumbs();
         self.video_pool_all_dirty = true;
         self.video_pool_dirty.clear();
         self.drag = None;

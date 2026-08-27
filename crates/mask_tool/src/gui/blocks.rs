@@ -1,9 +1,7 @@
-//! 「组合分块」拖动调整: 几何/命中测试. 实际重新拼接 (含底色合成) 由
-//! 宿主负责 (`compose_group_preview` 之类既有逻辑), 这里只算位置/尺寸,
-//! 换算成命中测试与叠加线用的坐标. 拖动中途只改 `block_layout` 并
-//! `cx.notify()`, 画面用加载时上传好的分块 GPU 贴图按新位置绘制 (不再
-//! 每帧整图重拼/重新上传); 松手后继续画贴图, 等宿主 observe 到变化并用
-//! [`Self::update_base_image`] 换回含底色合成的整图, 避免中间闪一帧旧图.
+//! 「组合分块」拖动调整: 几何/命中测试. 预览始终用分块/底色缩略图贴图
+//! 分三层绘制 (底色 / 组合 / 画迹), 这里只算位置/尺寸, 换算成命中测试与
+//! 叠加线用的坐标. 拖动中途只改 `block_layout` 并 `cx.notify()`, 不再每帧
+//! 整图重拼/重新上传; 终稿拼合由宿主在导出时做.
 
 use super::*;
 use crate::layout;
@@ -17,10 +15,12 @@ pub(crate) enum BlockHitZone {
 }
 
 /// 单个分块的 GPU 贴图 (原始裁切, 未应用 layout), 拖动时只改绘制位置.
+/// `thumb` 与 GPU 贴图同尺寸, 供滴管在三层预览上取样, 不必持有整图 RGB.
 #[derive(Clone)]
 pub struct BlockTile {
     pub region_id: String,
     pub image: Arc<RenderImage>,
+    pub thumb: Arc<image::RgbImage>,
     pub width: u32,
     pub height: u32,
     pub top_fill: [u8; 3],
@@ -30,9 +30,11 @@ pub struct BlockTile {
 impl BlockTile {
     pub fn from_piece(region_id: String, img: &image::RgbImage, stats: crate::layout::PieceStats) -> Self {
         let (width, height) = img.dimensions();
+        let (thumb, image) = rgb_to_thumb_and_render(img);
         Self {
             region_id,
-            image: rgb_to_render_image(img),
+            image,
+            thumb,
             width,
             height,
             top_fill: mean_to_u8(stats.top.0),
@@ -42,12 +44,13 @@ impl BlockTile {
 }
 
 /// 工程底色的 GPU 贴图: 完整底色只作备份, 这里上传的是按目标页
-/// ([`apply_bg::process::page_size`]) 裁好的恰好大小画布. 拖动时铺满预览,
-/// 不再按完整扫描图原点平移裁剪.
+/// ([`apply_bg::process::page_size`]) 裁好后再缩到贴图上限的画布.
+/// 预览铺满; 不再按完整扫描图原点平移裁剪, 也不把整页 RGB 送去 Triangle.
 #[derive(Clone)]
 pub struct BlockBgTile {
     pub image: Arc<RenderImage>,
-    /// 裁切后的目标画布宽高 (绘制铺满预览).
+    pub thumb: Arc<image::RgbImage>,
+    /// 裁切后的目标画布宽高 (逻辑尺寸; GPU/thumb 可能更小).
     pub width: u32,
     pub height: u32,
     /// 完整底色备份的像素尺寸, 只给 `preview_frame` / `natural_voff`.
@@ -55,10 +58,12 @@ pub struct BlockBgTile {
     pub src_height: u32,
     pub aspect_w: u32,
     pub aspect_h: u32,
+    /// 纯色底色: 预览画色块, 不上传大贴图. 改色只改这个字段.
+    pub solid: Option<[u8; 3]>,
 }
 
 impl BlockBgTile {
-    /// 从完整底色备份裁出当前谱面宽对应的目标页, 再上传 GPU 贴图.
+    /// 从完整底色备份按目标页矩形直接缩到贴图上限, 不先拷一整页再 Triangle.
     /// 底色装不下该页时返回 `None`.
     pub fn from_full(
         full: &image::RgbImage,
@@ -66,17 +71,51 @@ impl BlockBgTile {
         aspect_h: u32,
         sheet_w: u32,
     ) -> Option<Self> {
-        let crop = apply_bg::process::crop_bg_to_page(full, aspect_w, aspect_h, sheet_w)?;
-        let (width, height) = crop.dimensions();
+        let (left, top, width, height) =
+            apply_bg::process::bg_page_rect(full.width(), full.height(), aspect_w, aspect_h, sheet_w)?;
+        let thumb = Arc::new(crop_to_thumb(full, left, top, width, height, GPU_TEX_MAX_SIDE));
         Some(Self {
-            image: rgb_to_render_image(&crop),
+            image: rgb_to_render_image_raw(&thumb),
+            thumb,
             width,
             height,
             src_width: full.width(),
             src_height: full.height(),
             aspect_w,
             aspect_h,
+            solid: None,
         })
+    }
+
+    /// 纯色底色贴图: 1×1 缩略图 + 逻辑页尺寸, 预览画色块不采样大图.
+    /// `src_w`/`src_h` 须能盖住 [`apply_bg::process::page_size`].
+    pub fn from_solid(
+        color: [u8; 3],
+        aspect_w: u32,
+        aspect_h: u32,
+        sheet_w: u32,
+        src_w: u32,
+        src_h: u32,
+    ) -> Option<Self> {
+        let (_left, _top, width, height) =
+            apply_bg::process::bg_page_rect(src_w, src_h, aspect_w, aspect_h, sheet_w)?;
+        let thumb = Arc::new(image::RgbImage::from_pixel(1, 1, image::Rgb(color)));
+        Some(Self {
+            image: rgb_to_render_image_raw(&thumb),
+            thumb,
+            width,
+            height,
+            src_width: src_w,
+            src_height: src_h,
+            aspect_w,
+            aspect_h,
+            solid: Some(color),
+        })
+    }
+
+    pub fn recolor_solid(&mut self, color: [u8; 3]) {
+        self.solid = Some(color);
+        self.thumb = Arc::new(image::RgbImage::from_pixel(1, 1, image::Rgb(color)));
     }
 }
 
@@ -88,23 +127,148 @@ fn mean_to_u8(m: [f32; 3]) -> [u8; 3] {
     ]
 }
 
+fn sample_thumb(thumb: &image::RgbImage, logical_w: u32, logical_h: u32, lx: f32, ly: f32) -> Option<[u8; 3]> {
+    let (tw, th) = thumb.dimensions();
+    if tw == 0 || th == 0 || logical_w == 0 || logical_h == 0 {
+        return None;
+    }
+    let x = (lx * tw as f32 / logical_w as f32).clamp(0.0, (tw - 1) as f32).round() as u32;
+    let y = (ly * th as f32 / logical_h as f32).clamp(0.0, (th - 1) as f32).round() as u32;
+    let p = thumb.get_pixel(x.min(tw - 1), y.min(th - 1));
+    Some([p[0], p[1], p[2]])
+}
+
 /// GPUI 图集按整图上传; 高清页一次就是几十 MB, 切页还不 drop,
 /// 按钮一按就要重绘整棵树, 卡半拍. 显示贴图限最长边, 命中/识别仍用原图像素.
 pub const GPU_TEX_MAX_SIDE: u32 = 2048;
 
-/// RGB → BGRA `RenderImage` (GPUI 贴图). 按行整块展开, 不走逐像素
-/// `get_pixel`/`put_pixel`; 拖动分块的热路径会反复用到, 加载分块贴图
-/// 与松手后回填整图都走这里. 超过 [`GPU_TEX_MAX_SIDE`] 先缩小再上传.
+/// RGB → BGRA `RenderImage` (GPUI 贴图). 超过 [`GPU_TEX_MAX_SIDE`] 用
+/// 面积平均缩成缩略图再上传 (大倍率下比 Triangle 快一个数量级, 预览
+/// 本来也装不进 2048 以上的细节).
 pub fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
     let (w, h) = rgb.dimensions();
-    let m = w.max(h);
-    if m > GPU_TEX_MAX_SIDE {
-        let tw = ((w as u64).saturating_mul(GPU_TEX_MAX_SIDE as u64) / m as u64).max(1) as u32;
-        let th = ((h as u64).saturating_mul(GPU_TEX_MAX_SIDE as u64) / m as u64).max(1) as u32;
-        let scaled = image::imageops::resize(rgb, tw, th, image::imageops::FilterType::Triangle);
+    if w.max(h) > GPU_TEX_MAX_SIDE {
+        let scaled = downscale_to_max_side(rgb, GPU_TEX_MAX_SIDE);
         return rgb_to_render_image_raw(&scaled);
     }
     rgb_to_render_image_raw(rgb)
+}
+
+fn rgb_to_thumb_and_render(rgb: &image::RgbImage) -> (Arc<image::RgbImage>, Arc<RenderImage>) {
+    let (w, h) = rgb.dimensions();
+    if w.max(h) > GPU_TEX_MAX_SIDE {
+        let thumb = Arc::new(downscale_to_max_side(rgb, GPU_TEX_MAX_SIDE));
+        let image = rgb_to_render_image_raw(&thumb);
+        (thumb, image)
+    } else {
+        let thumb = Arc::new(rgb.clone());
+        let image = rgb_to_render_image_raw(rgb);
+        (thumb, image)
+    }
+}
+
+fn gpu_scaled_dims(w: u32, h: u32, max_side: u32) -> (u32, u32) {
+    let m = w.max(h);
+    if m <= max_side || max_side == 0 {
+        return (w.max(1), h.max(1));
+    }
+    let tw = ((w as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+    let th = ((h as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+    (tw, th)
+}
+
+/// 把 `rgb` 缩到最长边 ≤ `max_side` (面积平均, 保持宽高比).
+pub fn downscale_to_max_side(rgb: &image::RgbImage, max_side: u32) -> image::RgbImage {
+    let (w, h) = rgb.dimensions();
+    let (tw, th) = gpu_scaled_dims(w, h, max_side);
+    if (tw, th) == (w, h) {
+        return rgb.clone();
+    }
+    area_average(rgb, 0, 0, w, h, tw, th)
+}
+
+/// 从 `src` 的 `(left, top, cw × ch)` 直接缩到最长边 ≤ `max_side`,
+/// 不先分配一整页裁切缓冲.
+fn crop_to_thumb(
+    src: &image::RgbImage,
+    left: u32,
+    top: u32,
+    cw: u32,
+    ch: u32,
+    max_side: u32,
+) -> image::RgbImage {
+    let (tw, th) = gpu_scaled_dims(cw.max(1), ch.max(1), max_side);
+    area_average(src, left, top, cw.max(1), ch.max(1), tw, th)
+}
+
+/// 把源矩形映射到 `tw × th`: 每个目标像素对覆盖的源像素做箱式平均.
+/// 大倍率缩略比 `FilterType::Triangle` 便宜得多, 预览观感也够用.
+fn area_average(
+    src: &image::RgbImage,
+    left: u32,
+    top: u32,
+    cw: u32,
+    ch: u32,
+    tw: u32,
+    th: u32,
+) -> image::RgbImage {
+    let sw = src.width();
+    let sh = src.height();
+    let mut out = image::RgbImage::new(tw.max(1), th.max(1));
+    if tw == 0 || th == 0 || cw == 0 || ch == 0 {
+        return out;
+    }
+    let src_buf: &[u8] = src;
+    let dst_buf: &mut [u8] = &mut out;
+    let tw = tw.max(1);
+    let th = th.max(1);
+    for y in 0..th {
+        let sy0 = top.saturating_add(((y as u64 * ch as u64) / th as u64) as u32);
+        let sy1 = top
+            .saturating_add((((y as u64 + 1) * ch as u64 + th as u64 - 1) / th as u64) as u32)
+            .min(top.saturating_add(ch))
+            .min(sh);
+        let sy1 = sy1.max(sy0.saturating_add(1).min(sh));
+        for x in 0..tw {
+            let sx0 = left.saturating_add(((x as u64 * cw as u64) / tw as u64) as u32);
+            let sx1 = left
+                .saturating_add((((x as u64 + 1) * cw as u64 + tw as u64 - 1) / tw as u64) as u32)
+                .min(left.saturating_add(cw))
+                .min(sw);
+            let sx1 = sx1.max(sx0.saturating_add(1).min(sw));
+            let mut rs = 0u64;
+            let mut gs = 0u64;
+            let mut bs = 0u64;
+            let mut n = 0u64;
+            for sy in sy0..sy1 {
+                if sy >= sh {
+                    break;
+                }
+                let row = sy as usize * sw as usize * 3;
+                for sx in sx0..sx1 {
+                    if sx >= sw {
+                        break;
+                    }
+                    let i = row + sx as usize * 3;
+                    rs += src_buf[i] as u64;
+                    gs += src_buf[i + 1] as u64;
+                    bs += src_buf[i + 2] as u64;
+                    n += 1;
+                }
+            }
+            let o = (y as usize * tw as usize + x as usize) * 3;
+            if n == 0 {
+                dst_buf[o] = 0;
+                dst_buf[o + 1] = 0;
+                dst_buf[o + 2] = 0;
+            } else {
+                dst_buf[o] = (rs / n) as u8;
+                dst_buf[o + 1] = (gs / n) as u8;
+                dst_buf[o + 2] = (bs / n) as u8;
+            }
+        }
+    }
+    out
 }
 
 fn rgb_to_render_image_raw(rgb: &image::RgbImage) -> Arc<RenderImage> {
@@ -172,15 +336,47 @@ impl MaskToolApp {
         }
         self.block_tiles = tiles;
         self.block_bg = bg;
-        // 只填底色裁切原点 (完整备份上的页矩形), 不动 hoff/voff/img
-        // 尺寸——那些以宿主刚合成的预览图为准. 绘制用的是已裁好的目标
-        // 页贴图, 铺满画布, 不再按这个原点平移.
+        // 预览始终分三层画 (底色贴图 / 分块贴图 / 画迹), 画布尺寸跟
+        // `preview_frame` 走, 不再等宿主合成一张整图再定宽高.
         if let Some(frame) = self.compute_preview_frame() {
-            self.block_bg_left = frame.bg_left;
-            self.block_bg_top = frame.bg_top;
-            self.block_shows_bg = frame.shows_bg;
-            self.content_scale = frame.content_scale;
+            self.apply_preview_frame(frame);
         }
+    }
+
+    /// 宿主只换底色层 (应用/取消/改纯色), 分块贴图不动, 避免整页重解码.
+    pub fn apply_host_bg_tile(
+        &mut self,
+        bg: Option<BlockBgTile>,
+        voff_target: i64,
+        bg_applied: bool,
+    ) {
+        let old_bg = self.block_bg.take();
+        if let Some(old) = old_bg {
+            let reuse = bg
+                .as_ref()
+                .map(|n| Arc::ptr_eq(&n.image, &old.image))
+                .unwrap_or(false);
+            if !reuse {
+                self.retire_gpu_image(Some(old.image));
+            }
+        }
+        self.block_bg = bg;
+        self.voff_target = voff_target;
+        self.bg_applied = bg_applied;
+        self.block_drag_freeze = None;
+        self.refresh_preview_geom();
+    }
+
+    /// 纯色已在画时只改颜色, 不动几何 / GPU 贴图.
+    pub fn recolor_host_bg_solid(&mut self, color: [u8; 3]) -> bool {
+        let Some(bg) = self.block_bg.as_mut() else {
+            return false;
+        };
+        if bg.solid.is_none() {
+            return false;
+        }
+        bg.recolor_solid(color);
+        true
     }
 
     pub fn is_block_dragging(&self) -> bool {
@@ -192,11 +388,9 @@ impl MaskToolApp {
         )
     }
 
-    /// 拖动中, 或松手/撤重后整图尚未回填: 用分块贴图按当前 layout 画,
-    /// 不要闪回上一张合成图.
+    /// 有分块贴图就按三层画 (底色 / 组合 / 画迹), 不再等一张烧好底色的整图.
     pub fn wants_block_tile_preview(&self) -> bool {
         !self.block_tiles.is_empty()
-            && (self.is_block_dragging() || self.block_drag_freeze.is_some())
     }
 
     /// 在当前画布尺寸上锁住贴图预览 (撤重/对齐后整图尚未回填时).
@@ -215,6 +409,99 @@ impl MaskToolApp {
 
     pub fn has_block_tiles(&self) -> bool {
         !self.block_tiles.is_empty()
+    }
+
+    /// 按与 `paint_live_block_tiles` 相同的几何从缩略图层取样 (底色 → 组合).
+    pub(super) fn sample_layered_rgb(&self, ix: f32, iy: f32) -> Option<[u8; 3]> {
+        if self.img_w == 0 || self.img_h == 0 || self.block_tiles.is_empty() {
+            return None;
+        }
+        let x = ix.clamp(0.0, (self.img_w - 1) as f32);
+        let y = iy.clamp(0.0, (self.img_h - 1) as f32);
+        let cs = self.content_scale_or_1();
+        let hoff = self.block_hoff as f32;
+        let voff = self.block_voff as f32;
+        let canvas_x = |sx: f32| hoff + sx * cs;
+        let canvas_y = |sy: f32| voff + sy * cs;
+        let canvas_s = |s: f32| s * cs;
+        let sheet_w = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1) as f32;
+        let hx = canvas_x(0.0);
+        let dw = canvas_s(sheet_w);
+        let in_sheet_x = x >= hx && x < hx + dw;
+
+        let mut yy: i64 = 0;
+        let mut prev_bottom: Option<[u8; 3]> = None;
+        let layout = &self.block_layout;
+        for (i, tile) in self.block_tiles.iter().enumerate() {
+            let adj = BlockAdjust::find(layout, &tile.region_id)
+                .cloned()
+                .unwrap_or_default();
+            let (gap, ext_top, content_h, ext_bottom, _trim_top) =
+                crate::layout::effective_metrics(tile.height as i32, &adj);
+            if gap > 0 {
+                if i > 0 && in_sheet_x {
+                    if let Some(prev) = prev_bottom {
+                        let top_half = gap / 2;
+                        let y0 = canvas_y(yy as f32);
+                        let y_mid = canvas_y((yy + top_half as i64) as f32);
+                        let y1 = canvas_y((yy + gap as i64) as f32);
+                        if top_half > 0 && y >= y0 && y < y_mid {
+                            return Some(prev);
+                        }
+                        if y >= y_mid && y < y1 {
+                            return Some(tile.top_fill);
+                        }
+                    }
+                }
+                yy += gap as i64;
+            }
+            if ext_top > 0 && in_sheet_x {
+                let y0 = canvas_y(yy as f32);
+                let y1 = canvas_y((yy + ext_top as i64) as f32);
+                if y >= y0 && y < y1 {
+                    return Some(tile.top_fill);
+                }
+            }
+            let content_y = yy + ext_top as i64;
+            if content_h > 0 && in_sheet_x {
+                let piece_origin_y = canvas_y((yy + adj.extra_top as i64) as f32);
+                let clip_y0 = canvas_y(content_y as f32);
+                let clip_y1 = canvas_y((content_y + content_h as i64) as f32);
+                if y >= clip_y0 && y < clip_y1 {
+                    let local_x = (x - hx) / cs;
+                    let local_y = (y - piece_origin_y) / cs;
+                    if let Some(rgb) = sample_thumb(
+                        &tile.thumb,
+                        tile.width,
+                        tile.height,
+                        local_x,
+                        local_y,
+                    ) {
+                        return Some(rgb);
+                    }
+                }
+            }
+            yy += ext_top as i64 + content_h as i64;
+            if ext_bottom > 0 && in_sheet_x {
+                let y0 = canvas_y(yy as f32);
+                let y1 = canvas_y((yy + ext_bottom as i64) as f32);
+                if y >= y0 && y < y1 {
+                    return Some(tile.bottom_fill);
+                }
+                yy += ext_bottom as i64;
+            }
+            prev_bottom = Some(tile.bottom_fill);
+        }
+
+        if self.block_shows_bg {
+            if let Some(bg) = self.block_bg.as_ref() {
+                if let Some(c) = bg.solid {
+                    return Some(c);
+                }
+                return sample_thumb(&bg.thumb, bg.width, bg.height, x, y);
+            }
+        }
+        Some([255, 255, 255])
     }
 
     pub fn preview_offsets(&self) -> (i64, i64) {
@@ -833,6 +1120,16 @@ mod gpu_tex_tests {
     use image::RgbImage;
 
     #[test]
+    fn downscale_keeps_aspect_and_caps_side() {
+        let img = RgbImage::from_pixel(3000, 4000, image::Rgb([10, 20, 30]));
+        let thumb = super::downscale_to_max_side(&img, GPU_TEX_MAX_SIDE);
+        let (w, h) = thumb.dimensions();
+        assert!(w.max(h) <= GPU_TEX_MAX_SIDE);
+        assert_eq!(w * 4000, h * 3000);
+        assert_eq!(*thumb.get_pixel(0, 0), image::Rgb([10, 20, 30]));
+    }
+
+    #[test]
     fn huge_rgb_is_capped_for_gpu() {
         let img = RgbImage::from_pixel(3000, 4000, image::Rgb([10, 20, 30]));
         let tex = rgb_to_render_image(&img);
@@ -863,5 +1160,21 @@ mod gpu_tex_tests {
     fn from_full_rejects_undersized_bg() {
         let bg = RgbImage::from_pixel(50, 50, image::Rgb([10, 20, 30]));
         assert!(BlockBgTile::from_full(&bg, 16, 9, 200).is_none());
+    }
+
+    #[test]
+    fn from_solid_covers_page_without_full_image() {
+        let sheet_w = 200u32;
+        let (src_w, src_h) = apply_bg::process::page_size(400, 16, 9);
+        let tile = BlockBgTile::from_solid([10, 20, 30], 16, 9, sheet_w, src_w, src_h)
+            .expect("virtual src covers page");
+        let (cw, ch) = apply_bg::process::page_size(sheet_w, 16, 9);
+        assert_eq!((tile.width, tile.height), (cw, ch));
+        assert_eq!(tile.solid, Some([10, 20, 30]));
+        tile.thumb.get_pixel(0, 0);
+        let mut tile = tile;
+        tile.recolor_solid([1, 2, 3]);
+        assert_eq!(tile.solid, Some([1, 2, 3]));
+        assert_eq!(*tile.thumb.get_pixel(0, 0), image::Rgb([1, 2, 3]));
     }
 }

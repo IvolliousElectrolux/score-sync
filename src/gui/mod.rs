@@ -120,12 +120,9 @@ pub(crate) struct ScoreSyncApp {
     /// 当前蒙版预览图相对拼合图的横向/纵向偏移 (叠加工程底色补边时非零)
     mask_preview_hoff: i64,
     mask_preview_voff: i64,
-    /// 各分块背景色统计缓存 (region_id -> 统计量), 供拖动分块时每帧重拼
-    /// 预览图复用, 避免每帧重新扫描像素算均值/标准差.
-    block_stats_cache: std::collections::HashMap<String, mask_tool::layout::PieceStats>,
-    /// 当前蒙版编辑目标各分块的原始裁切片段缓存 (与 `group_member_pieces`
-    /// 同序), 供拖动分块时每帧重拼预览图复用, 避免每帧重新从页图裁切.
-    block_pieces_cache: Vec<(String, image::RgbImage)>,
+    /// 当前蒙版编辑目标各分块的原始宽高 (region_id, w, h), 只给
+    /// `natural_voff` / `voff_shift` 反算用, 不保留整段 RGB.
+    block_piece_sizes: Vec<(String, u32, u32)>,
     /// 底色 GPU 贴图缓存 (`bg_gen` + 谱面宽 + 纵横比 → 已按目标页裁切的
     /// `BlockBgTile`). 完整底色只留 `DocState::bg_image` 一份备份; 贴图
     /// 用 [`apply_bg::process::crop_bg_to_page`] 裁出的恰好大小画布.
@@ -140,7 +137,7 @@ pub(crate) struct ScoreSyncApp {
     /// `DocState::group_voff_shift` 的量, 不在这里做任何线性近似.
     last_synced_voff_target: i64,
     /// 上一帧蒙版工具是否正在拖动分块. 松手那一帧 layout 可能没再变,
-    /// 靠这个边沿触发一次完整预览合成.
+    /// 靠这个边沿把布局写回文档 (画面已是三层贴图, 不必再合成整图).
     block_drag_was_active: bool,
     dialog: Option<DialogKind>,
     /// 标签右键菜单
@@ -167,6 +164,10 @@ pub(crate) struct ScoreSyncApp {
     pdf_import: Option<pdf_import::PdfImportState>,
     /// 「组织页面」弹窗
     page_organize: Option<page_organize::PageOrganizeState>,
+    /// 组织页面缩略图 (关弹窗也保留, 避免每次打开都重新解全页 PNG).
+    org_thumbs: HashMap<String, Arc<RenderImage>>,
+    /// 组织缩略图后台代次; 换工程时自增, 丢掉旧任务.
+    org_thumb_gen: u64,
     pdf_w_input: Entity<TextInput>,
     pdf_h_input: Entity<TextInput>,
     pdf_scale_input: Entity<TextInput>,
@@ -227,9 +228,6 @@ pub(crate) struct ScoreSyncApp {
     render_gen: u64,
     /// 蒙版预览后台生成代数, 见 `sync_mask_image` 文档
     mask_sync_gen: u64,
-    /// 拖动分块松手后的最终预览图后台生成代数, 见
-    /// `sync_block_layout_from_mask_tool` 文档
-    block_preview_gen: u64,
     /// 全量灌入识别 sidecar 的代数, 防止重叠 hydrate 互相覆盖
     hydrate_gen: u64,
     /// PDF 导入代数: 新建/打开工程时自增, 后台渲染与 UI 登记都丢弃旧代
@@ -280,6 +278,9 @@ impl ScoreSyncApp {
             m
         });
         cx.observe(&mask_tool, |this, mt, cx| {
+            if let Some(path) = mt.update(cx, |m, _| m.take_export_path()) {
+                this.export_mask_group_to(path, cx);
+            }
             if this.side_tool == SideTool::Project {
                 let wheel = mt.update(cx, |m, _| m.take_preview_wheel());
                 if wheel != 0 {
@@ -351,8 +352,7 @@ impl ScoreSyncApp {
             mask_target: None,
             mask_preview_hoff: 0,
             mask_preview_voff: 0,
-            block_stats_cache: std::collections::HashMap::new(),
-            block_pieces_cache: Vec::new(),
+            block_piece_sizes: Vec::new(),
             bg_tile_cache: None,
             last_synced_block_layout: Vec::new(),
             last_synced_voff_target: 0,
@@ -372,6 +372,8 @@ impl ScoreSyncApp {
             param_edit: None,
             pdf_import: None,
             page_organize: None,
+            org_thumbs: HashMap::new(),
+            org_thumb_gen: 0,
             pdf_w_input,
             pdf_h_input,
             pdf_scale_input,
@@ -406,7 +408,6 @@ impl ScoreSyncApp {
             page_load_gen: 0,
             render_gen: 0,
             mask_sync_gen: 0,
-            block_preview_gen: 0,
             hydrate_gen: 0,
             pdf_load_gen: Arc::new(AtomicU64::new(0)),
             pdf_importing: false,
