@@ -573,6 +573,9 @@ pub fn probe_duration(path: &Path) -> Result<f64, crate::error::Error> {
 }
 
 fn ffmpeg_probe_duration(path: &Path) -> Option<f64> {
+    if let Some(secs) = ffmpeg_probe_decoded_duration(path) {
+        return Some(secs);
+    }
     let mut cmd = Command::new(crate::export::ffmpeg_path());
     cmd.arg("-hide_banner")
         .arg("-i")
@@ -588,6 +591,55 @@ fn ffmpeg_probe_duration(path: &Path) -> Option<f64> {
     }
     let output = cmd.output().ok()?;
     parse_ffmpeg_duration(&String::from_utf8_lossy(&output.stderr))
+}
+
+/// 解码第一路音轨到 null, 用 `-progress` 的 `out_time_us` 取微秒级时长.
+/// banner 里的 `Duration: HH:MM:SS.xx` 只有百分之一秒, 多段导入会往后面累加.
+fn ffmpeg_probe_decoded_duration(path: &Path) -> Option<f64> {
+    let mut cmd = Command::new(crate::export::ffmpeg_path());
+    cmd.args(["-hide_banner", "-nostats", "-i"])
+        .arg(path)
+        .args([
+            "-vn",
+            "-map",
+            "0:a:0",
+            "-f",
+            "null",
+            "-progress",
+            "pipe:1",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().ok()?;
+    parse_ffmpeg_progress_seconds(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_ffmpeg_progress_seconds(progress: &str) -> Option<f64> {
+    let mut last: Option<f64> = None;
+    for line in progress.lines() {
+        let Some(rest) = line.strip_prefix("out_time_us=") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() || rest.eq_ignore_ascii_case("N/A") {
+            continue;
+        }
+        let Ok(us) = rest.parse::<i64>() else {
+            continue;
+        };
+        if us >= 0 {
+            last = Some(us as f64 / 1_000_000.0);
+        }
+    }
+    last.filter(|s| *s > 0.001)
 }
 
 fn parse_ffmpeg_duration(stderr: &str) -> Option<f64> {
@@ -607,7 +659,7 @@ fn parse_ffmpeg_duration(stderr: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_ffmpeg_duration;
+    use super::{parse_ffmpeg_duration, parse_ffmpeg_progress_seconds};
 
     #[test]
     fn parse_ffmpeg_m4a_duration_line() {
@@ -619,6 +671,13 @@ mod tests {
     #[test]
     fn parse_ffmpeg_duration_na() {
         assert!(parse_ffmpeg_duration("Duration: N/A, start: 0.000000").is_none());
+    }
+
+    #[test]
+    fn parse_ffmpeg_progress_uses_last_out_time_us() {
+        let log = "out_time_us=1000000\nout_time_us=N/A\nout_time_us=754557007\nprogress=end\n";
+        let d = parse_ffmpeg_progress_seconds(log).unwrap();
+        assert!((d - 754.557007).abs() < 1e-9);
     }
 
     #[test]

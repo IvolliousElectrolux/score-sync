@@ -650,51 +650,17 @@ fn build_audio(
         ];
         return run_ffmpeg(&args, "生成静音音轨", tx);
     }
-    // 每段都按自己的 `offset`/`duration` 在输入端 (`-ss`/`-t` 放在各自
-    // `-i` 前面, 即"输入定位") 单独截取: 整段导入的片段 offset=0、duration=
-    // 原文件全长, 截出来等于没截; 被「分割音频」切开的片段则精确截出对应
-    // 子区间, 不然分割后导出还是会把整份原始文件放进去, 白切了.
-    // 输出用 apad + `-t` 对齐到量化后的视频时长, 避免片尾差半帧导致 mux
-    // `-shortest` 再截一刀.
-    if clips.len() == 1 {
-        let c = &clips[0];
-        let args = vec![
-            os("-y"),
-            os("-ss"),
-            os(format!("{:.9}", c.offset)),
-            os("-t"),
-            os(format!("{:.9}", c.duration)),
-            os("-i"),
-            os_path(&c.path),
-            os("-af"),
-            os("apad"),
-            os("-t"),
-            os(target),
-            os("-c:a"),
-            os(codec),
-            os_path(out_audio),
-        ];
-        return run_ffmpeg(&args, "转码音频", tx);
-    }
+    // 每段用 atrim 按 `offset`/`duration` 裁切, 再 pad/trim 成时间轴上声明的
+    // 整段时长, 最后 concat. 不要用输入侧 `-ss`/`-t`: 压缩格式按包对齐,
+    // 多段接缝每段差几十毫秒, 后面的乐章会越偏越远; 单轨没有接缝所以从前
+    // 看不出来. 输出再 apad + `-t` 对齐量化后的视频时长.
     let mut args = vec![os("-y")];
     for c in clips {
-        args.push(os("-ss"));
-        args.push(os(format!("{:.9}", c.offset)));
-        args.push(os("-t"));
-        args.push(os(format!("{:.9}", c.duration)));
         args.push(os("-i"));
         args.push(os_path(&c.path));
     }
-    let mut filter = String::new();
-    for i in 0..clips.len() {
-        filter.push_str(&format!("[{i}:a]"));
-    }
-    filter.push_str(&format!(
-        "concat=n={}:v=0:a=1,apad[aout]",
-        clips.len()
-    ));
     args.push(os("-filter_complex"));
-    args.push(os(filter));
+    args.push(os(audio_concat_filter(clips)));
     args.push(os("-map"));
     args.push(os("[aout]"));
     args.push(os("-t"));
@@ -702,7 +668,40 @@ fn build_audio(
     args.push(os("-c:a"));
     args.push(os(codec));
     args.push(os_path(out_audio));
-    run_ffmpeg(&args, "合并多段音频", tx)
+    let step = if clips.len() == 1 {
+        "转码音频"
+    } else {
+        "合并多段音频"
+    };
+    run_ffmpeg(&args, step, tx)
+}
+
+/// 每段先裁到 `[offset, offset+duration)`, 统一成立体声, 再强制输出恰好
+/// `duration` 秒 (短则静音补齐, 长则截断), 这样 concat 接缝落在时间轴边界上.
+fn audio_concat_filter(clips: &[AudioClip]) -> String {
+    let mut parts = Vec::with_capacity(clips.len() + 1);
+    for (i, c) in clips.iter().enumerate() {
+        let start = c.offset.max(0.0);
+        let dur = c.duration.max(0.0);
+        parts.push(format!(
+            "[{i}:a:0]atrim=start={start:.9}:duration={dur:.9},asetpts=PTS-STARTPTS,\
+             aformat=sample_fmts=fltp:channel_layouts=stereo,\
+             apad=whole_dur={dur:.9},atrim=end={dur:.9},asetpts=PTS-STARTPTS[a{i}]"
+        ));
+    }
+    let mut labels = String::new();
+    for i in 0..clips.len() {
+        labels.push_str(&format!("[a{i}]"));
+    }
+    if clips.len() == 1 {
+        parts.push(format!("{labels}apad[aout]"));
+    } else {
+        parts.push(format!(
+            "{labels}concat=n={}:v=0:a=1,apad[aout]",
+            clips.len()
+        ));
+    }
+    parts.join(";")
 }
 
 fn mux_final(
@@ -980,5 +979,431 @@ mod tests {
                 .map(|c| c.group_id.as_str()),
             Some("b")
         );
+    }
+
+    fn audio_clip(path: PathBuf, duration: f64, offset: f64) -> AudioClip {
+        AudioClip {
+            id: Uuid::new_v4(),
+            path,
+            label: "a".into(),
+            duration,
+            offset,
+        }
+    }
+
+    #[test]
+    fn audio_concat_filter_forces_each_clip_duration() {
+        let clips = vec![
+            audio_clip(PathBuf::from("a.m4a"), 5.0, 0.0),
+            audio_clip(PathBuf::from("b.m4a"), 4.25, 1.5),
+        ];
+        let f = audio_concat_filter(&clips);
+        assert!(f.contains("[0:a:0]atrim=start=0.000000000:duration=5.000000000"));
+        assert!(f.contains("[1:a:0]atrim=start=1.500000000:duration=4.250000000"));
+        assert!(f.contains("apad=whole_dur=5.000000000"));
+        assert!(f.contains("apad=whole_dur=4.250000000"));
+        assert!(f.contains("concat=n=2:v=0:a=1,apad[aout]"));
+        assert!(!f.contains("-ss"));
+        let one = audio_concat_filter(&[audio_clip(PathBuf::from("a.wav"), 10.0, 0.0)]);
+        assert!(one.ends_with("[a0]apad[aout]"));
+        assert!(!one.contains("concat="));
+    }
+
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new(ffmpeg_path())
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn write_beep_wav(path: &Path, sr: u32, duration: f64, beep: f64) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: sr,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        let n = (duration * sr as f64).round() as u32;
+        let beep_n = (beep * sr as f64).round() as u32;
+        for i in 0..n {
+            let s = if i < beep_n {
+                (((i as f64) * 440.0 * 2.0 * std::f64::consts::PI / sr as f64).sin() * 20000.0)
+                    as i16
+            } else {
+                0
+            };
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn beep_onsets(path: &Path, sr: u32) -> Vec<f64> {
+        let mut reader = hound::WavReader::open(path).unwrap();
+        let ch = reader.spec().channels.max(1) as usize;
+        let samples: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap()).collect();
+        let mut onsets = Vec::new();
+        let mut prev_loud = false;
+        let min_gap = (sr as usize) / 5;
+        let mut last_onset: Option<usize> = None;
+        for (i, frame) in samples.chunks(ch).enumerate() {
+            let loud = frame.iter().any(|s| s.abs() > 800);
+            if loud && !prev_loud {
+                let far_enough = last_onset.map(|j| i.saturating_sub(j) >= min_gap).unwrap_or(true);
+                if far_enough {
+                    onsets.push(i as f64 / sr as f64);
+                    last_onset = Some(i);
+                }
+            }
+            prev_loud = loud;
+        }
+        onsets
+    }
+
+    #[test]
+    fn multi_clip_concat_keeps_timeline_boundaries() {
+        if !ffmpeg_available() {
+            eprintln!("skip: ffmpeg missing");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sv_ac_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sr = 8000u32;
+        let clips_n = 4;
+        let dur = 2.0;
+        let mut clips = Vec::new();
+        for i in 0..clips_n {
+            let p = dir.join(format!("c{i}.wav"));
+            write_beep_wav(&p, sr, dur, 0.08);
+            clips.push(audio_clip(p, dur, 0.0));
+        }
+        let out = dir.join("out.wav");
+        let (tx, _rx) = async_channel::unbounded();
+        build_audio(&clips, dur * clips_n as f64, &out, "pcm_s16le", &tx).unwrap();
+        let onsets = beep_onsets(&out, sr);
+        assert_eq!(onsets.len(), clips_n, "onsets={onsets:?}");
+        for (i, t) in onsets.iter().enumerate() {
+            let exp = i as f64 * dur;
+            assert!(
+                (t - exp).abs() < 0.005,
+                "clip {i} onset {t} expected {exp}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn aac_multi_clip_concat_does_not_accumulate() {
+        if !ffmpeg_available() {
+            eprintln!("skip: ffmpeg missing");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sv_aac_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sr = 44100u32;
+        let clips_n = 8;
+        let dur = 1.0;
+        let mut clips = Vec::new();
+        for i in 0..clips_n {
+            let wav = dir.join(format!("c{i}.wav"));
+            let m4a = dir.join(format!("c{i}.m4a"));
+            write_beep_wav(&wav, sr, dur, 0.08);
+            let mut cmd = std::process::Command::new(ffmpeg_path());
+            cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&wav)
+                .args(["-c:a", "aac", "-b:a", "128k"])
+                .arg(&m4a);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            let status = cmd.status().unwrap();
+            assert!(status.success());
+            clips.push(audio_clip(m4a, dur, 0.0));
+        }
+        let out = dir.join("out.wav");
+        let (tx, _rx) = async_channel::unbounded();
+        build_audio(&clips, dur * clips_n as f64, &out, "pcm_s16le", &tx).unwrap();
+        let onsets = beep_onsets(&out, sr);
+        assert_eq!(onsets.len(), clips_n, "onsets={onsets:?}");
+        for (i, t) in onsets.iter().enumerate() {
+            let exp = i as f64 * dur;
+            assert!(
+                (t - exp).abs() < 0.02,
+                "clip {i} onset {t} expected {exp} (accumulated drift)"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_clips_from_one_file_keep_offsets() {
+        if !ffmpeg_available() {
+            eprintln!("skip: ffmpeg missing");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sv_as_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sr = 8000u32;
+        let src = dir.join("src.wav");
+        // 8s, 蜂鸣出现在 0 / 2 / 4 / 6
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: sr,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut w = hound::WavWriter::create(&src, spec).unwrap();
+            let n = 8 * sr;
+            for i in 0..n {
+                let t = i as f64 / sr as f64;
+                let local = t % 2.0;
+                let s = if local < 0.08 {
+                    ((t * 440.0 * 2.0 * std::f64::consts::PI).sin() * 20000.0) as i16
+                } else {
+                    0
+                };
+                w.write_sample(s).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let clips: Vec<AudioClip> = (0..4)
+            .map(|i| audio_clip(src.clone(), 2.0, i as f64 * 2.0))
+            .collect();
+        let out = dir.join("out.wav");
+        let (tx, _rx) = async_channel::unbounded();
+        build_audio(&clips, 8.0, &out, "pcm_s16le", &tx).unwrap();
+        let onsets = beep_onsets(&out, sr);
+        assert_eq!(onsets.len(), 4, "onsets={onsets:?}");
+        for (i, t) in onsets.iter().enumerate() {
+            let exp = i as f64 * 2.0;
+            assert!(
+                (t - exp).abs() < 0.005,
+                "clip {i} onset {t} expected {exp}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn cdefgab_fixture() -> Option<PathBuf> {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .parent()?
+            .parent()?
+            .join("sync_cdefgab_test");
+        p.is_dir().then_some(p)
+    }
+
+    fn rgb_dist(a: [u8; 3], b: [u8; 3]) -> i32 {
+        let dr = a[0] as i32 - b[0] as i32;
+        let dg = a[1] as i32 - b[1] as i32;
+        let db = a[2] as i32 - b[2] as i32;
+        dr * dr + dg * dg + db * db
+    }
+
+    fn goertzel_power(samples: &[i16], sr: f64, freq: f64) -> f64 {
+        let n = samples.len() as f64;
+        if n < 16.0 {
+            return 0.0;
+        }
+        let k = (n * freq / sr).round();
+        let w = 2.0 * std::f64::consts::PI * k / n;
+        let coeff = 2.0 * w.cos();
+        let mut s1 = 0.0;
+        let mut s2 = 0.0;
+        for x in samples {
+            let s0 = f64::from(*x) + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        s1 * s1 + s2 * s2 - coeff * s1 * s2
+    }
+
+    fn run_ff(args: &[&str]) -> bool {
+        let mut cmd = std::process::Command::new(ffmpeg_path());
+        cmd.args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    #[test]
+    fn cdefgab_fixture_export_stays_aligned() {
+        if !ffmpeg_available() {
+            eprintln!("skip: ffmpeg missing");
+            return;
+        }
+        let Some(root) = cdefgab_fixture() else {
+            eprintln!("skip: sync_cdefgab_test fixture missing");
+            return;
+        };
+        let notes = ["C", "D", "E", "F", "G", "A", "B"];
+        let hz = [261.626, 293.665, 329.628, 349.228, 392.0, 440.0, 493.883];
+        let colors: [[u8; 3]; 7] = [
+            [229, 57, 53],
+            [251, 140, 0],
+            [253, 216, 53],
+            [67, 160, 71],
+            [30, 136, 229],
+            [142, 36, 170],
+            [216, 27, 96],
+        ];
+        let dur = 4.017052;
+        let mut pool = Vec::new();
+        let mut tl = Timeline::new();
+        for (i, n) in notes.iter().enumerate() {
+            let png = root.join("pages").join(format!("{n}.png"));
+            let m4a = root.join("audio").join(format!("{n}.m4a"));
+            assert!(png.is_file(), "missing {}", png.display());
+            assert!(m4a.is_file(), "missing {}", m4a.display());
+            pool.push(MaterialItem {
+                group_id: (*n).into(),
+                label: (*n).into(),
+                cache_path: png,
+                width: 1280,
+                height: 720,
+            });
+            let start = i as f64 * dur;
+            tl.video_clips.push(clip(n, start, start + dur));
+            tl.audio_clips.push(audio_clip(m4a, dur, 0.0));
+        }
+        let out = root.join("CDEFGAB.mp4");
+        let opts = ExportOptions {
+            container: Container::Mp4,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            crf: 18,
+            out_path: out.clone(),
+            fade_bg_rgb: [255, 255, 255],
+        };
+        let rx = export_async(tl, pool, opts);
+        loop {
+            match rx.recv_blocking() {
+                Ok(ExportMsg::Progress(s)) => eprintln!("  {s}"),
+                Ok(ExportMsg::Done(Ok(p))) => {
+                    eprintln!("exported {}", p.display());
+                    break;
+                }
+                Ok(ExportMsg::Done(Err(e))) => panic!("export failed: {e}"),
+                Err(_) => panic!("export channel closed"),
+            }
+        }
+        assert!(out.is_file());
+
+        let wav = root.join("CDEFGAB.wav");
+        assert!(
+            run_ff(&[
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                out.to_str().unwrap(),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "44100",
+                "-c:a",
+                "pcm_s16le",
+                wav.to_str().unwrap(),
+            ]),
+            "extract wav"
+        );
+        let mut reader = hound::WavReader::open(&wav).unwrap();
+        let sr = reader.spec().sample_rate as f64;
+        let pcm: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap()).collect();
+
+        for (i, n) in notes.iter().enumerate() {
+            let mid = i as f64 * dur + dur * 0.5;
+            let frame = root.join(format!("frame_{n}.png"));
+            assert!(
+                run_ff(&[
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    out.to_str().unwrap(),
+                    "-ss",
+                    &format!("{mid:.6}"),
+                    "-frames:v",
+                    "1",
+                    frame.to_str().unwrap(),
+                ]),
+                "extract frame {n}"
+            );
+            let img = image::open(&frame).unwrap().to_rgb8();
+            let px = img.get_pixel(640, 36).0;
+            let mut best = 0usize;
+            let mut best_d = i32::MAX;
+            for (j, c) in colors.iter().enumerate() {
+                let d = rgb_dist(px, *c);
+                if d < best_d {
+                    best_d = d;
+                    best = j;
+                }
+            }
+            assert_eq!(
+                notes[best], *n,
+                "t={mid:.3}s frame color {:?} closest to {} want {n}",
+                px, notes[best]
+            );
+
+            let a0 = ((mid - 0.4) * sr).max(0.0) as usize;
+            let a1 = ((mid + 0.4) * sr) as usize;
+            let slice = &pcm[a0.min(pcm.len())..a1.min(pcm.len())];
+            let mut best_f = 0usize;
+            let mut best_p = f64::NEG_INFINITY;
+            for (j, f) in hz.iter().enumerate() {
+                let p = goertzel_power(slice, sr, *f);
+                if p > best_p {
+                    best_p = p;
+                    best_f = j;
+                }
+            }
+            assert_eq!(
+                notes[best_f], *n,
+                "t={mid:.3}s audio peak {} want {n}",
+                notes[best_f]
+            );
+        }
+
+        for i in 1..notes.len() {
+            let cut = i as f64 * dur;
+            let after = cut + 0.2;
+            let a0 = (after * sr) as usize;
+            let a1 = ((after + 0.5) * sr) as usize;
+            let slice = &pcm[a0.min(pcm.len())..a1.min(pcm.len())];
+            let mut best_f = 0usize;
+            let mut best_p = f64::NEG_INFINITY;
+            for (j, f) in hz.iter().enumerate() {
+                let p = goertzel_power(slice, sr, *f);
+                if p > best_p {
+                    best_p = p;
+                    best_f = j;
+                }
+            }
+            assert_eq!(
+                notes[best_f],
+                notes[i],
+                "cut {:.3}s +0.2s audio is {} want {} (later clips drifted)",
+                cut,
+                notes[best_f],
+                notes[i]
+            );
+        }
     }
 }
