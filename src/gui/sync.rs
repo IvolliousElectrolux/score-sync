@@ -1198,16 +1198,19 @@ impl ScoreSyncApp {
 
     /// `scroll_other`: 点顶部页签时滚侧栏列表定位; 点侧栏自身则两边都不滚.
     pub(super) fn set_mask_target(&mut self, group_id: String, scroll_other: bool, cx: &mut Context<Self>) {
-        if self.mask_target.as_ref() == Some(&group_id) {
-            return;
+        let ix = self.doc.groups.iter().position(|g| g.id == group_id);
+        if self.mask_target.as_ref() != Some(&group_id) {
+            self.flush_mask_to_doc(cx);
+            self.doc.active_group_id = Some(group_id);
+            self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
+            self.mask_target = None;
+            self.sync_mask_image(cx);
+            if scroll_other {
+                self.scroll_mask_block_list_to_active();
+            }
         }
-        self.flush_mask_to_doc(cx);
-        self.doc.active_group_id = Some(group_id);
-        self.mask_tool.update(cx, |m, cx| m.clear_view("", cx));
-        self.mask_target = None;
-        self.sync_mask_image(cx);
-        if scroll_other {
-            self.scroll_mask_block_list_to_active();
+        if let Some(ix) = ix {
+            self.reveal_mask_tab_neighbors(ix);
         }
         cx.notify();
     }

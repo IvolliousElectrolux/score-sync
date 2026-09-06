@@ -95,7 +95,8 @@ impl ScoreSyncApp {
             return;
         }
         self.doc.current_page_index = index;
-        // 点选页签只激活, 不改栏内滚动 (与蒙版页签一致; 切入分块面板时再定位).
+        // 中间页签栏内位置不动; 贴着可视区左/右缘时露出相邻上一/下一页.
+        self.reveal_page_tab_neighbors(index);
         if self.doc.pages[index].image.is_some() {
             self.request_page_window(cx);
             if self.pending_redetect {
@@ -286,6 +287,57 @@ impl ScoreSyncApp {
             .min(n);
         let start = start.min(n);
         (start, end.max(start).min(n))
+    }
+
+    fn page_tab_content_span(&self, ix: usize) -> Option<(f32, f32)> {
+        let b = self.tab_bounds.get(&ix)?;
+        let w = f32::from(b.size.width);
+        if w < 8.0 {
+            return None;
+        }
+        let view = self.tab_scroll.bounds();
+        if f32::from(view.size.width) < 32.0 {
+            return None;
+        }
+        let off = (-f32::from(self.tab_scroll.offset().x)).max(0.0);
+        let left = f32::from(b.origin.x) - f32::from(view.origin.x) + off;
+        Some((left, left + w))
+    }
+
+    /// 点选后尽量不改栏内位置; 当前项贴边时只滚到刚好露出相邻页签.
+    pub(super) fn reveal_page_tab_neighbors(&self, ix: usize) {
+        let n = self.doc.pages.len();
+        if n == 0 {
+            return;
+        }
+        let lo = ix.saturating_sub(1);
+        let hi = (ix + 1).min(n.saturating_sub(1));
+        apply_tab_neighbor_scroll(
+            &self.tab_scroll,
+            ix,
+            n,
+            self.tab_slot_px(),
+            36.0,
+            self.page_tab_content_span(lo).map(|s| s.0),
+            self.page_tab_content_span(hi).map(|s| s.1),
+        );
+    }
+
+    /// 点选后尽量不改栏内位置; 当前项贴边时只滚到刚好露出相邻组合页签.
+    pub(super) fn reveal_mask_tab_neighbors(&self, ix: usize) {
+        let n = self.doc.groups.len();
+        if n == 0 {
+            return;
+        }
+        apply_tab_neighbor_scroll(
+            &self.mask_tab_scroll,
+            ix,
+            n,
+            MASK_TAB_SLOT_PX,
+            8.0,
+            None,
+            None,
+        );
     }
 
     /// 将分块页签滚到指定页. 仅在切入分块面板时用, 点选页签本身不要滚.
@@ -1015,6 +1067,59 @@ impl ScoreSyncApp {
     }
 }
 
+/// 点选贴边页签时多留一点空, 避免相邻页签贴着裁切边缘不好点.
+const TAB_NEIGHBOR_PAD: f32 = 4.0;
+
+/// 尽量保持当前位置, 只在需要露出的区间超出可视区时才滚.
+pub(super) fn neighbor_hscroll_offset(
+    off: f32,
+    view_w: f32,
+    max: f32,
+    need_left: f32,
+    need_right: f32,
+) -> f32 {
+    if view_w < 32.0 {
+        return off;
+    }
+    let mut new_off = off;
+    if need_right > off + view_w {
+        new_off = (need_right - view_w).max(0.0);
+    }
+    if need_left < new_off {
+        new_off = need_left.max(0.0);
+    }
+    new_off.clamp(0.0, max.max(0.0))
+}
+
+fn apply_tab_neighbor_scroll(
+    handle: &ScrollHandle,
+    ix: usize,
+    n: usize,
+    slot: f32,
+    extra_end_w: f32,
+    measured_left: Option<f32>,
+    measured_right: Option<f32>,
+) {
+    if n == 0 {
+        return;
+    }
+    let view_w = f32::from(handle.bounds().size.width);
+    if view_w < 32.0 {
+        return;
+    }
+    let slot = slot.max(1.0);
+    let max = (n as f32 * slot + extra_end_w - view_w).max(0.0);
+    let off = (-f32::from(handle.offset().x)).max(0.0);
+    let lo = ix.saturating_sub(1);
+    let hi = (ix + 1).min(n.saturating_sub(1));
+    let need_left = measured_left.unwrap_or(lo as f32 * slot) - TAB_NEIGHBOR_PAD;
+    let need_right = measured_right.unwrap_or((hi + 1) as f32 * slot) + TAB_NEIGHBOR_PAD;
+    let new_off = neighbor_hscroll_offset(off, view_w, max, need_left, need_right);
+    if (new_off - off).abs() > 0.5 {
+        handle.set_offset(point(px(-new_off), px(0.)));
+    }
+}
+
 /// 悬浮提示: 左上角对齐锚点右下角 (偏右下); 超出窗口则贴边, 只用实测/紧估算宽度.
 pub(super) fn hover_tooltip_pos(
     ax: f32,
@@ -1138,6 +1243,73 @@ fn format_page_tab_caption(mark: &str, badge: &str, title: &str) -> (String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neighbor_scroll_keeps_middle_tab() {
+        let slot = 80.0;
+        let view_w = 5.0 * slot;
+        let max = 20.0 * slot - view_w;
+        // 可视 0..5, 点第 3 个: 上一/下一都已在区内
+        let off = 0.0;
+        let ix = 2usize;
+        let lo = ix.saturating_sub(1) as f32 * slot - TAB_NEIGHBOR_PAD;
+        let hi = (ix + 1 + 1) as f32 * slot + TAB_NEIGHBOR_PAD;
+        let next = neighbor_hscroll_offset(off, view_w, max, lo, hi);
+        assert!((next - off).abs() < 0.01);
+    }
+
+    #[test]
+    fn neighbor_scroll_peeks_next_at_right_edge() {
+        let slot = 80.0;
+        let view_w = 5.0 * slot;
+        let max = 20.0 * slot - view_w;
+        // 可视 0..5, 点第 5 个 (ix=4): 要露出 ix=5
+        let off = 0.0;
+        let ix = 4usize;
+        let lo = ix.saturating_sub(1) as f32 * slot - TAB_NEIGHBOR_PAD;
+        let hi = (ix + 1 + 1) as f32 * slot + TAB_NEIGHBOR_PAD;
+        let next = neighbor_hscroll_offset(off, view_w, max, lo, hi);
+        assert!(next > off + 1.0);
+        // 下一页签左缘进入可视区
+        assert!(next + view_w + 0.5 >= (ix + 1 + 1) as f32 * slot);
+        // 当前页签仍在
+        assert!(next <= ix as f32 * slot + 1.0);
+    }
+
+    #[test]
+    fn neighbor_scroll_peeks_prev_at_left_edge() {
+        let slot = 80.0;
+        let view_w = 5.0 * slot;
+        let max = 20.0 * slot - view_w;
+        // 可视 1..6, 点第 2 个可见 (ix=1): 要露出 ix=0
+        let off = slot;
+        let ix = 1usize;
+        let lo = ix.saturating_sub(1) as f32 * slot - TAB_NEIGHBOR_PAD;
+        let hi = (ix + 1 + 1) as f32 * slot + TAB_NEIGHBOR_PAD;
+        let next = neighbor_hscroll_offset(off, view_w, max, lo, hi);
+        assert!(next < off - 1.0);
+        assert!(next <= 0.5);
+    }
+
+    #[test]
+    fn neighbor_scroll_first_and_last_stay() {
+        let slot = 80.0;
+        let view_w = 5.0 * slot;
+        let n = 20.0;
+        let max = n * slot - view_w;
+        // 开头: 点 ix=0, 没有上一页
+        let lo0 = 0.0 - TAB_NEIGHBOR_PAD;
+        let hi0 = 2.0 * slot + TAB_NEIGHBOR_PAD;
+        let next0 = neighbor_hscroll_offset(0.0, view_w, max, lo0, hi0);
+        assert!((next0 - 0.0).abs() < 0.01);
+        // 末尾: 可视最后 5 个, 点最后一页
+        let last = 19usize;
+        let off = max;
+        let lo_e = (last - 1) as f32 * slot - TAB_NEIGHBOR_PAD;
+        let hi_e = (last + 1) as f32 * slot + TAB_NEIGHBOR_PAD;
+        let next_e = neighbor_hscroll_offset(off, view_w, max, lo_e, hi_e);
+        assert!((next_e - off).abs() < 0.01);
+    }
 
     #[test]
     fn truncates_pdf_name_keeps_index_and_page_suffix() {
