@@ -94,6 +94,16 @@ pub(crate) struct ScoreSyncApp {
     focus_handle: FocusHandle,
     doc: DocState,
     render_image: Option<Arc<RenderImage>>,
+    /// 适配视口时的整页贴图; 放大后作为底层, 视口裁切叠在上面.
+    fit_render_image: Option<Arc<RenderImage>>,
+    /// 当前 `render_image` 对应的原图矩形. `lod_is_fit` 时就是整页.
+    view_lod: Option<canvas::ViewLod>,
+    lod_is_fit: bool,
+    /// 放大超过预览密度时暂存当前页原图, 回到适配即丢.
+    lod_full: Option<Arc<image::RgbImage>>,
+    lod_gen: u64,
+    /// 正在后台生成的视口贴图; 未完成前不要重复开线程.
+    lod_pending: Option<canvas::ViewLod>,
     /// 待从 GPUI 图集卸掉的旧贴图 (下一帧 `render` 里 `drop_image`).
     gpu_drop: Vec<Arc<RenderImage>>,
     img_w: u32,
@@ -327,6 +337,12 @@ impl ScoreSyncApp {
                 d
             },
             render_image: None,
+            fit_render_image: None,
+            view_lod: None,
+            lod_is_fit: true,
+            lod_full: None,
+            lod_gen: 0,
+            lod_pending: None,
             gpu_drop: Vec::new(),
             img_w: 0,
             img_h: 0,
@@ -471,6 +487,17 @@ impl Render for ScoreSyncApp {
         self.flush_gpu_drops(window, cx);
         self.viewport_w = f32::from(window.viewport_size().width);
         self.viewport_h = f32::from(window.viewport_size().height);
+        let canvas_side =
+            f32::from(self.view_bounds.size.width).max(f32::from(self.view_bounds.size.height));
+        let side = if canvas_side >= 64.0 {
+            canvas_side
+        } else {
+            self.viewport_w.max(self.viewport_h)
+        };
+        if side >= 64.0 {
+            self.doc.set_display_max_side(side.round() as u32);
+        }
+        self.sync_view_lod(cx);
         let title_core: SharedString = if let Some(page) = self.doc.current_page() {
             format!(
                 "曲谱同步 — [{}/{}] {}",

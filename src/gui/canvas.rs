@@ -66,6 +66,85 @@ impl ViewXform {
     }
 }
 
+/// 当前视口应对应的原图像素矩形, 以及贴图像素 (≤ 窗口, 且不超过原图 1:1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewLod {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub tex_w: u32,
+    pub tex_h: u32,
+}
+
+impl ViewLod {
+    /// `pad` 是相对可见宽高的外扩比例, 平移时少重建.
+    pub fn compute(
+        xform: &ViewXform,
+        view_w: f32,
+        view_h: f32,
+        img_w: u32,
+        img_h: u32,
+        pad: f32,
+    ) -> Self {
+        let img_w = img_w.max(1);
+        let img_h = img_h.max(1);
+        let (ax, ay) = xform.screen_to_image(0.0, 0.0);
+        let (bx, by) = xform.screen_to_image(view_w, view_h);
+        let mut x0 = ax.min(bx);
+        let mut x1 = ax.max(bx);
+        let mut y0 = ay.min(by);
+        let mut y1 = ay.max(by);
+        let pw = (x1 - x0).abs() * pad.max(0.0);
+        let ph = (y1 - y0).abs() * pad.max(0.0);
+        x0 = (x0 - pw).clamp(0.0, img_w as f32);
+        x1 = (x1 + pw).clamp(0.0, img_w as f32);
+        y0 = (y0 - ph).clamp(0.0, img_h as f32);
+        y1 = (y1 + ph).clamp(0.0, img_h as f32);
+        if x1 - x0 < 1.0 {
+            x1 = (x0 + 1.0).min(img_w as f32);
+        }
+        if y1 - y0 < 1.0 {
+            y1 = (y0 + 1.0).min(img_h as f32);
+        }
+        let x = x0.floor() as u32;
+        let y = y0.floor() as u32;
+        let w = ((x1.ceil() as u32).saturating_sub(x)).max(1).min(img_w.saturating_sub(x));
+        let h = ((y1.ceil() as u32).saturating_sub(y)).max(1).min(img_h.saturating_sub(y));
+        // 贴图像素 = 该矩形的屏幕大小, 但不超过原图 1:1.
+        let cap = xform.scale.min(1.0).max(0.0001);
+        let tex_w = ((w as f32) * cap).round().max(1.0) as u32;
+        let tex_h = ((h as f32) * cap).round().max(1.0) as u32;
+        Self {
+            x,
+            y,
+            w,
+            h,
+            tex_w: tex_w.min(w),
+            tex_h: tex_h.min(h),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_full_page(&self, img_w: u32, img_h: u32) -> bool {
+        self.x == 0 && self.y == 0 && self.w >= img_w && self.h >= img_h
+    }
+
+    /// `need` 通常不带 padding 的可见矩形; 当前块只要盖住它且密度够用.
+    pub fn covers(&self, need: &ViewLod) -> bool {
+        let nx1 = need.x.saturating_add(need.w);
+        let ny1 = need.y.saturating_add(need.h);
+        let cx1 = self.x.saturating_add(self.w);
+        let cy1 = self.y.saturating_add(self.h);
+        if self.x > need.x || self.y > need.y || cx1 < nx1 || cy1 < ny1 {
+            return false;
+        }
+        let have = self.tex_w as f32 / self.w.max(1) as f32;
+        let want = need.tex_w as f32 / need.w.max(1) as f32;
+        have + 1e-6 >= want * 0.92
+    }
+}
+
 /// `scene_x`/`img_w`: 只在鼠标真正悬浮于页面宽度范围内 (含 `tol` 容差) 才允许
 /// 命中边界线; 页面左右之外即便同一高度也不应选中/拖动.
 pub fn hit_edge(
@@ -511,6 +590,9 @@ impl ScoreSyncApp {
     }
     pub(super) fn image_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let render_image = self.render_image.clone();
+        let fit_render_image = self.fit_render_image.clone();
+        let lod_is_fit = self.lod_is_fit;
+        let view_lod = self.view_lod;
         let regions: Vec<(String, i32, i32, u32, bool)> = self
             .doc
             .current_page()
@@ -615,7 +697,7 @@ impl ScoreSyncApp {
                             user_zoomed,
                         );
 
-                        if let Some(ref img) = render_image {
+                        if let Some(ref img) = fit_render_image {
                             let img_bounds = Bounds {
                                 origin: point(
                                     bounds.origin.x + px(xform.origin_x),
@@ -633,6 +715,47 @@ impl ScoreSyncApp {
                                 0,
                                 false,
                             );
+                        }
+                        if !lod_is_fit {
+                            if let (Some(img), Some(lod)) = (render_image.as_ref(), view_lod) {
+                                let x1 = lod.x.saturating_add(lod.w.saturating_sub(1)) as i32;
+                                let y1 = lod.y.saturating_add(lod.h.saturating_sub(1)) as i32;
+                                let mut b = xform.image_rect_to_screen(
+                                    lod.x as i32,
+                                    lod.y as i32,
+                                    x1,
+                                    y1,
+                                );
+                                b.origin.x = bounds.origin.x + b.origin.x;
+                                b.origin.y = bounds.origin.y + b.origin.y;
+                                let _ = window.paint_image(
+                                    b,
+                                    gpui::Corners::default(),
+                                    Arc::clone(img),
+                                    0,
+                                    false,
+                                );
+                            }
+                        } else if fit_render_image.is_none() {
+                            if let Some(ref img) = render_image {
+                                let img_bounds = Bounds {
+                                    origin: point(
+                                        bounds.origin.x + px(xform.origin_x),
+                                        bounds.origin.y + px(xform.origin_y),
+                                    ),
+                                    size: size(
+                                        px(img_w as f32 * xform.scale),
+                                        px(img_h as f32 * xform.scale),
+                                    ),
+                                };
+                                let _ = window.paint_image(
+                                    img_bounds,
+                                    gpui::Corners::default(),
+                                    img.clone(),
+                                    0,
+                                    false,
+                                );
+                            }
                         }
 
                         let mut sorted = regions.clone();
@@ -757,5 +880,43 @@ mod tests {
         assert!(region_at(&regs, &sel, -5.0, 50.0, img_w).is_none());
         assert!(region_at(&regs, &sel, img_w + 5.0, 50.0, img_w).is_none());
         assert!(region_at(&regs, &sel, img_w * 0.5, 50.0, img_w).is_some());
+    }
+
+    #[test]
+    fn view_lod_at_fit_covers_full_page_at_window_pixels() {
+        let xform = ViewXform::compute(4500.0, 6000.0, 1400.0, 900.0, 1.0, point(0.0, 0.0), false);
+        let lod = ViewLod::compute(&xform, 1400.0, 900.0, 4500, 6000, 0.0);
+        assert!(lod.is_full_page(4500, 6000));
+        assert!(lod.tex_w as f32 <= 1400.0 * 1.05);
+        assert!(lod.tex_h as f32 <= 900.0 * 1.05);
+        assert!(lod.tex_w < 4500);
+        assert!(lod.tex_h < 6000);
+    }
+
+    #[test]
+    fn view_lod_zoom_past_1_to_1_caps_at_source_pixels() {
+        let fit = (1400.0_f32 / 4500.0).min(900.0 / 6000.0);
+        // 相对原图约 2× (scale=2)
+        let zoom = 2.0 / fit;
+        let xform = ViewXform::compute(4500.0, 6000.0, 1400.0, 900.0, zoom, point(0.0, 0.0), true);
+        assert!((xform.scale - 2.0).abs() < 0.05);
+        let vis = ViewLod::compute(&xform, 1400.0, 900.0, 4500, 6000, 0.0);
+        assert!(vis.w < 4500 || vis.h < 6000);
+        assert_eq!(vis.tex_w, vis.w);
+        assert_eq!(vis.tex_h, vis.h);
+        assert!(vis.tex_w as f32 <= 1400.0 / 2.0 + 4.0);
+    }
+
+    #[test]
+    fn view_lod_covers_padded_block() {
+        let xform = ViewXform::compute(2000.0, 2000.0, 400.0, 400.0, 4.0, point(0.0, 0.0), true);
+        let padded = ViewLod::compute(&xform, 400.0, 400.0, 2000, 2000, 0.25);
+        let vis = ViewLod::compute(&xform, 400.0, 400.0, 2000, 2000, 0.0);
+        assert!(padded.covers(&vis));
+        let shifted = ViewLod {
+            x: padded.x.saturating_add(padded.w),
+            ..vis
+        };
+        assert!(!padded.covers(&shifted));
     }
 }

@@ -55,10 +55,11 @@ pub struct Page {
     pub path: PathBuf,
     /// 会话 tmp (或工程解压落盘) 上的 PNG 备份
     pub disk_path: PathBuf,
-    /// 仅内存窗口内有值; 窗口外为 None. `Arc` 让后台任务廉价共享同一份
-    /// 像素, 切蒙版/底色时不必在界面线程再 memcpy 一整页.
+    /// 仅内存窗口内有值; 窗口外为 None. 交互预览按
+    /// [`DocState::display_max_side`] 缩小, 坐标仍用下面的原图像素尺寸.
+    /// `Arc` 让后台任务廉价共享同一份显示像素.
     pub image: Option<Arc<RgbImage>>,
-    /// 卸载后仍可用的尺寸缓存
+    /// 磁盘原图尺寸 (识别 / 区域 y0y1 / 导出). 与 `image` 像素宽高可能不同.
     pub img_w: u32,
     pub img_h: u32,
     pub regions: HashMap<String, Region>,
@@ -87,25 +88,34 @@ impl Page {
         format!("{src}{copy}")
     }
 
-    pub fn height(&self) -> u32 {
-        if let Some(img) = self.image.as_ref() {
-            img.height()
-        } else {
-            self.img_h
-        }
-    }
-
     pub fn width(&self) -> u32 {
+        self.img_w
+    }
+
+    pub fn height(&self) -> u32 {
+        self.img_h
+    }
+
+    /// 当前内存里那份图的字节数 (显示代理; 未加载则按原图估).
+    pub fn estimated_bytes(&self) -> u64 {
         if let Some(img) = self.image.as_ref() {
-            img.width()
+            img.width() as u64 * img.height() as u64 * 3
         } else {
-            self.img_w
+            self.estimated_full_bytes()
         }
     }
 
-    /// 估算本页解码后占用的字节数.
-    pub fn estimated_bytes(&self) -> u64 {
-        (self.width() as u64) * (self.height() as u64) * 3
+    /// 磁盘原图解码后的 RGB 字节数. 导出并发按这个估峰值.
+    pub fn estimated_full_bytes(&self) -> u64 {
+        (self.img_w as u64) * (self.img_h as u64) * 3
+    }
+
+    /// 内存图与原图同尺寸 (测试夹具 / 尚未缩小的小图).
+    pub fn is_full_res(&self) -> bool {
+        self.image
+            .as_ref()
+            .map(|img| img.width() == self.img_w && img.height() == self.img_h)
+            .unwrap_or(false)
     }
 }
 
@@ -274,14 +284,23 @@ struct GroupRenderBg {
     trailing_gap: u32,
 }
 
+/// 终稿一条成员: 优先在 [`GroupRenderJob::render`] 里按磁盘原图裁切,
+/// 避免界面线程常驻全分辨率页. 单测没有可用 PNG 时带 `inline`.
+struct GroupRenderPart {
+    rid: String,
+    disk_path: PathBuf,
+    y0: u32,
+    height: u32,
+    inline: Option<RgbImage>,
+}
+
 /// `DocState::render_group_final` 所需只读数据的快照, 由
-/// [`DocState::prepare_group_render_job`] 在主线程一次性收集 (裁切片段的
-/// 浅拷贝 + 一些小块元数据, 很快); [`Self::render`] 之后可以放到后台线程
-/// 执行真正耗时的拼合 + 蒙版叠加 + 底色合成裁切, 不再堵在界面线程上
-/// (视频素材池批量重渲染「输出组合」终稿正是这个场景, 见
-/// `score_sync::gui::sync::sync_video_pool`).
+/// [`DocState::prepare_group_render_job`] 在主线程收集路径/条带范围
+/// (不解码原图); [`Self::render`] 放到后台按磁盘全分辨率裁切 + 拼合 +
+/// 蒙版 + 底色. 视频素材池批量重渲染见
+/// `score_sync::gui::sync::sync_video_pool`.
 pub struct GroupRenderJob {
-    parts: Vec<(String, image::RgbImage)>,
+    members: Vec<GroupRenderPart>,
     block_layout: Vec<BlockAdjust>,
     ink_threshold: i32,
     masks: Vec<MaskRect>,
@@ -292,11 +311,44 @@ pub struct GroupRenderJob {
 }
 
 impl GroupRenderJob {
+    fn collect_full_parts(&self) -> Result<Vec<(String, RgbImage)>, String> {
+        let mut cache: HashMap<PathBuf, RgbImage> = HashMap::new();
+        let mut parts = Vec::with_capacity(self.members.len());
+        for m in &self.members {
+            if let Some(img) = &m.inline {
+                parts.push((m.rid.clone(), img.clone()));
+                continue;
+            }
+            if !m.disk_path.is_file() {
+                return Err(format!("缺页图 {}", m.disk_path.display()));
+            }
+            if !cache.contains_key(&m.disk_path) {
+                cache.insert(
+                    m.disk_path.clone(),
+                    crate::page_cache::load_rgb(&m.disk_path)?,
+                );
+            }
+            let full = cache.get(&m.disk_path).unwrap();
+            let y0 = m.y0.min(full.height().saturating_sub(1));
+            let y1 = (m.y0 + m.height).min(full.height());
+            if y1 <= y0 {
+                continue;
+            }
+            parts.push((m.rid.clone(), crop_band_fast(full, y0, y1 - y0)));
+        }
+        if parts.is_empty() {
+            return Err("无成员片段".into());
+        }
+        Ok(parts)
+    }
+
     /// 纯计算, 不接触 `DocState`, 可安全放到非主线程跑.
     pub fn render(&self) -> Result<RgbImage, String> {
+        let parts = self.collect_full_parts()?;
         let mut combined =
-            compose_parts_impl(&self.parts, &self.block_layout, self.ink_threshold, None)
+            compose_parts_impl(&parts, &self.block_layout, self.ink_threshold, None)
                 .ok_or_else(|| "无成员片段".to_string())?;
+        drop(parts);
         if !self.masks.is_empty() {
             mask_tool::mask::apply_masks_to_sheet(
                 &mut combined,
@@ -404,6 +456,8 @@ pub struct DocState {
     pub video_state: TimelineSnapshot,
     /// region_id → page index, 避免 find_region 每次扫全部页.
     pub(crate) rid_page: HashMap<String, usize>,
+    /// 交互预览图最长边 (像素). `0` 表示用 [`crate::page_cache::DEFAULT_DISPLAY_MAX_SIDE`].
+    pub display_max_side: u32,
 }
 
 impl DocState {
@@ -461,7 +515,26 @@ impl DocState {
             bg_gen: self.bg_gen,
             video_state: self.video_state.clone(),
             rid_page: HashMap::new(),
+            display_max_side: self.display_max_side,
         }
+    }
+
+    pub fn display_max_side(&self) -> u32 {
+        if self.display_max_side == 0 {
+            crate::page_cache::DEFAULT_DISPLAY_MAX_SIDE
+        } else {
+            self.display_max_side
+        }
+    }
+
+    /// 按画布视口更新预览最长边. 抖动小于 48px 忽略, 避免每帧重载.
+    pub fn set_display_max_side(&mut self, side: u32) {
+        let side = side.clamp(960, 3840);
+        let cur = self.display_max_side();
+        if (side as i32 - cur as i32).abs() < 48 {
+            return;
+        }
+        self.display_max_side = side;
     }
 
     pub fn get_group_masks(&self, group_id: &str) -> &[MaskRect] {
@@ -653,6 +726,8 @@ impl DocState {
         let Some(img) = page.image.as_ref() else {
             return;
         };
+        let orig_h = page.img_h.max(1);
+        let proxy_h = img.height().max(1);
         let thr = self.ink_threshold;
         let bands: Vec<(String, i32, i32)> = page
             .regions
@@ -666,7 +741,23 @@ impl DocState {
         let computed: Vec<(String, Option<i32>)> = bands
             .into_iter()
             .map(|(id, y0, y1)| {
-                (id, mask_tool::staff::band_staff_anchor(img, y0, y1, thr))
+                let orig_band = (y1 - y0 + 1).max(1) as u32;
+                let (py0, ph) = crate::page_cache::map_band_to_proxy(
+                    y0.max(0) as u32,
+                    orig_band,
+                    orig_h,
+                    proxy_h,
+                );
+                let py1 = py0.saturating_add(ph.saturating_sub(1)) as i32;
+                let a = mask_tool::staff::band_staff_anchor(img, py0 as i32, py1, thr);
+                let a = a.map(|v| {
+                    if ph <= 1 || orig_h == proxy_h {
+                        v
+                    } else {
+                        (v as i64 * orig_band as i64 / ph as i64) as i32
+                    }
+                });
+                (id, a)
             })
             .collect();
         self.ingest_region_staff_anchors(computed);
@@ -684,7 +775,7 @@ impl DocState {
         self.group_guides.clear();
     }
 
-    /// 同步确保某页像素在内存中.
+    /// 确保显示用代理图在内存中 (按 [`Self::display_max_side`] 缩小).
     pub fn ensure_image(&mut self, page_idx: usize) -> Result<(), String> {
         let Some(page) = self.pages.get(page_idx) else {
             return Err("页不存在".into());
@@ -693,8 +784,8 @@ impl DocState {
             return Ok(());
         }
         let path = page.disk_path.clone();
-        let img = crate::page_cache::load_rgb(&path)?;
-        let (w, h) = (img.width(), img.height());
+        let max_side = self.display_max_side();
+        let (w, h, img) = crate::page_cache::load_rgb_display(&path, max_side)?;
         if let Some(page) = self.pages.get_mut(page_idx) {
             page.img_w = w;
             page.img_h = h;
@@ -703,6 +794,7 @@ impl DocState {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn ensure_images(&mut self, indices: &[usize]) -> Result<(), String> {
         for &i in indices {
             self.ensure_image(i)?;
@@ -712,10 +804,7 @@ impl DocState {
 
     pub fn unload_page_image(&mut self, page_idx: usize) {
         if let Some(page) = self.pages.get_mut(page_idx) {
-            if let Some(img) = page.image.take() {
-                page.img_w = img.width();
-                page.img_h = img.height();
-            }
+            let _ = page.image.take();
         }
     }
 
@@ -748,6 +837,7 @@ impl DocState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn page_indices_for_group(&self, group_id: &str) -> Vec<usize> {
         let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
             return Vec::new();
@@ -763,12 +853,14 @@ impl DocState {
         idxs
     }
 
+    #[allow(dead_code)]
     pub fn ensure_group_pages(&mut self, group_id: &str) -> Result<(), String> {
         let idxs = self.page_indices_for_group(group_id);
         self.ensure_images(&idxs)
     }
 
-    /// 裁切某页上的区域条带 (整宽). 调用前须 `ensure` 相关页.
+    /// 裁切某页上的区域条带 (整宽). 走内存里的显示代理, 坐标按原图映射.
+    /// 终稿请用 [`Self::prepare_group_render_job`] (磁盘原图).
     pub fn crop_region(&self, region_id: &str) -> Option<image::RgbImage> {
         let (pi, r) = self.find_region(region_id)?;
         let page = self.pages.get(pi)?;
@@ -778,7 +870,13 @@ impl DocState {
         if y1 < y0 {
             return None;
         }
-        Some(crop_band_fast(img, y0, y1 - y0 + 1))
+        let (py0, ph) = crate::page_cache::map_band_to_proxy(
+            y0,
+            y1 - y0 + 1,
+            page.img_h.max(1),
+            img.height().max(1),
+        );
+        Some(crop_band_fast(img, py0, ph))
     }
 
     /// 组内各成员的原始裁切片段 (未应用 `group_block_layout` 微调), 与
@@ -1041,12 +1139,39 @@ impl DocState {
         }
     }
 
-    /// 见 [`GroupRenderJob`] 文档: 收集渲染某组合终稿所需的只读快照 (裁切
-    /// 片段的浅拷贝 + 蒙版/底色等小块元数据), 供调用方挪到后台线程调用
-    /// [`GroupRenderJob::render`], 主线程这一步应该很快.
+    /// 见 [`GroupRenderJob`] 文档: 主线程只收集磁盘路径与条带范围, 不解码
+    /// 原图. 单测若页图只在内存且已是全分辨率, 会把裁切条带放进 `inline`.
     pub fn prepare_group_render_job(&self, group_id: &str) -> Option<GroupRenderJob> {
-        let parts = self.group_member_pieces(group_id);
-        if parts.is_empty() {
+        let g = self.groups.iter().find(|g| g.id == group_id)?;
+        let mut members = Vec::new();
+        for rid in &g.region_ids {
+            let (pi, r) = self.find_region(rid)?;
+            let page = self.pages.get(pi)?;
+            let y0 = r.y0.max(0) as u32;
+            let y1 = (r.y1 as u32).min(page.height().saturating_sub(1));
+            if y1 < y0 {
+                continue;
+            }
+            let height = y1 - y0 + 1;
+            let inline = if page.is_full_res() {
+                page.image
+                    .as_ref()
+                    .map(|img| crop_band_fast(img, y0, height))
+            } else {
+                None
+            };
+            if inline.is_none() && !page.disk_path.is_file() {
+                continue;
+            }
+            members.push(GroupRenderPart {
+                rid: rid.clone(),
+                disk_path: page.disk_path.clone(),
+                y0,
+                height,
+                inline,
+            });
+        }
+        if members.is_empty() {
             return None;
         }
         let block_layout = self.get_block_layout(group_id).to_vec();
@@ -1067,7 +1192,7 @@ impl DocState {
             trailing_gap: self.group_trailing_gap(group_id),
         });
         Some(GroupRenderJob {
-            parts,
+            members,
             block_layout,
             ink_threshold: self.ink_threshold,
             masks,
@@ -1442,27 +1567,42 @@ impl DocState {
     }
 
     pub fn detect_page(&mut self, page_idx: usize, reset_groups: bool) {
-        if self.ensure_image(page_idx).is_err() {
-            return;
-        }
-        let Some(page) = self.pages.get(page_idx) else {
+        let (path, mem, is_full, old_ids, page_id) = {
+            let Some(page) = self.pages.get(page_idx) else {
+                return;
+            };
+            (
+                page.disk_path.clone(),
+                page.image.clone(),
+                page.is_full_res(),
+                page.regions.keys().cloned().collect::<HashSet<String>>(),
+                page.id.clone(),
+            )
+        };
+        let max_side = self.display_max_side();
+        let full: Arc<RgbImage> = if is_full {
+            mem.unwrap()
+        } else if path.is_file() {
+            match crate::page_cache::load_rgb(&path) {
+                Ok(img) => Arc::new(img),
+                Err(_) => return,
+            }
+        } else if let Some(img) = mem {
+            img
+        } else {
             return;
         };
-        let Some(img) = page.image.as_ref() else {
-            return;
-        };
-        let old_ids: HashSet<String> = page.regions.keys().cloned().collect();
-        let bands = detect_bands(img, self.ink_threshold, self.margin);
+        let (w, h) = full.dimensions();
+        let bands = detect_bands(&full, self.ink_threshold, self.margin);
         let bands = if bands.is_empty() {
             vec![Band {
                 y0: 0,
-                y1: page.height().saturating_sub(1) as i32,
+                y1: h.saturating_sub(1) as i32,
                 kind: "region".into(),
             }]
         } else {
             bands
         };
-        let page_id = page.id.clone();
         let mut regions = HashMap::new();
         for (i, b) in bands.iter().enumerate() {
             let rid = new_id();
@@ -1478,11 +1618,29 @@ impl DocState {
                 },
             );
         }
+        let anchors: Vec<(String, Option<i32>)> = regions
+            .values()
+            .map(|r| {
+                (
+                    r.id.clone(),
+                    mask_tool::staff::band_staff_anchor(&full, r.y0, r.y1, self.ink_threshold),
+                )
+            })
+            .collect();
+        let proxy = if w.max(h) > max_side {
+            Arc::new(crate::page_cache::shrink_rgb_max(&full, max_side))
+        } else {
+            full.clone()
+        };
+        drop(full);
         if let Some(page) = self.pages.get_mut(page_idx) {
+            page.img_w = w;
+            page.img_h = h;
+            page.image = Some(proxy);
             page.regions = regions;
         }
         self.rebuild_rid_index();
-        self.seed_region_anchors_for_page(page_idx);
+        self.ingest_region_staff_anchors(anchors);
         self.save_detect_sidecar(page_idx);
         if reset_groups {
             let page_regions: Vec<Region> = self.pages[page_idx]
@@ -2888,6 +3046,71 @@ mod tests {
         seed_bands(&mut doc, 1, &[(10, 20)]);
         doc.prune_dangling_groups_if_hydrated();
         assert!(!doc.groups.iter().any(|g| g.id == "pending"));
+    }
+
+    #[test]
+    fn page_width_stays_original_when_image_is_proxy() {
+        let mut page = stub_page(6000);
+        page.img_w = 4000;
+        page.img_h = 6000;
+        page.image = Some(Arc::new(image::RgbImage::from_pixel(
+            400,
+            600,
+            image::Rgb([1, 2, 3]),
+        )));
+        assert!(!page.is_full_res());
+        assert_eq!(page.width(), 4000);
+        assert_eq!(page.height(), 6000);
+        assert_eq!(page.estimated_bytes(), 400 * 600 * 3);
+        assert_eq!(page.estimated_full_bytes(), 4000 * 6000 * 3);
+    }
+
+    #[test]
+    fn unload_proxy_keeps_original_dims() {
+        let mut doc = DocState::new();
+        let mut page = stub_page(6000);
+        page.img_w = 4000;
+        page.img_h = 6000;
+        page.image = Some(Arc::new(image::RgbImage::from_pixel(
+            400,
+            600,
+            image::Rgb([1, 2, 3]),
+        )));
+        doc.pages.push(page);
+        doc.unload_page_image(0);
+        assert!(doc.pages[0].image.is_none());
+        assert_eq!(doc.pages[0].width(), 4000);
+        assert_eq!(doc.pages[0].height(), 6000);
+    }
+
+    #[test]
+    fn crop_region_maps_proxy_coordinates() {
+        let mut doc = DocState::new();
+        let mut page = stub_page(200);
+        page.img_w = 80;
+        page.img_h = 200;
+        let mut img = image::RgbImage::from_pixel(40, 100, image::Rgb([10, 10, 10]));
+        for y in 25..50 {
+            for x in 0..40 {
+                img.put_pixel(x, y, image::Rgb([200, 0, 0]));
+            }
+        }
+        page.image = Some(Arc::new(img));
+        let page_id = page.id.clone();
+        doc.pages.push(page);
+        let r0 = Region {
+            id: "r0".into(),
+            page_id,
+            y0: 50,
+            y1: 99,
+            kind: "system".into(),
+            color: "#e74c3c".into(),
+        };
+        doc.pages[0].regions.insert(r0.id.clone(), r0);
+        doc.rebuild_rid_index();
+        let band = doc.crop_region("r0").unwrap();
+        assert_eq!(band.height(), 25);
+        assert_eq!(*band.get_pixel(0, 0), image::Rgb([200, 0, 0]));
     }
 
     #[test]

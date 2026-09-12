@@ -110,6 +110,7 @@ impl MaskToolApp {
             }
             return;
         }
+        self.ensure_sheet_masks();
         let (sx, sy) = self.screen_in_view(ev.position);
         let xform = self.xform();
         let (ix, iy) = xform.screen_to_image(sx, sy);
@@ -165,9 +166,10 @@ impl MaskToolApp {
                     return;
                 }
                 let id = new_id();
-                let r = self.brush_radius_px();
-                let px = ix.round() as i32;
-                let py = iy.round() as i32;
+                let r = self.canvas_radius_to_sheet(self.brush_radius_px());
+                let (sx, sy) = self.canvas_to_sheet_xy(ix, iy);
+                let px = sx.round() as i32;
+                let py = sy.round() as i32;
                 self.push_undo();
                 self.masks.push(MaskRect {
                     id: id.clone(),
@@ -633,13 +635,22 @@ impl MaskToolApp {
                     };
                     let mid = new_id();
                     let bound_block = self.resolve_bound_block(y0, y1);
+                    self.ensure_sheet_masks();
+                    let (sx0, sy0) = self.canvas_to_sheet_xy(
+                        clamp(min_x, iw) as f32,
+                        clamp(min_y, ih) as f32,
+                    );
+                    let (sx1, sy1) = self.canvas_to_sheet_xy(
+                        clamp(max_x, iw) as f32,
+                        clamp(max_y, ih) as f32,
+                    );
                     self.push_undo();
                     self.masks.push(MaskRect {
                         id: mid.clone(),
-                        x0: clamp(min_x, iw),
-                        y0: clamp(min_y, ih),
-                        x1: clamp(max_x, iw),
-                        y1: clamp(max_y, ih),
+                        x0: sx0.round() as i32,
+                        y0: sy0.round() as i32,
+                        x1: sx1.round() as i32,
+                        y1: sy1.round() as i32,
                         brush_points: Vec::new(),
                         brush_radius: 0,
                         color: self.mask_color,
@@ -657,12 +668,14 @@ impl MaskToolApp {
                 if let Some(m) = self.masks.iter_mut().find(|m| m.id == id) {
                     m.refresh_brush_bounds();
                 }
-                let end_iy = self
+                let end_sheet_y = self
                     .masks
                     .iter()
                     .find(|m| m.id == id)
                     .and_then(|m| m.brush_points.last())
-                    .map(|&(_, y)| y as f32)
+                    .map(|&(_, y)| y);
+                let end_iy = end_sheet_y
+                    .map(|y| self.sheet_to_canvas_xy(0.0, y as f32).1)
                     .unwrap_or(start_iy);
                 let bound_block = self.resolve_bound_block(start_iy, end_iy);
                 if let Some(m) = self.masks.iter_mut().find(|m| m.id == id) {
@@ -687,7 +700,9 @@ impl MaskToolApp {
                         self.selected.clear();
                     }
                     for m in &self.masks {
-                        if m.intersects_rect(min_x, min_y, max_x, max_y) {
+                        let (sx0, sy0) = self.canvas_to_sheet_xy(min_x, min_y);
+                        let (sx1, sy1) = self.canvas_to_sheet_xy(max_x, max_y);
+                        if m.intersects_rect(sx0, sy0, sx1, sy1) {
                             self.selected.insert(m.id.clone());
                         }
                     }
@@ -826,7 +841,7 @@ impl MaskToolApp {
     }
     pub fn image_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let render = self.render_image.clone();
-        let masks = self.masks.clone();
+        let masks = self.masks_for_canvas();
         let selected = self.selected.clone();
         let img_w = self.img_w;
         let img_h = self.img_h;

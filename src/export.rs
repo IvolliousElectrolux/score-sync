@@ -50,8 +50,6 @@ pub fn export_groups_chunk(
     let stem = export_stem(doc);
     let mut saved = 0usize;
     for (j, gid) in group_ids.iter().enumerate() {
-        doc.ensure_group_pages(gid)
-            .map_err(crate::error::Error::export)?;
         let Some(combined) = doc
             .render_group_final(gid)
             .map_err(crate::error::Error::export)?

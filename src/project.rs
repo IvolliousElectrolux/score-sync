@@ -554,6 +554,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             playhead: meta.video.playhead,
         },
         rid_page: HashMap::new(),
+        display_max_side: 0,
     };
     if let Some(bg) = meta.bg {
         if bg.enabled {

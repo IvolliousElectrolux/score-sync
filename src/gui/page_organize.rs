@@ -290,7 +290,7 @@ impl ScoreSyncApp {
             .doc
             .pages
             .iter()
-            .map(|p| p.estimated_bytes())
+            .map(|p| p.estimated_full_bytes())
             .max()
             .unwrap_or(32 * 1024 * 1024);
         let mem_n = crate::page_cache::concurrency_for_peak(peak);

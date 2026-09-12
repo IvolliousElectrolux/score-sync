@@ -33,7 +33,7 @@ impl MaskToolApp {
     }
 
     pub fn masks_clone(&self) -> Vec<MaskRect> {
-        self.masks.clone()
+        self.masks_for_canvas()
     }
 
     pub fn guides_clone(&self) -> GuideState {
@@ -91,6 +91,8 @@ impl MaskToolApp {
         self.img_h = h;
         self.clamp_brush_size();
         self.masks = masks;
+        self.masks_are_sheet = false;
+        self.ensure_sheet_masks();
         self.guides = guides;
         self.guide_selected.clear();
         self.selected.clear();
@@ -121,6 +123,8 @@ impl MaskToolApp {
         self.img_w = 0;
         self.img_h = 0;
         self.masks.clear();
+        self.masks_are_sheet = true;
+        self.content_scale = 1.0;
         self.guides = GuideState::default();
         self.guide_selected.clear();
         self.selected.clear();
@@ -174,6 +178,7 @@ impl MaskToolApp {
         self.img_h = h;
         self.clamp_brush_size();
         self.masks = masks;
+        self.masks_are_sheet = false;
         self.guides = guides;
         self.guide_selected.clear();
         self.selected.clear();
@@ -210,6 +215,7 @@ impl MaskToolApp {
         self.img_h = h;
         self.clamp_brush_size();
         self.masks = masks;
+        self.masks_are_sheet = false;
         self.guides = guides;
         self.guide_selected.clear();
         self.canvas_loading = false;
@@ -247,6 +253,8 @@ impl MaskToolApp {
         self.img_h = h;
         self.clamp_brush_size();
         self.masks = masks;
+        self.masks_are_sheet = false;
+        self.ensure_sheet_masks();
         self.guides = guides;
         self.guide_selected.clear();
         self.canvas_loading = false;
@@ -284,6 +292,7 @@ impl MaskToolApp {
                 self.img_h = h;
                 self.clamp_brush_size();
                 self.masks = restored;
+                self.masks_are_sheet = true;
                 self.guides = GuideState::default();
                 self.guide_selected.clear();
                 self.selected.clear();
@@ -423,7 +432,7 @@ impl MaskToolApp {
                     cx.notify();
                     return;
                 };
-                match export_masked(base, &this.masks, this.mask_opacity, &path) {
+                match export_masked(base, &this.masks_for_canvas(), this.mask_opacity, &path) {
                     Ok(()) => {
                         this.status = format!("已保存: {}", path.display()).into();
                     }

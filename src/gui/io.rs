@@ -818,7 +818,7 @@ impl ScoreSyncApp {
             .doc
             .pages
             .iter()
-            .map(|p| p.estimated_bytes())
+            .map(|p| p.estimated_full_bytes())
             .max()
             .unwrap_or(64 * 1024 * 1024)
             .saturating_mul(2);

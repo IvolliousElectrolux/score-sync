@@ -19,7 +19,7 @@ mod types;
 
 pub(crate) use blocks::BlockHitZone;
 pub(crate) use types::*;
-pub use blocks::{rgb_to_render_image, BlockBgTile, BlockTile};
+pub use blocks::{rgb_to_render_image, rgb_to_render_image_capped, BlockBgTile, BlockTile};
 pub use guides::GuideHostCmd;
 
 pub(crate) use std::collections::{HashMap, HashSet};
@@ -188,6 +188,10 @@ pub struct MaskToolApp {
     /// 直到宿主把匹配的整图回填 (`update_base_image`), 避免中间一帧闪回
     /// 拖之前的合成图.
     pub(crate) block_drag_freeze: Option<(f32, f32)>,
+    /// `self.masks` 是否已是谱面坐标 (未缩放, 不含 hoff/voff).
+    /// 宿主灌入的是画布坐标; 第一次套上 `preview_frame` 后转成谱面坐标,
+    /// 之后缩放/平移只改变换不改数字, 避免反复 round-trip 累计误差.
+    pub(crate) masks_are_sheet: bool,
     /// 当前组合的辅助线 (画布坐标系固定参考线, 仅蒙版画布内可见, 不参与
     /// 导出/合成), 随 `session_key` 一起切换.
     pub(crate) guides: GuideState,
@@ -313,6 +317,7 @@ impl MaskToolApp {
             block_selected: None,
             block_hover: false,
             block_drag_freeze: None,
+            masks_are_sheet: true,
             guides: GuideState::default(),
             guide_selected: HashSet::new(),
             guide_hover: None,

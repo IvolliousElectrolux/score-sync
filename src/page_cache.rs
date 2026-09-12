@@ -1,4 +1,7 @@
-//! 会话页图磁盘备份与内存滑动窗口 (默认 ±4, 高清页自动收窄).
+//! 会话页图磁盘备份与内存滑动窗口 (默认 ±4).
+//!
+//! 磁盘 PNG 保持导入原分辨率; 内存窗口只留按画布最长边缩小的显示代理.
+//! 识别 / 导出在需要时再临时解码原图.
 //!
 //! - 本会话打开的所有页 PNG 落在 `score_sync_session_<uuid>/`
 //! - 内存最多保留当前页前后各 [`window_radius_for_bytes`] 页
@@ -159,6 +162,77 @@ pub fn load_rgb(path: &Path) -> Result<RgbImage, String> {
     image::open(path)
         .map_err(|e| format!("读取页图失败 ({}): {e}", path.display()))
         .map(|i| i.to_rgb8())
+}
+
+/// 交互预览默认最长边 (画布尚未量到时). GUI 会按视口改成屏幕尺寸.
+pub const DEFAULT_DISPLAY_MAX_SIDE: u32 = 1920;
+
+/// 解码全图后立刻缩到显示尺寸并丢掉原图像素. 返回 `(原宽, 原高, 显示图)`.
+pub fn load_rgb_display(path: &Path, max_side: u32) -> Result<(u32, u32, RgbImage), String> {
+    let full = load_rgb(path)?;
+    let (w, h) = full.dimensions();
+    Ok((w, h, shrink_rgb_max_owned(full, max_side)))
+}
+
+/// 同 [`shrink_rgb_max`], 已够小则原样返回, 不 clone.
+pub fn shrink_rgb_max_owned(rgb: RgbImage, max_side: u32) -> RgbImage {
+    let m = rgb.width().max(rgb.height()).max(1);
+    if max_side == 0 || m <= max_side {
+        rgb
+    } else {
+        shrink_rgb_max(&rgb, max_side)
+    }
+}
+
+/// 把原图纵坐标条带 `[y0, y0+height)` 映到缩小后的显示图.
+pub fn map_band_to_proxy(y0: u32, height: u32, orig_h: u32, proxy_h: u32) -> (u32, u32) {
+    if orig_h == 0 || proxy_h == 0 {
+        return (0, 1);
+    }
+    if proxy_h == orig_h {
+        let y0 = y0.min(proxy_h.saturating_sub(1));
+        let h = height.min(proxy_h.saturating_sub(y0)).max(1);
+        return (y0, h);
+    }
+    let py0 = ((y0 as u64).saturating_mul(proxy_h as u64) / orig_h as u64) as u32;
+    let py1 =
+        ((y0 as u64 + height as u64).saturating_mul(proxy_h as u64) / orig_h as u64) as u32;
+    let py0 = py0.min(proxy_h.saturating_sub(1));
+    let py1 = py1.max(py0.saturating_add(1)).min(proxy_h);
+    (py0, py1 - py0)
+}
+
+/// 整矩形裁切, 按行 `copy_from_slice`.
+pub fn crop_rect_fast(src: &RgbImage, x: u32, y: u32, w: u32, h: u32) -> RgbImage {
+    let sw = src.width();
+    let sh = src.height();
+    if sw == 0 || sh == 0 {
+        return RgbImage::new(1, 1);
+    }
+    let x = x.min(sw.saturating_sub(1));
+    let y = y.min(sh.saturating_sub(1));
+    let w = w.min(sw.saturating_sub(x)).max(1);
+    let h = h.min(sh.saturating_sub(y)).max(1);
+    let mut out = RgbImage::new(w, h);
+    let src_buf: &[u8] = src;
+    let dst_buf: &mut [u8] = &mut out;
+    let row_bytes = w as usize * 3;
+    for row in 0..h {
+        let s = ((y + row) as usize * sw as usize + x as usize) * 3;
+        let d = row as usize * row_bytes;
+        dst_buf[d..d + row_bytes].copy_from_slice(&src_buf[s..s + row_bytes]);
+    }
+    out
+}
+
+/// 把 `src` 缩到 `tw×th`. 已是目标尺寸则 clone.
+pub fn scale_rgb(src: &RgbImage, tw: u32, th: u32) -> RgbImage {
+    let tw = tw.max(1);
+    let th = th.max(1);
+    if src.width() == tw && src.height() == th {
+        return src.clone();
+    }
+    image::imageops::thumbnail(src, tw, th)
 }
 
 /// 「组织页面」缩略图最长边 (像素). 与 GUI `ORG_THUMB_MAX_SIDE` 相同.
@@ -340,5 +414,26 @@ mod window_radius_tests {
             org_thumb_path(&p).file_name().and_then(|s| s.to_str()),
             Some("Chopin_p012.org.jpg")
         );
+    }
+
+    #[test]
+    fn map_band_identity_when_same_height() {
+        assert_eq!(super::map_band_to_proxy(100, 50, 1000, 1000), (100, 50));
+    }
+
+    #[test]
+    fn map_band_scales_to_proxy() {
+        let (y, h) = super::map_band_to_proxy(1000, 500, 6000, 1200);
+        assert_eq!(y, 200);
+        assert_eq!(h, 100);
+    }
+
+    #[test]
+    fn crop_rect_fast_copies_block() {
+        let mut img = image::RgbImage::from_pixel(8, 6, image::Rgb([1, 2, 3]));
+        img.put_pixel(3, 2, image::Rgb([9, 8, 7]));
+        let c = super::crop_rect_fast(&img, 2, 1, 3, 2);
+        assert_eq!(c.dimensions(), (3, 2));
+        assert_eq!(*c.get_pixel(1, 1), image::Rgb([9, 8, 7]));
     }
 }

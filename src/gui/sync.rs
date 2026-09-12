@@ -18,6 +18,8 @@ struct VideoPoolRebuildEntry {
 struct MaskPreviewMemberSnap {
     rid: String,
     page_idx: usize,
+    img_w: u32,
+    img_h: u32,
     y0: u32,
     height: u32,
     image: Option<Arc<image::RgbImage>>,
@@ -25,7 +27,7 @@ struct MaskPreviewMemberSnap {
 }
 
 struct MaskPreviewBuilt {
-    loaded_pages: Vec<(usize, Arc<image::RgbImage>)>,
+    loaded_pages: Vec<(usize, u32, u32, Arc<image::RgbImage>)>,
     piece_sizes: Vec<(String, u32, u32)>,
     piece_ys: HashMap<String, Option<i32>>,
     tiles: Vec<mask_tool::gui::BlockTile>,
@@ -56,6 +58,8 @@ fn collect_mask_preview_members(
             Some(MaskPreviewMemberSnap {
                 rid: rid.clone(),
                 page_idx: pi,
+                img_w: page.width().max(1),
+                img_h: page.height().max(1),
                 y0,
                 height: y1 - y0 + 1,
                 image: page.image.clone(),
@@ -81,19 +85,29 @@ fn build_mask_preview(
     bg_aspect_h: u32,
     voff_shift: i64,
     compute_bg_tile: bool,
+    display_max_side: u32,
 ) -> Result<MaskPreviewBuilt, String> {
     let mut loaded_pages = Vec::new();
     let mut pieces = Vec::new();
+    let mut orig_sizes: Vec<(u32, u32)> = Vec::new();
     for m in members {
+        orig_sizes.push((m.img_w, m.height));
         let img = if let Some(existing) = m.image {
             existing
         } else {
-            let rgb = crate::page_cache::load_rgb(&m.disk_path)?;
+            let (ow, oh, rgb) =
+                crate::page_cache::load_rgb_display(&m.disk_path, display_max_side)?;
             let a = Arc::new(rgb);
-            loaded_pages.push((m.page_idx, a.clone()));
+            loaded_pages.push((m.page_idx, ow, oh, a.clone()));
             a
         };
-        let piece = crate::model::crop_band_fast(&img, m.y0, m.height);
+        let (py0, ph) = crate::page_cache::map_band_to_proxy(
+            m.y0,
+            m.height,
+            m.img_h.max(1),
+            img.height().max(1),
+        );
+        let piece = crate::model::crop_band_fast(&img, py0, ph);
         pieces.push((m.rid, piece));
     }
     if pieces.is_empty() {
@@ -108,9 +122,14 @@ fn build_mask_preview(
     }
     let heights: Vec<(String, u32)> = pieces
         .iter()
-        .map(|(rid, img)| (rid.clone(), img.height()))
+        .zip(orig_sizes.iter())
+        .map(|((rid, _), &(_, orig_h))| (rid.clone(), orig_h))
         .collect();
-    let sheet_w = pieces.iter().map(|(_, img)| img.width()).max().unwrap_or(1);
+    let sheet_w = orig_sizes
+        .iter()
+        .map(|(w, _)| *w)
+        .max()
+        .unwrap_or(1);
     let sheet_h = mask_tool::layout::sheet_height(&heights, &layout);
     let (canvas_w, canvas_h, hoff, voff) = if bg_enabled && bg_src_w > 0 && bg_src_h > 0 {
         let frame = apply_bg::process::preview_frame(
@@ -126,12 +145,29 @@ fn build_mask_preview(
     } else {
         (sheet_w.max(1), sheet_h.max(1), 0, 0)
     };
-    let piece_ys = mask_tool::staff::piece_staff_ys_from_parts(&pieces, ink_threshold);
+    let piece_ys: HashMap<String, Option<i32>> = pieces
+        .iter()
+        .zip(orig_sizes.iter())
+        .map(|((rid, img), &(_, orig_h))| {
+            let y1 = img.height().saturating_sub(1) as i32;
+            let a = mask_tool::staff::band_staff_anchor(img, 0, y1, ink_threshold);
+            let a = a.map(|v| {
+                let ph = img.height().max(1);
+                if ph == orig_h {
+                    v
+                } else {
+                    (v as i64 * orig_h as i64 / ph as i64) as i32
+                }
+            });
+            (rid.clone(), a)
+        })
+        .collect();
     let tiles: Vec<mask_tool::gui::BlockTile> = pieces
         .iter()
-        .map(|(rid, img)| {
+        .zip(orig_sizes.iter())
+        .map(|((rid, img), &(orig_w, orig_h))| {
             let st = stats.get(rid).copied().unwrap_or_default();
-            mask_tool::gui::BlockTile::from_piece(rid.clone(), img, st)
+            mask_tool::gui::BlockTile::from_piece_sized(rid.clone(), img, orig_w, orig_h, st)
         })
         .collect();
     let bg_tile = if compute_bg_tile {
@@ -154,7 +190,8 @@ fn build_mask_preview(
     };
     let piece_sizes: Vec<(String, u32, u32)> = pieces
         .iter()
-        .map(|(rid, img)| (rid.clone(), img.width(), img.height()))
+        .zip(orig_sizes.iter())
+        .map(|((rid, _), &(orig_w, orig_h))| (rid.clone(), orig_w, orig_h))
         .collect();
     drop(pieces);
     Ok(MaskPreviewBuilt {
@@ -298,9 +335,23 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn retire_current_render_image(&mut self) {
-        if let Some(img) = self.render_image.take() {
-            self.gpu_drop.push(img);
+        let a = self.render_image.take();
+        let b = self.fit_render_image.take();
+        match (a, b) {
+            (Some(a), Some(b)) if Arc::ptr_eq(&a, &b) => self.gpu_drop.push(a),
+            (Some(a), Some(b)) => {
+                self.gpu_drop.push(a);
+                self.gpu_drop.push(b);
+            }
+            (Some(a), None) => self.gpu_drop.push(a),
+            (None, Some(b)) => self.gpu_drop.push(b),
+            (None, None) => {}
         }
+        self.view_lod = None;
+        self.lod_is_fit = true;
+        self.lod_full = None;
+        self.lod_pending = None;
+        self.lod_gen = self.lod_gen.wrapping_add(1);
     }
 
     pub(super) fn flush_gpu_drops(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -348,8 +399,9 @@ impl ScoreSyncApp {
         self.render_gen = self.render_gen.wrapping_add(1);
         let gen = self.render_gen;
         let (tx, rx) = async_channel::bounded::<Arc<RenderImage>>(1);
+        let max_side = self.doc.display_max_side();
         std::thread::spawn(move || {
-            let tex = mask_tool::gui::rgb_to_render_image(&img);
+            let tex = mask_tool::gui::rgb_to_render_image_capped(&img, max_side);
             let _ = tx.send_blocking(tex);
         });
         cx.spawn(async move |this, cx| {
@@ -358,7 +410,18 @@ impl ScoreSyncApp {
                     if view.render_gen != gen {
                         return; // 又切走了, 这份贴图已经过期
                     }
+                    view.fit_render_image = Some(tex.clone());
                     view.render_image = Some(tex);
+                    view.lod_is_fit = true;
+                    view.view_lod = Some(super::canvas::ViewLod {
+                        x: 0,
+                        y: 0,
+                        w: w.max(1),
+                        h: h.max(1),
+                        tex_w: w.max(1),
+                        tex_h: h.max(1),
+                    });
+                    view.sync_view_lod(cx);
                     view.sync_mask_image(cx);
                     cx.notify();
                 })
@@ -367,6 +430,138 @@ impl ScoreSyncApp {
         })
         .detach();
         cx.notify();
+    }
+
+    fn restore_fit_lod(&mut self) {
+        if self.lod_pending.is_some() {
+            self.lod_gen = self.lod_gen.wrapping_add(1);
+            self.lod_pending = None;
+        }
+        if self.lod_is_fit {
+            self.lod_full = None;
+            return;
+        }
+        if let Some(img) = self.render_image.take() {
+            if self
+                .fit_render_image
+                .as_ref()
+                .map(|f| !Arc::ptr_eq(f, &img))
+                .unwrap_or(true)
+            {
+                self.gpu_drop.push(img);
+            }
+        }
+        self.render_image = self.fit_render_image.clone();
+        self.lod_is_fit = true;
+        self.lod_full = None;
+        if self.img_w > 0 && self.img_h > 0 {
+            self.view_lod = Some(super::canvas::ViewLod {
+                x: 0,
+                y: 0,
+                w: self.img_w,
+                h: self.img_h,
+                tex_w: self.img_w,
+                tex_h: self.img_h,
+            });
+        }
+    }
+
+    /// 视口内贴图对齐窗口像素: 预览代理够用就用整页; 放大超过代理密度则
+    /// 从原图裁一块 ≈ 窗口大小的图 (不超过原图 1:1).
+    pub(super) fn sync_view_lod(&mut self, cx: &mut Context<Self>) {
+        if self.side_tool == SideTool::Mask || self.side_tool == SideTool::Video {
+            return;
+        }
+        let vw = f32::from(self.view_bounds.size.width);
+        let vh = f32::from(self.view_bounds.size.height);
+        if vw < 8.0 || vh < 8.0 || self.img_w == 0 || self.img_h == 0 {
+            return;
+        }
+        let Some(page) = self.doc.current_page() else {
+            return;
+        };
+        let Some(proxy) = page.image.clone() else {
+            return;
+        };
+        let orig_w = page.width().max(1);
+        let orig_h = page.height().max(1);
+        let disk = page.disk_path.clone();
+        let is_full = page.is_full_res();
+        let xform = self.xform();
+        let proxy_scale = (proxy.width() as f32 / orig_w as f32)
+            .max(proxy.height() as f32 / orig_h as f32)
+            .max(0.0001);
+        if xform.scale <= proxy_scale * 1.02 {
+            self.restore_fit_lod();
+            return;
+        }
+        let vis = super::canvas::ViewLod::compute(&xform, vw, vh, orig_w, orig_h, 0.0);
+        if let Some(cur) = self.view_lod {
+            if !self.lod_is_fit && cur.covers(&vis) && self.render_image.is_some() {
+                return;
+            }
+        }
+        if let Some(pending) = self.lod_pending {
+            if pending.covers(&vis) {
+                return;
+            }
+        }
+        let need = super::canvas::ViewLod::compute(&xform, vw, vh, orig_w, orig_h, 0.22);
+        self.lod_gen = self.lod_gen.wrapping_add(1);
+        let gen = self.lod_gen;
+        self.lod_pending = Some(need);
+        let cached = self.lod_full.clone();
+        let src_full = if is_full { Some(proxy) } else { cached };
+        let (tx, rx) = async_channel::bounded::<(
+            super::canvas::ViewLod,
+            Arc<gpui::RenderImage>,
+            Option<Arc<image::RgbImage>>,
+        )>(1);
+        std::thread::spawn(move || {
+            let loaded = if src_full.is_none() {
+                crate::page_cache::load_rgb(&disk).ok().map(Arc::new)
+            } else {
+                None
+            };
+            let Some(src) = src_full.or(loaded) else {
+                return;
+            };
+            let crop = crate::page_cache::crop_rect_fast(&src, need.x, need.y, need.w, need.h);
+            let rgb = crate::page_cache::scale_rgb(&crop, need.tex_w, need.tex_h);
+            drop(crop);
+            let keep_full = if is_full { None } else { Some(src) };
+            let tex = mask_tool::gui::rgb_to_render_image_capped(&rgb, need.tex_w.max(need.tex_h));
+            let _ = tx.send_blocking((need, tex, keep_full));
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok((lod, tex, full)) = rx.recv().await {
+                this.update(cx, |view, cx| {
+                    if view.lod_gen != gen {
+                        return;
+                    }
+                    if let Some(old) = view.render_image.take() {
+                        if view
+                            .fit_render_image
+                            .as_ref()
+                            .map(|f| !Arc::ptr_eq(f, &old))
+                            .unwrap_or(true)
+                        {
+                            view.gpu_drop.push(old);
+                        }
+                    }
+                    view.render_image = Some(tex);
+                    view.view_lod = Some(lod);
+                    view.lod_is_fit = false;
+                    view.lod_pending = None;
+                    if let Some(full) = full {
+                        view.lod_full = Some(full);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// 异步加载当前页附近窗口并释放窗外页图.
@@ -418,25 +613,35 @@ impl ScoreSyncApp {
         }
         let ink = self.doc.ink_threshold;
         let margin = self.doc.margin;
+        let max_side = self.doc.display_max_side();
         let (tx, rx) = async_channel::unbounded::<(
             usize,
-            Result<image::RgbImage, String>,
+            Result<(u32, u32, image::RgbImage), String>,
             Option<crate::detect_cache::PageDetectFile>,
         )>();
         std::thread::spawn(move || {
             for (idx, path, need_detect) in jobs {
-                let r = crate::page_cache::load_rgb(&path);
-                let detect = if need_detect {
-                    match &r {
+                if need_detect {
+                    let r = crate::page_cache::load_rgb(&path);
+                    let detect = match &r {
                         Ok(img) => Some(crate::detect_cache::load_or_detect(
                             img, &path, ink, margin,
                         )),
                         Err(_) => crate::detect_cache::load(&path),
-                    }
+                    };
+                    let display = r.map(|full| {
+                        let (w, h) = full.dimensions();
+                        (
+                            w,
+                            h,
+                            crate::page_cache::shrink_rgb_max_owned(full, max_side),
+                        )
+                    });
+                    let _ = tx.send_blocking((idx, display, detect));
                 } else {
-                    None
-                };
-                let _ = tx.send_blocking((idx, r, detect));
+                    let display = crate::page_cache::load_rgb_display(&path, max_side);
+                    let _ = tx.send_blocking((idx, display, None));
+                }
             }
         });
         cx.spawn(async move |this, cx| {
@@ -457,10 +662,10 @@ impl ScoreSyncApp {
                             view.doc.ensure_page_groups(idx);
                         }
                     }
-                    if let Ok(img) = result {
+                    if let Ok((w, h, img)) = result {
                         if let Some(page) = view.doc.pages.get_mut(idx) {
-                            page.img_w = img.width();
-                            page.img_h = img.height();
+                            page.img_w = w;
+                            page.img_h = h;
                             page.image = Some(Arc::new(img));
                         }
                         view.doc.seed_region_anchors_for_page(idx);
@@ -844,6 +1049,7 @@ impl ScoreSyncApp {
         };
         let voff_shift = self.doc.get_group_voff_shift(&gid);
         let doc_masks = self.doc.get_group_masks(&gid).to_vec();
+        let display_max_side = self.doc.display_max_side();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let result = build_mask_preview(
@@ -859,6 +1065,7 @@ impl ScoreSyncApp {
                 bg_aspect_h,
                 voff_shift,
                 compute_bg_tile,
+                display_max_side,
             );
             let _ = tx.send_blocking((result, block_layout));
         });
@@ -882,10 +1089,10 @@ impl ScoreSyncApp {
                         return;
                     }
                 };
-                for (idx, img) in built.loaded_pages {
+                for (idx, orig_w, orig_h, img) in built.loaded_pages {
                     if let Some(page) = view.doc.pages.get_mut(idx) {
-                        page.img_w = img.width();
-                        page.img_h = img.height();
+                        page.img_w = orig_w;
+                        page.img_h = orig_h;
                         if page.image.is_none() {
                             page.image = Some(img);
                         }
@@ -1149,7 +1356,6 @@ impl ScoreSyncApp {
             });
             return;
         };
-        let _ = self.doc.ensure_group_pages(&gid);
         let job = self.doc.prepare_group_render_job(&gid);
         self.doc.retain_memory_window();
         let Some(job) = job else {
@@ -1377,7 +1583,7 @@ impl ScoreSyncApp {
             .doc
             .pages
             .first()
-            .map(|p| p.estimated_bytes().saturating_mul(3))
+            .map(|p| p.estimated_full_bytes().saturating_mul(3))
             .unwrap_or(64 * 1024 * 1024);
         let conc = crate::page_cache::concurrency_for_peak(peak.max(128 * 1024 * 1024));
 
@@ -1406,7 +1612,6 @@ impl ScoreSyncApp {
                         };
                         let label = view.doc.groups[idx].display_name(idx);
                         let cache_path = cache_root.join(format!("{gid}.png"));
-                        let _ = view.doc.ensure_group_pages(gid);
                         let job = view.doc.prepare_group_render_job(gid);
                         view.doc.retain_memory_window();
                         out.push(VideoPoolRebuildEntry {
@@ -1920,6 +2125,8 @@ mod mask_preview_wait_probe {
         let members = vec![MaskPreviewMemberSnap {
             rid: rid.to_string(),
             page_idx: 0,
+            img_w: pw.max(1),
+            img_h: ph.max(1),
             y0,
             height,
             image: Some(Arc::new(page)),
@@ -1940,6 +2147,7 @@ mod mask_preview_wait_probe {
             aspect_h,
             voff_shift,
             true,
+            crate::page_cache::DEFAULT_DISPLAY_MAX_SIDE,
         )
         .expect("build_mask_preview");
         step("build_mask_preview 全流水线 (页已在内存, 三层缩略图)", t0);

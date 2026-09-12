@@ -52,9 +52,15 @@ impl MaskToolApp {
         let clamp = |v: f32, hi: i32| -> i32 {
             v.round().clamp(0.0, (hi - 1).max(0) as f32) as i32
         };
+        self.ensure_sheet_masks();
         let pts: Vec<(i32, i32)> = draft
             .iter()
-            .map(|(x, y)| (clamp(*x, iw), clamp(*y, ih)))
+            .map(|(x, y)| {
+                let cx = clamp(*x, iw);
+                let cy = clamp(*y, ih);
+                let (sx, sy) = self.canvas_to_sheet_xy(cx as f32, cy as f32);
+                (sx.round() as i32, sy.round() as i32)
+            })
             .collect();
         // 去掉连续重复点
         let mut dedup: Vec<(i32, i32)> = Vec::new();
@@ -208,11 +214,13 @@ impl MaskToolApp {
     }
 
     pub(super) fn append_brush_point(&mut self, id: &str, ix: f32, iy: f32) -> bool {
+        self.ensure_sheet_masks();
+        let (sx, sy) = self.canvas_to_sheet_xy(ix, iy);
         let Some(m) = self.masks.iter_mut().find(|m| m.id == id) else {
             return false;
         };
-        let px = ix.round() as i32;
-        let py = iy.round() as i32;
+        let px = sx.round() as i32;
+        let py = sy.round() as i32;
         if let Some(&(lx, ly)) = m.brush_points.last() {
             let dx = (px - lx) as f32;
             let dy = (py - ly) as f32;
@@ -227,10 +235,11 @@ impl MaskToolApp {
     }
 
     pub(super) fn hit_mask(&self, ix: f32, iy: f32) -> Option<String> {
+        let (sx, sy) = self.canvas_to_sheet_xy(ix, iy);
         self.masks
             .iter()
             .rev()
-            .find(|m| m.contains(ix, iy))
+            .find(|m| m.contains(sx, sy))
             .map(|m| m.id.clone())
     }
 
@@ -246,10 +255,11 @@ impl MaskToolApp {
 
     /// 拖擦: 删掉该点碰到的全部蒙版.
     pub(super) fn erase_all_at(&mut self, ix: f32, iy: f32) -> bool {
+        let (sx, sy) = self.canvas_to_sheet_xy(ix, iy);
         let ids: Vec<String> = self
             .masks
             .iter()
-            .filter(|m| m.contains(ix, iy))
+            .filter(|m| m.contains(sx, sy))
             .map(|m| m.id.clone())
             .collect();
         if ids.is_empty() {
@@ -282,16 +292,21 @@ impl MaskToolApp {
         }
     }
 
-    /// 在图像边界内整体平移选中蒙版; 返回实际位移.
+    /// 在图像边界内整体平移选中蒙版; 返回实际位移 (画布像素, 供拖动手感).
     pub(super) fn translate_selected(&mut self, dx: i32, dy: i32) -> (i32, i32) {
         if dx == 0 && dy == 0 {
             return (0, 0);
         }
+        self.ensure_sheet_masks();
         let iw = self.img_w as i32;
         let ih = self.img_h as i32;
         if iw < 1 || ih < 1 {
             return (0, 0);
         }
+        let cs = self.content_scale_or_1();
+        let hoff = self.block_hoff as f32;
+        let voff = self.block_voff as f32;
+        let to_c = |x: i32, y: i32| (hoff + x as f32 * cs, voff + y as f32 * cs);
         let mut min_dx = i32::MIN / 4;
         let mut max_dx = i32::MAX / 4;
         let mut min_dy = i32::MIN / 4;
@@ -303,25 +318,32 @@ impl MaskToolApp {
             }
             any = true;
             let r = m.normalized();
-            min_dx = min_dx.max(-r.x0);
-            max_dx = max_dx.min((iw - 1) - r.x1);
-            min_dy = min_dy.max(-r.y0);
-            max_dy = max_dy.min((ih - 1) - r.y1);
+            let (cx0, cy0) = to_c(r.x0, r.y0);
+            let (cx1, cy1) = to_c(r.x1, r.y1);
+            min_dx = min_dx.max(-cx0.round() as i32);
+            max_dx = max_dx.min((iw - 1) - cx1.round() as i32);
+            min_dy = min_dy.max(-cy0.round() as i32);
+            max_dy = max_dy.min((ih - 1) - cy1.round() as i32);
         }
         if !any {
             return (0, 0);
         }
         let dx = dx.clamp(min_dx, max_dx);
         let dy = dy.clamp(min_dy, max_dy);
-        if dx == 0 && dy == 0 {
+        let sdx = (dx as f32 / cs).round() as i32;
+        let sdy = (dy as f32 / cs).round() as i32;
+        if sdx == 0 && sdy == 0 {
             return (0, 0);
         }
         for m in &mut self.masks {
             if self.selected.contains(&m.id) {
-                m.translate(dx, dy);
+                m.translate(sdx, sdy);
             }
         }
-        (dx, dy)
+        (
+            (sdx as f32 * cs).round() as i32,
+            (sdy as f32 * cs).round() as i32,
+        )
     }
 
     fn snapshot(&self) -> UndoSnapshot {
@@ -389,6 +411,7 @@ impl MaskToolApp {
         let layout_changed =
             prev.block_layout != self.block_layout || prev.voff_target != self.voff_target;
         self.masks = prev.masks;
+        self.masks_are_sheet = true;
         self.block_layout = prev.block_layout;
         self.voff_target = prev.voff_target;
         self.guides = prev.guides;
@@ -423,6 +446,7 @@ impl MaskToolApp {
         let layout_changed =
             next.block_layout != self.block_layout || next.voff_target != self.voff_target;
         self.masks = next.masks;
+        self.masks_are_sheet = true;
         self.block_layout = next.block_layout;
         self.voff_target = next.voff_target;
         self.guides = next.guides;

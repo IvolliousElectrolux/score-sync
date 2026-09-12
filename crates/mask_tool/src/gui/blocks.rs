@@ -30,13 +30,24 @@ pub struct BlockTile {
 impl BlockTile {
     pub fn from_piece(region_id: String, img: &image::RgbImage, stats: crate::layout::PieceStats) -> Self {
         let (width, height) = img.dimensions();
+        Self::from_piece_sized(region_id, img, width, height, stats)
+    }
+
+    /// `logical_w`/`logical_h` 是原图像素尺寸 (布局/命中); GPU/thumb 可能更小.
+    pub fn from_piece_sized(
+        region_id: String,
+        img: &image::RgbImage,
+        logical_w: u32,
+        logical_h: u32,
+        stats: crate::layout::PieceStats,
+    ) -> Self {
         let (thumb, image) = rgb_to_thumb_and_render(img);
         Self {
             region_id,
             image,
             thumb,
-            width,
-            height,
+            width: logical_w.max(1),
+            height: logical_h.max(1),
             top_fill: mean_to_u8(stats.top.0),
             bottom_fill: mean_to_u8(stats.bottom.0),
         }
@@ -146,9 +157,14 @@ pub const GPU_TEX_MAX_SIDE: u32 = 2048;
 /// 面积平均缩成缩略图再上传 (大倍率下比 Triangle 快一个数量级, 预览
 /// 本来也装不进 2048 以上的细节).
 pub fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
+    rgb_to_render_image_capped(rgb, GPU_TEX_MAX_SIDE)
+}
+
+/// 同 [`rgb_to_render_image`], 最长边上限由调用方指定 (页面预览跟屏幕走).
+pub fn rgb_to_render_image_capped(rgb: &image::RgbImage, max_side: u32) -> Arc<RenderImage> {
     let (w, h) = rgb.dimensions();
-    if w.max(h) > GPU_TEX_MAX_SIDE {
-        let scaled = downscale_to_max_side(rgb, GPU_TEX_MAX_SIDE);
+    if max_side > 0 && w.max(h) > max_side {
+        let scaled = downscale_to_max_side(rgb, max_side);
         return rgb_to_render_image_raw(&scaled);
     }
     rgb_to_render_image_raw(rgb)
@@ -341,6 +357,7 @@ impl MaskToolApp {
         if let Some(frame) = self.compute_preview_frame() {
             self.apply_preview_frame(frame);
         }
+        self.ensure_sheet_masks();
     }
 
     /// 宿主只换底色层 (应用/取消/改纯色), 分块贴图不动, 避免整页重解码.
@@ -614,26 +631,18 @@ impl MaskToolApp {
 
     /// 按当前 `block_layout` / `voff_target` 重算预览画布尺寸与谱面偏移,
     /// 不碰像素. 拖动分块时每帧调用, 让叠加线/命中测试/贴图位置跟手.
-    /// 底色页面尺寸锁在按宽定高; 谱面变高时只缩小内部块 (`content_scale`),
-    /// 蒙版坐标按旧/新 (hoff, voff, scale) 整组换算.
+    /// 底色页面尺寸锁在按宽定高; 谱面变高时只缩小内部块 (`content_scale`).
+    /// 蒙版存在谱面坐标里, 缩放变化只改变换, 不再改数字.
     pub(super) fn refresh_preview_geom(&mut self) {
         let Some(frame) = self.compute_preview_frame() else {
             return;
         };
-        self.remap_masks_canvas(
-            self.block_hoff,
-            self.block_voff,
-            self.content_scale,
-            frame.hoff,
-            frame.voff,
-            frame.content_scale,
-        );
+        self.ensure_sheet_masks();
         self.apply_preview_frame(frame);
     }
 
-    /// 撤重后: 快照里的蒙版已经是当时画布坐标系, 只按还原后的 layout
-    /// 重算 hoff/voff/尺寸, 不要再 `remap_masks_canvas` (否则会把旧坐标
-    /// 误当成当前坐标系再映一次, 画笔跟着偏).
+    /// 撤重后: 快照里的蒙版已经是谱面坐标, 只按还原后的 layout
+    /// 重算 hoff/voff/尺寸, 不要再把坐标当画布点映一次.
     pub(super) fn restore_preview_geom_from_layout(&mut self) {
         let Some(frame) = self.compute_preview_frame() else {
             return;
@@ -681,43 +690,67 @@ impl MaskToolApp {
         (x0, x1.max(x0))
     }
 
-    /// 把蒙版从旧的 (hoff, voff, content_scale) 映到新变换.
-    /// 谱面点 `(sx, sy)` 对应画布 `hoff + sx * scale`, `voff + sy * scale`.
-    fn remap_masks_canvas(
-        &mut self,
-        old_hoff: i64,
-        old_voff: i64,
-        old_scale: f32,
-        new_hoff: i64,
-        new_voff: i64,
-        new_scale: f32,
-    ) {
-        let os = if old_scale > 0.0001 { old_scale } else { 1.0 };
-        let ns = if new_scale > 0.0001 { new_scale } else { 1.0 };
-        if old_hoff == new_hoff
-            && old_voff == new_voff
-            && (os - ns).abs() < 0.0001
-        {
+    /// 宿主/落笔给的是画布坐标. 转成谱面坐标后, 缩放只改变换.
+    pub(super) fn ensure_sheet_masks(&mut self) {
+        if self.masks_are_sheet {
             return;
         }
-        let oh = old_hoff as f32;
-        let ov = old_voff as f32;
-        let nh = new_hoff as f32;
-        let nv = new_voff as f32;
-        let radius_k = ns / os;
+        let cs = self.content_scale_or_1();
+        let inv = 1.0 / cs;
+        let dx = -(self.block_hoff as f32) * inv;
+        let dy = -(self.block_voff as f32) * inv;
         for m in &mut self.masks {
-            if m.is_brush() {
-                m.brush_radius = ((m.brush_radius as f32) * radius_k).round().max(1.0) as i32;
-            }
-            m.map_xy(|x, y| {
-                let sx = (x as f32 - oh) / os;
-                let sy = (y as f32 - ov) / os;
-                (
-                    (nh + sx * ns).round() as i32,
-                    (nv + sy * ns).round() as i32,
-                )
-            });
+            m.map_scale(inv, dx, dy);
         }
+        self.masks_are_sheet = true;
+    }
+
+    /// 给宿主 / 绘制用: 谱面坐标映回当前画布 (hoff/voff/content_scale).
+    pub(super) fn masks_for_canvas(&self) -> Vec<MaskRect> {
+        if !self.masks_are_sheet {
+            return self.masks.clone();
+        }
+        self.masks
+            .iter()
+            .cloned()
+            .map(|m| self.mask_sheet_to_canvas(m))
+            .collect()
+    }
+
+    fn mask_sheet_to_canvas(&self, mut m: MaskRect) -> MaskRect {
+        let cs = self.content_scale_or_1();
+        m.map_scale(cs, self.block_hoff as f32, self.block_voff as f32);
+        m
+    }
+
+    pub(super) fn canvas_to_sheet_xy(&self, x: f32, y: f32) -> (f32, f32) {
+        if !self.masks_are_sheet {
+            return (x, y);
+        }
+        let cs = self.content_scale_or_1();
+        (
+            (x - self.block_hoff as f32) / cs,
+            (y - self.block_voff as f32) / cs,
+        )
+    }
+
+    pub(super) fn sheet_to_canvas_xy(&self, x: f32, y: f32) -> (f32, f32) {
+        if !self.masks_are_sheet {
+            return (x, y);
+        }
+        let cs = self.content_scale_or_1();
+        (
+            self.block_hoff as f32 + x * cs,
+            self.block_voff as f32 + y * cs,
+        )
+    }
+
+    pub(super) fn canvas_radius_to_sheet(&self, r: i32) -> i32 {
+        if !self.masks_are_sheet {
+            return r.max(1);
+        }
+        let cs = self.content_scale_or_1();
+        ((r as f32) / cs).round().max(1.0) as i32
     }
 
     /// 拖动分块导致拼合图总高 (罕见情况下总宽) 变化时, 底色合成居中的
@@ -727,8 +760,15 @@ impl MaskToolApp {
         if dx == 0 && dy == 0 {
             return;
         }
+        self.ensure_sheet_masks();
+        let cs = self.content_scale_or_1();
+        let sdx = (dx as f32 / cs).round() as i32;
+        let sdy = (dy as f32 / cs).round() as i32;
+        if sdx == 0 && sdy == 0 {
+            return;
+        }
         for m in &mut self.masks {
-            m.translate(dx, dy);
+            m.translate(sdx, sdy);
         }
     }
 
@@ -780,16 +820,16 @@ impl MaskToolApp {
         if self.block_heights.is_empty() || self.masks.is_empty() {
             return;
         }
+        self.ensure_sheet_masks();
         let deltas = layout::block_content_shifts(&self.block_heights, old_layout, &self.block_layout);
         if deltas.is_empty() {
             return;
         }
         let old_spans = layout::compute_spans(&self.block_heights, old_layout);
-        let cs = self.content_scale_or_1();
         for m in &mut self.masks {
             let target = m.bound_block.as_ref().filter(|b| self.block_heights.iter().any(|(id, _)| id == *b)).cloned();
             let target = target.or_else(|| {
-                let cy = ((m.y0 + m.y1) as f32 / 2.0 - self.block_voff as f32) / cs;
+                let cy = (m.y0 + m.y1) as f32 / 2.0;
                 old_spans
                     .iter()
                     .find(|(_, y0, y1)| (*y0 as f32) <= cy && cy <= (*y1 as f32))
@@ -797,7 +837,7 @@ impl MaskToolApp {
             });
             if let Some(rid) = target {
                 if let Some(&d) = deltas.get(&rid) {
-                    m.offset_y((d as f32 * cs).round() as i32);
+                    m.offset_y(d);
                 }
             }
         }

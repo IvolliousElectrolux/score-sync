@@ -273,6 +273,20 @@ impl MaskRect {
             self.refresh_poly_bounds();
         }
     }
+
+    /// 仿射 `(x, y) → (x * k + dx, y * k + dy)`, 画笔半径乘 `|k|`.
+    /// 谱面 ↔ 画布只在边界上走这一次, 不要对同一份整数坐标反复 round-trip.
+    pub fn map_scale(&mut self, k: f32, dx: f32, dy: f32) {
+        if self.is_brush() {
+            self.brush_radius = ((self.brush_radius as f32) * k.abs()).round().max(1.0) as i32;
+        }
+        self.map_xy(|x, y| {
+            (
+                (x as f32 * k + dx).round() as i32,
+                (y as f32 * k + dy).round() as i32,
+            )
+        });
+    }
 }
 
 /// 射线法判断点是否在多边形内.
@@ -555,5 +569,50 @@ mod tests {
         apply_masks_to_sheet(&mut sheet, &masks, 0.5, 1.0);
         assert_eq!(*sheet.get_pixel(10, 12), Rgb([255, 255, 255]));
         assert_eq!(*sheet.get_pixel(5, 6), Rgb([10, 20, 30]));
+    }
+
+    fn brush_mask(points: Vec<(i32, i32)>, radius: i32) -> MaskRect {
+        let mut m = MaskRect {
+            id: "b".into(),
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+            brush_points: points,
+            brush_radius: radius,
+            color: [255, 255, 255],
+            poly_points: Vec::new(),
+            opacity: 1.0,
+            bound_block: None,
+        };
+        m.refresh_brush_bounds();
+        m
+    }
+
+    #[test]
+    fn canvas_round_trip_accumulates_brush_radius() {
+        // 旧做法: 半径跟着 content_scale 反复 round, 0.33 ↔ 1 会丢像素.
+        let mut r = 10i32;
+        r = ((r as f32) * 0.33).round().max(1.0) as i32;
+        r = ((r as f32) / 0.33).round().max(1.0) as i32;
+        assert_eq!(r, 9);
+
+        // 谱面坐标只乘一次: 半径数字不变, 显示尺寸 = round(sheet * scale).
+        let sheet_r = 10i32;
+        let painted = ((sheet_r as f32) * 0.33).round().max(1.0) as i32;
+        assert_eq!(painted, 3);
+        let painted_back = ((sheet_r as f32) * 1.0).round().max(1.0) as i32;
+        assert_eq!(painted_back, 10);
+    }
+
+    #[test]
+    fn map_scale_sheet_to_canvas_and_back_keeps_points_if_scale_nice() {
+        let mut m = brush_mask(vec![(100, 200)], 10);
+        m.map_scale(0.5, 12.0, 34.0);
+        assert_eq!(m.brush_points, vec![(62, 134)]);
+        assert_eq!(m.brush_radius, 5);
+        m.map_scale(2.0, -24.0, -68.0);
+        assert_eq!(m.brush_points, vec![(100, 200)]);
+        assert_eq!(m.brush_radius, 10);
     }
 }
