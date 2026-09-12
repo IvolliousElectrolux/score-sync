@@ -24,7 +24,7 @@ pub(super) struct BgUi {
     pub pending_path: Option<PathBuf>,
     pub pending_preview: Option<Arc<RenderImage>>,
     /// 最近一次选中/应用的底色图 (取消、换纯色、再换文件都不丢).
-    pub cached_image: Option<image::RgbImage>,
+    pub cached_image: Option<Arc<image::RgbImage>>,
     pub cached_source_path: Option<PathBuf>,
     pub cached_session_path: Option<PathBuf>,
     /// 当前启用层是纯色 (仅 `doc.bg_enabled` 时有意义).
@@ -162,7 +162,7 @@ fn thumbnail_rgb(rgb: &image::RgbImage, max_side: u32) -> image::RgbImage {
     }
     let tw = ((w as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
     let th = ((h as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
-    image::imageops::resize(rgb, tw, th, image::imageops::FilterType::Triangle)
+    image::imageops::thumbnail(rgb, tw, th)
 }
 
 impl ScoreSyncApp {
@@ -191,7 +191,7 @@ impl ScoreSyncApp {
             let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
             self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
             self.bg.applied_is_solid = false;
-            self.bg.cached_image = Some((**img).clone());
+            self.bg.cached_image = Some(img.clone());
             self.bg.cached_source_path = self.doc.bg_source_path.clone();
             if !self
                 .bg
@@ -445,22 +445,52 @@ impl ScoreSyncApp {
             );
             return;
         }
-        match image::open(&path) {
-            Ok(im) => {
-                let rgb = im.to_rgb8();
-                let thumb = thumbnail_rgb(&rgb, BG_THUMB_MAX);
-                self.cache_bg_file(path, rgb);
-                self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
-                cx.notify();
-            }
-            Err(e) => {
-                self.show_error(
-                    "无法打开底色",
-                    crate::error::Error::image_open(path.clone(), e),
-                    cx,
-                );
-            }
-        }
+        self.status = "正在加载底色…".into();
+        self.hint = self.status.clone();
+        cx.notify();
+        let (tx, rx) = async_channel::bounded(1);
+        let path_bg = path.clone();
+        std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                image::open(&path_bg).map(|im| {
+                    let rgb = im.to_rgb8();
+                    let thumb = thumbnail_rgb(&rgb, BG_THUMB_MAX);
+                    (rgb, thumb)
+                })
+            }));
+            let _ = tx.send_blocking(r);
+        });
+        cx.spawn(async move |this, cx| {
+            let r = rx.recv().await.ok();
+            this.update(cx, |view, cx| {
+                match r {
+                    Some(Ok(Ok((rgb, thumb)))) => {
+                        view.cache_bg_file(path, rgb);
+                        view.bg.pending_preview = Some(rgb_to_render_image(&thumb));
+                        view.status = "已选择底色图, 点「应用底色」叠到工程组合.".into();
+                        view.hint = view.status.clone();
+                        cx.notify();
+                    }
+                    Some(Ok(Err(e))) => {
+                        view.show_error(
+                            "无法打开底色",
+                            crate::error::Error::image_open(path.clone(), e),
+                            cx,
+                        );
+                    }
+                    Some(Err(_)) => {
+                        view.show_error(
+                            "无法打开底色",
+                            crate::error::Error::msg("加载超高清底色时内存不足, 请换一张较小的图"),
+                            cx,
+                        );
+                    }
+                    None => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn cache_bg_file(&mut self, path: PathBuf, rgb: image::RgbImage) {
@@ -471,10 +501,26 @@ impl ScoreSyncApp {
         let session = crate::page_cache::ingest_file(&path, name).or_else(|_| {
             crate::page_cache::write_rgb_png(&rgb, "bg_cache")
         });
-        self.bg.cached_image = Some(rgb);
+        // 超高清原图只留磁盘, 内存里等「应用」再按页裁. 选图预览用 pending_preview.
+        drop(rgb);
+        self.bg.cached_image = None;
         self.bg.cached_source_path = Some(path.clone());
         self.bg.cached_session_path = session.ok();
         self.bg.pending_path = Some(path);
+    }
+
+    pub(super) fn drop_bg_full_pixels(&mut self) {
+        self.ensure_bg_session_cache();
+        if self
+            .bg
+            .cached_session_path
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false)
+        {
+            self.bg.cached_image = None;
+        }
+        crate::mem::release_unused_to_os();
     }
 
     fn ensure_bg_session_cache(&mut self) {
@@ -494,12 +540,13 @@ impl ScoreSyncApp {
         }
     }
 
-    fn load_cached_bg_image(&mut self) -> Option<image::RgbImage> {
+    fn load_cached_bg_image(&mut self) -> Option<Arc<image::RgbImage>> {
         if let Some(img) = self.bg.cached_image.clone() {
             return Some(img);
         }
         if let Some(p) = self.bg.cached_session_path.clone() {
             if let Ok(img) = crate::page_cache::load_rgb(&p) {
+                let img = Arc::new(img);
                 self.bg.cached_image = Some(img.clone());
                 return Some(img);
             }
@@ -511,9 +558,9 @@ impl ScoreSyncApp {
             .or_else(|| self.bg.cached_source_path.clone())?;
         match image::open(&path) {
             Ok(im) => {
-                let rgb = im.to_rgb8();
-                self.bg.cached_image = Some(rgb.clone());
-                Some(rgb)
+                let img = Arc::new(im.to_rgb8());
+                self.bg.cached_image = Some(img.clone());
+                Some(img)
             }
             Err(_) => None,
         }
@@ -637,7 +684,7 @@ impl ScoreSyncApp {
 
     fn apply_project_bg_image(
         &mut self,
-        rgb: image::RgbImage,
+        rgb: Arc<image::RgbImage>,
         source: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
@@ -667,7 +714,23 @@ impl ScoreSyncApp {
                 return;
             }
         }
-        match self.doc.set_project_bg(rgb, source.clone(), aw, ah) {
+        self.ensure_bg_session_cache();
+        let max_sw = self
+            .doc
+            .groups
+            .iter()
+            .map(|g| self.doc.group_sheet_width(&g.id))
+            .max()
+            .unwrap_or(rgb.width())
+            .max(1);
+        let owned = match Arc::try_unwrap(rgb) {
+            Ok(img) => img,
+            Err(arc) => (*arc).clone(),
+        };
+        let working = Arc::new(apply_bg::process::working_bg_copy(
+            owned, aw, ah, max_sw,
+        ));
+        match self.doc.set_project_bg_arc(working, source.clone(), aw, ah) {
             Ok(()) => {
                 self.bg.applied_is_solid = false;
                 self.mark_dirty();
@@ -686,15 +749,21 @@ impl ScoreSyncApp {
                 )
                 .into();
                 self.hint = self.status.clone();
-                if let Some(img) = self.bg.cached_image.as_ref() {
-                    let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
-                    self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
-                } else if let Some(img) = self.doc.bg_image.as_ref() {
-                    let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
-                    self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
+                self.bg.cached_image = self.doc.bg_image.clone();
+                if self.bg.pending_preview.is_none() {
+                    if let Some(img) = self.bg.cached_image.as_ref() {
+                        let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
+                        self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
+                    } else if let Some(img) = self.doc.bg_image.as_ref() {
+                        let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
+                        self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
+                    }
                 }
                 self.refresh_bg_preview_layer(cx);
                 self.sync_video_pool(cx);
+                if crate::trace::enabled() {
+                    self.emit_memory("apply-bg", false, cx);
+                }
                 cx.notify();
             }
             Err(e) => {
@@ -772,6 +841,7 @@ impl ScoreSyncApp {
         self.sync_bg_aspect_inputs(cx);
         if let Some(p) = snap.session_path.as_ref() {
             if let Ok(img) = crate::page_cache::load_rgb(p) {
+                let img = Arc::new(img);
                 self.bg.cached_image = Some(img.clone());
                 let thumb = thumbnail_rgb(&img, BG_THUMB_MAX);
                 self.bg.pending_preview = Some(rgb_to_render_image(&thumb));

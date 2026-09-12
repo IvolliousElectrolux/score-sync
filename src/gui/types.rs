@@ -135,6 +135,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
   右侧顶栏可切换「分块 / 底色 / 蒙版 / 视频」四个面板.\n\
   标题栏右侧图标: 新建 / 打开工程 / 保存 / 另存 ({ms}N / {ms}O / {m}S / {ms}S), 悬停显示名称; ? 为操作说明 (H / F1).\n\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
+  {ms}M 把当前内存分项写到状态栏与 %TEMP%/score_sync_trace.log (页图/底色/贴图/蒙版/视频池); `SCORE_SYNC_TRACE=1` 时每 2 秒自动采样.\n\
   视频终稿缓存在工程旁 `.staffcrop.cache/pool/` (不打进 zip); 切到视频面板时按当前组合重建, 已删除组合的旧文件会清掉.\n\
   启动时若已联网会检查 GitHub 更新, 有新版本则弹出当前到最新之间的版本摘要.\n\
   PDF 导入会先弹出分辨率框 (默认按标记尺寸×3 光栅化; 扫描件若页内图像更大则按图像像素预填). 导出组合使用导入后的像素, 不会再放大.\n\
@@ -167,7 +168,7 @@ pub(crate) enum AddAnchorRole {
 }
 
 /// 右侧工具栏模式 (类似 PS 面板切换)
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SideTool {
     /// 谱表分块: 原子块 / 组合 / 成员
     Crop,

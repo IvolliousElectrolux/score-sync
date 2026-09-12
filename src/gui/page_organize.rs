@@ -132,6 +132,7 @@ impl ScoreSyncApp {
 
     pub(super) fn close_page_organize(&mut self, cx: &mut Context<Self>) {
         self.page_organize = None;
+        self.clear_org_thumbs();
         if matches!(self.drag, Some(DragKind::Scrollbar { which: ScrollList::PageOrganize, .. })) {
             self.drag = None;
         }

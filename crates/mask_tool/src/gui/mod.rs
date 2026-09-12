@@ -22,6 +22,39 @@ pub(crate) use types::*;
 pub use blocks::{rgb_to_render_image, rgb_to_render_image_capped, BlockBgTile, BlockTile};
 pub use guides::GuideHostCmd;
 
+fn gpu_tex_bytes(img: &RenderImage) -> u64 {
+    let sz = img.size(0);
+    let w = (sz.width.0 as i32).max(0) as u64;
+    let h = (sz.height.0 as i32).max(0) as u64;
+    w.saturating_mul(h).saturating_mul(4)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MaskMemory {
+    pub rgb: u64,
+    pub tiles_rgb: u64,
+    pub tiles_gpu: u64,
+    pub bg_rgb: u64,
+    pub bg_gpu: u64,
+    pub render_gpu: u64,
+    pub gpu_drop: u64,
+    pub picker_gpu: u64,
+    pub tile_n: usize,
+}
+
+impl MaskMemory {
+    pub fn total(&self) -> u64 {
+        self.rgb
+            + self.tiles_rgb
+            + self.tiles_gpu
+            + self.bg_rgb
+            + self.bg_gpu
+            + self.render_gpu
+            + self.gpu_drop
+            + self.picker_gpu
+    }
+}
+
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::sync::Arc;
@@ -360,6 +393,45 @@ impl MaskToolApp {
     /// 宿主每帧取走旧贴图, 在自己的 `Window` 上 `drop_image`.
     pub fn take_gpu_drops(&mut self) -> Vec<Arc<RenderImage>> {
         std::mem::take(&mut self.gpu_drop)
+    }
+
+    /// 切走蒙版/底色面板时丢掉预览像素, 会话键与撤重栈保留.
+    /// 下次 `load_layered_preview` 会再灌贴图.
+    pub fn drop_preview_pixels(&mut self) {
+        self.rgb_image = None;
+        self.replace_render_image(None);
+        self.set_block_tiles(Vec::new(), None);
+    }
+
+    pub fn accounted_memory(&self) -> MaskMemory {
+        let mut mem = MaskMemory::default();
+        if let Some(rgb) = self.rgb_image.as_ref() {
+            mem.rgb = rgb.width() as u64 * rgb.height() as u64 * 3;
+        }
+        mem.tile_n = self.block_tiles.len();
+        for t in &self.block_tiles {
+            let (w, h) = t.thumb.dimensions();
+            mem.tiles_rgb += w as u64 * h as u64 * 3;
+            mem.tiles_gpu += w as u64 * h as u64 * 4;
+        }
+        if let Some(bg) = self.block_bg.as_ref() {
+            let (w, h) = bg.thumb.dimensions();
+            mem.bg_rgb = w as u64 * h as u64 * 3;
+            mem.bg_gpu = w as u64 * h as u64 * 4;
+        }
+        if let Some(img) = self.render_image.as_ref() {
+            mem.render_gpu = gpu_tex_bytes(img);
+        }
+        for img in &self.gpu_drop {
+            mem.gpu_drop += gpu_tex_bytes(img);
+        }
+        if let Some(img) = self.sb_image.as_ref() {
+            mem.picker_gpu += gpu_tex_bytes(img);
+        }
+        if let Some(img) = self.hue_image.as_ref() {
+            mem.picker_gpu += gpu_tex_bytes(img);
+        }
+        mem
     }
 
     pub(crate) fn replace_render_image(&mut self, new: Option<Arc<RenderImage>>) {

@@ -1,7 +1,8 @@
 //! 逐步诊断日志: 写 stderr, 并追加到 `%TEMP%/score_sync_trace.log`.
 //!
 //! 设置环境变量 `SCORE_SYNC_TRACE=1` 时, Windows 会挂上控制台,
-//! 这样 `cargo run -r` 也能在终端看到输出.
+//! 这样 `cargo run -r` 也能在终端看到输出, 并每 2 秒写一轮内存分项
+//! (`mem [poll]`). 平时可用 Ctrl+Shift+M 立刻 dump 同一文件.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -11,6 +12,14 @@ use std::time::Instant;
 
 static START: Mutex<Option<Instant>> = Mutex::new(None);
 static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn enabled() -> bool {
+    std::env::var_os("SCORE_SYNC_TRACE").is_some()
+}
+
+pub fn log_path() -> Option<PathBuf> {
+    LOG_PATH.lock().ok().and_then(|g| g.clone())
+}
 
 pub fn init() {
     if let Ok(mut g) = START.lock() {
@@ -63,11 +72,22 @@ fn elapsed_ms() -> u128 {
 }
 
 pub fn log(msg: &str) {
-    if std::env::var_os("SCORE_SYNC_TRACE").is_none() {
+    if !enabled() {
         return;
     }
+    write_line(msg, true);
+}
+
+/// 内存 dump / 热键: 即使没开 `SCORE_SYNC_TRACE` 也写入同一日志文件.
+pub fn log_always(msg: &str) {
+    write_line(msg, enabled());
+}
+
+fn write_line(msg: &str, echo_stderr: bool) {
     let line = format!("[+{:>8}ms] {msg}", elapsed_ms());
-    eprintln!("{line}");
+    if echo_stderr {
+        eprintln!("{line}");
+    }
     let path = LOG_PATH.lock().ok().and_then(|g| g.clone());
     if let Some(path) = path {
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
@@ -80,7 +100,7 @@ pub fn log(msg: &str) {
 fn maybe_attach_console() {
     #[cfg(windows)]
     {
-        let on = std::env::var_os("SCORE_SYNC_TRACE").is_some();
+        let on = enabled();
         if !on {
             return;
         }

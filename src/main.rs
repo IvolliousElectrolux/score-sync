@@ -9,6 +9,7 @@ mod detect_cache;
 mod error;
 mod export;
 mod gui;
+mod mem;
 mod model;
 mod page_cache;
 mod pdf;

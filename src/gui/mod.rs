@@ -9,6 +9,7 @@
 //! - `page_organize` 组织页面弹窗
 //! - `chrome` 工具栏、工作区、对话框
 //! - `sync` 页图窗口与蒙版/视频同步
+//! - `mem` 像素缓冲分项 dump
 //! - `history` 分块撤重
 //! - `host` 窗口外拖拽与分隔条
 
@@ -23,6 +24,7 @@ mod io;
 mod page_organize;
 mod pdf_import;
 mod lists;
+mod mem;
 mod sync;
 mod tabs;
 mod types;
@@ -57,6 +59,7 @@ actions!(
         FitView,
         OrganizePages,
         ShowHelp,
+        DumpMemory,
         ShareIntoGroup,
         UngroupActive,
         ConfirmParamEdit,
@@ -270,6 +273,8 @@ pub(crate) struct ScoreSyncApp {
     /// 异步流程也会改动组合, 手动追踪容易漏, 校验值能保证任何情况下都
     /// 不会读到脏数据).
     group_by_page_cache: std::cell::RefCell<Option<(u64, HashMap<usize, Vec<(usize, i32, i32)>>)>>,
+    mem_last_accounted: u64,
+    mem_last_ws: u64,
 }
 
 impl ScoreSyncApp {
@@ -437,6 +442,8 @@ impl ScoreSyncApp {
             pending_update: None,
             pending_redetect: false,
             group_by_page_cache: std::cell::RefCell::new(None),
+            mem_last_accounted: 0,
+            mem_last_ws: 0,
         };
         app.observe_bg_rgb_inputs(cx);
         if !initial.is_empty() {
@@ -467,6 +474,7 @@ impl ScoreSyncApp {
             }
         }
         app.start_update_check(cx);
+        app.start_memory_trace(cx);
         app
     }
 
@@ -719,6 +727,9 @@ impl Render for ScoreSyncApp {
                 this.toggle_page_organize(window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
+            .on_action(cx.listener(|this, _: &DumpMemory, _, cx| {
+                this.dump_memory_now(cx)
+            }))
             .on_action(cx.listener(|this, _: &ShareIntoGroup, _, cx| {
                 if !this.crop_keys_live() {
                     return;
@@ -1057,6 +1068,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
         keys.extend(apply_bg::bind_primary("z", mask_tool::gui::Undo, Some("MaskTool")));
         keys.extend(apply_bg::bind_primary("y", mask_tool::gui::Redo, Some("MaskTool")));
         keys.extend(apply_bg::bind_primary("shift-z", mask_tool::gui::Redo, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary("shift-m", DumpMemory, None));
         cx.bind_keys(keys);
         let bounds = default_window_bounds(cx);
         let initial = initial.clone();

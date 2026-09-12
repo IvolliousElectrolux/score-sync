@@ -157,6 +157,62 @@ pub fn write_rgb_png(image: &RgbImage, preferred_name: &str) -> Result<PathBuf, 
     Ok(dest)
 }
 
+/// 视频池等批量落盘: 快速 PNG (低压缩), 比默认 `save` 明显快, 体积略大.
+pub fn save_rgb_png_fast(rgb: &RgbImage, path: &Path) -> Result<(), String> {
+    use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+    use image::{ExtendedColorType, ImageEncoder};
+    use std::fs::File;
+    use std::io::BufWriter;
+    let file = File::create(path).map_err(|e| format!("创建 PNG 失败 ({}): {e}", path.display()))?;
+    let writer = BufWriter::new(file);
+    let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, PngFilter::Adaptive);
+    encoder
+        .write_image(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("写入 PNG 失败 ({}): {e}", path.display()))
+}
+
+/// 视频预览旁路: `{gid}.png` → `{gid}.prev.jpg`, 避免预览窗解码整张终稿.
+pub fn pool_preview_jpeg(cache_png: &Path) -> PathBuf {
+    let stem = cache_png
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("pool");
+    cache_png.with_file_name(format!("{stem}.prev.jpg"))
+}
+
+/// 把终稿缩到 `max_side` 后写成 JPEG (预览专用, 不参与导出).
+pub fn save_rgb_preview_jpeg(rgb: &RgbImage, path: &Path, max_side: u32) -> Result<(), String> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageEncoder};
+    use std::fs::File;
+    use std::io::BufWriter;
+    let (w, h) = rgb.dimensions();
+    let m = w.max(h).max(1);
+    let small = if m > max_side {
+        let tw = ((w as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+        let th = ((h as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+        image::imageops::thumbnail(rgb, tw, th)
+    } else {
+        rgb.clone()
+    };
+    let file =
+        File::create(path).map_err(|e| format!("创建预览 JPEG 失败 ({}): {e}", path.display()))?;
+    let encoder = JpegEncoder::new_with_quality(BufWriter::new(file), 80);
+    encoder
+        .write_image(
+            small.as_raw(),
+            small.width(),
+            small.height(),
+            ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("写入预览 JPEG 失败 ({}): {e}", path.display()))
+}
+
 /// 从磁盘解码 RGB.
 pub fn load_rgb(path: &Path) -> Result<RgbImage, String> {
     image::open(path)
@@ -327,10 +383,13 @@ pub fn prune_pool_cache(cache_root: &Path, live_group_ids: &std::collections::Ha
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        let Some(stem) = name.strip_suffix(".png") else {
+        let gid = if let Some(stem) = name.strip_suffix(".png") {
+            stem.strip_suffix("_thumb").unwrap_or(stem)
+        } else if let Some(stem) = name.strip_suffix(".prev.jpg") {
+            stem
+        } else {
             continue;
         };
-        let gid = stem.strip_suffix("_thumb").unwrap_or(stem);
         if !live_group_ids.contains(gid) {
             let _ = std::fs::remove_file(path);
         }
@@ -435,5 +494,23 @@ mod window_radius_tests {
         let c = super::crop_rect_fast(&img, 2, 1, 3, 2);
         assert_eq!(c.dimensions(), (3, 2));
         assert_eq!(*c.get_pixel(1, 1), image::Rgb([9, 8, 7]));
+    }
+
+    #[test]
+    fn save_rgb_png_fast_roundtrip() {
+        let dir = std::env::temp_dir().join("score_sync_png_fast_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tiny.png");
+        let img = image::RgbImage::from_pixel(4, 3, image::Rgb([9, 8, 7]));
+        super::save_rgb_png_fast(&img, &path).unwrap();
+        let back = super::load_rgb(&path).unwrap();
+        assert_eq!(back.dimensions(), (4, 3));
+        assert_eq!(*back.get_pixel(1, 1), image::Rgb([9, 8, 7]));
+        let prev = super::pool_preview_jpeg(&path);
+        super::save_rgb_preview_jpeg(&img, &prev, 2048).unwrap();
+        let prev_im = image::open(&prev).unwrap().to_rgb8();
+        assert_eq!(prev_im.dimensions(), (4, 3));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&prev);
     }
 }

@@ -33,7 +33,6 @@ pub(crate) use gpui::{
     StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 pub(crate) use image::Frame;
-pub(crate) use rodio::Source;
 pub(crate) use smallvec::smallvec;
 pub(crate) use uuid::Uuid;
 
@@ -57,6 +56,26 @@ actions!(
         Redo,
     ]
 );
+
+#[derive(Clone, Debug, Default)]
+pub struct VideoMemory {
+    pub pool_gpu: u64,
+    pub pool_n: usize,
+    pub waveform: u64,
+}
+
+impl VideoMemory {
+    pub fn total(&self) -> u64 {
+        self.pool_gpu + self.waveform
+    }
+}
+
+fn gpu_tex_bytes(img: &RenderImage) -> u64 {
+    let sz = img.size(0);
+    let w = (sz.width.0 as i32).max(0) as u64;
+    let h = (sz.height.0 as i32).max(0) as u64;
+    w.saturating_mul(h).saturating_mul(4)
+}
 
 /// 嵌入宿主 (score_sync) 启动时调用一次, 注册「视频」标签页下的快捷键.
 pub fn bind_keys(cx: &mut App) {
@@ -84,6 +103,8 @@ pub struct ScoreVideoApp {
     render_cache: std::collections::HashMap<String, Arc<RenderImage>>,
     /// 正在后台解码/缩放中的素材, 避免同一 group 重复起线程.
     image_loading: std::collections::HashSet<String>,
+    /// 预览解码已失败的素材: 不再每帧重试 (避免卡死), `set_pool`/`upsert` 时清掉.
+    image_failed: std::collections::HashSet<String>,
     /// 素材池整体刷新代数 (`set_pool` 自增), 防止某个素材后台解码到一半
     /// 素材池又整体换了一批 (同 group_id 但内容已变), 旧结果晚到写脏缓存.
     pool_gen: u64,
@@ -162,6 +183,7 @@ impl ScoreVideoApp {
             pool: Vec::new(),
             render_cache: std::collections::HashMap::new(),
             image_loading: std::collections::HashSet::new(),
+            image_failed: std::collections::HashSet::new(),
             pool_gen: 0,
             item_gen: HashMap::new(),
             pool_status: SharedString::default(),
@@ -207,6 +229,25 @@ impl ScoreVideoApp {
 
     pub fn focus_handle_ref(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub fn accounted_memory(&self) -> VideoMemory {
+        let mut mem = VideoMemory::default();
+        mem.pool_n = self.render_cache.len();
+        for img in self.render_cache.values() {
+            mem.pool_gpu += gpu_tex_bytes(img);
+        }
+        for peaks in self.waveform_cache.values() {
+            mem.waveform += (peaks.len() * std::mem::size_of::<f32>()) as u64;
+        }
+        mem
+    }
+
+    /// 离开视频面板时丢掉预览贴图. 素材 PNG/JPEG 在磁盘, 回来会再解码.
+    pub fn drop_preview_textures(&mut self) {
+        self.render_cache.clear();
+        self.image_loading.clear();
+        self.image_failed.clear();
     }
 
     /// 项目底色宽高比 (用于预览 letterbox 与导出默认分辨率).

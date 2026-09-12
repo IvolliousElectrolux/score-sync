@@ -113,36 +113,16 @@ pub(crate) enum VideoDrag {
 /// 再按当前片段的屏幕宽度 (随缩放实时变化) 重新降采样/插值一次, 分辨率因此
 /// 会跟着缩放丝滑变化, 而不是固定一批点被硬拉伸/压缩.
 pub(crate) fn compute_waveform_peaks(path: &std::path::Path) -> Option<Vec<f32>> {
-    let _ = crate::audio::ensure_preview_wav(path)?;
-    let dec = crate::audio::open_decoder(path)?;
-    let channels = (dec.channels() as usize).max(1);
-    let sample_rate = dec.sample_rate().max(1) as f64;
-    let samples: Vec<i16> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.collect()))
-        .ok()?;
-    let frames = samples.len() / channels;
-    if frames == 0 {
-        return None;
-    }
-    let duration_secs = frames as f64 / sample_rate;
-    let buckets = ((duration_secs * WAVEFORM_BUCKETS_PER_SEC).ceil() as usize)
-        .clamp(WAVEFORM_MIN_BUCKETS, WAVEFORM_MAX_BUCKETS);
-    let mut peaks = vec![0f32; buckets];
-    let per_bucket = (frames as f64 / buckets as f64).max(1.0);
-    for (b, peak) in peaks.iter_mut().enumerate() {
-        let start = ((b as f64) * per_bucket) as usize;
-        let end = (((b + 1) as f64) * per_bucket).ceil() as usize;
-        let end = end.clamp(start + 1, frames);
-        let mut m: i32 = 0;
-        for f in start..end {
-            for c in 0..channels {
-                if let Some(&s) = samples.get(f * channels + c) {
-                    m = m.max((s as i32).abs());
-                }
-            }
-        }
-        *peak = (m as f32 / i16::MAX as f32).clamp(0.0, 1.0);
-    }
-    Some(peaks)
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::audio::waveform_peaks(
+            path,
+            WAVEFORM_BUCKETS_PER_SEC,
+            WAVEFORM_MIN_BUCKETS,
+            WAVEFORM_MAX_BUCKETS,
+        )
+    }))
+    .ok()
+    .flatten()
 }
 
 /// 时间轴边界吸附阈值 (像素): 视频/淡入淡出/音频边界彼此靠近时对齐.

@@ -13,6 +13,59 @@ struct VideoPoolRebuildEntry {
     job: Option<crate::model::GroupRenderJob>,
 }
 
+/// 同一批任务共用一张超高清底色时, 先裁到最大谱面宽对应的一页, 再让各组合
+/// 在页图上二次居中裁. 避免每个组合都对两三万像素宽的扫描图做跨行拷贝.
+fn precrop_pool_bg_pages(entries: &mut [VideoPoolRebuildEntry]) {
+    let mut max_sw = 0u32;
+    let mut sample: Option<(Arc<image::RgbImage>, u32, u32)> = None;
+    for e in entries.iter() {
+        let Some(job) = e.job.as_ref() else {
+            continue;
+        };
+        max_sw = max_sw.max(job.sheet_w());
+        if sample.is_none() {
+            if let (Some(img), Some((aw, ah))) = (job.bg_full_image(), job.bg_aspect()) {
+                sample = Some((img, aw, ah));
+            }
+        }
+    }
+    let Some((full, aw, ah)) = sample else {
+        return;
+    };
+    if max_sw == 0 {
+        return;
+    }
+    let (pw, ph) = apply_bg::process::page_size(max_sw, aw, ah);
+    if full.width() <= pw.saturating_add(8) && full.height() <= ph.saturating_add(8) {
+        return;
+    }
+    let page = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        apply_bg::process::crop_bg_to_page(&full, aw, ah, max_sw)
+    })) {
+        Ok(page) => page,
+        Err(_) => {
+            crate::trace::log("video_pool: 底色预裁 panic, 各组合自行裁");
+            return;
+        }
+    };
+    let Some(page) = page else {
+        return;
+    };
+    crate::trace::log(&format!(
+        "video_pool: 底色 {}x{} → 页 {}x{} (sheet_w={max_sw})",
+        full.width(),
+        full.height(),
+        page.width(),
+        page.height()
+    ));
+    let page = Arc::new(page);
+    for e in entries.iter_mut() {
+        if let Some(job) = e.job.as_mut() {
+            job.attach_cropped_bg(page.clone());
+        }
+    }
+}
+
 /// 蒙版/底色预览后台任务的一条成员: 已在内存的页图只带 `Arc` (不拷像素),
 /// 未加载的只带磁盘路径, 解码和裁切都在工作线程做.
 struct MaskPreviewMemberSnap {
@@ -1438,10 +1491,24 @@ impl ScoreSyncApp {
             self.bg.batch_open = false;
         }
         let was_mask_canvas = self.uses_mask_canvas();
+        let leaving_crop = self.side_tool == SideTool::Crop && tool != SideTool::Crop;
+        let leaving_project = self.side_tool == SideTool::Project && tool != SideTool::Project;
+        let leaving_video = self.side_tool == SideTool::Video && tool != SideTool::Video;
         self.side_tool = tool;
         // 离开蒙版/底色时丢掉还在跑的预览线程, 避免和视频池终稿抢 CPU/内存.
         if was_mask_canvas && !self.uses_mask_canvas() {
             self.mask_sync_gen = self.mask_sync_gen.wrapping_add(1);
+            self.mask_tool.update(cx, |m, _| m.drop_preview_pixels());
+            self.bg_tile_cache = None;
+        }
+        if leaving_crop {
+            self.lod_full = None;
+        }
+        if leaving_project {
+            self.drop_bg_full_pixels();
+        }
+        if leaving_video {
+            self.score_video.update(cx, |v, _| v.drop_preview_textures());
         }
         match tool {
             SideTool::Crop => {
@@ -1494,6 +1561,9 @@ impl ScoreSyncApp {
                         .into();
                 self.sync_video_pool(cx);
             }
+        }
+        if crate::trace::enabled() {
+            self.emit_memory("side-tool", false, cx);
         }
         cx.notify();
     }
@@ -1579,12 +1649,28 @@ impl ScoreSyncApp {
             format!("视频工具 (正在生成素材 0/{rebuild_n})").into()
         };
 
-        let peak = self
-            .doc
-            .pages
-            .first()
-            .map(|p| p.estimated_full_bytes().saturating_mul(3))
-            .unwrap_or(64 * 1024 * 1024);
+        let peak = {
+            let page = self
+                .doc
+                .pages
+                .first()
+                .map(|p| p.estimated_full_bytes())
+                .unwrap_or(64 * 1024 * 1024);
+            let max_sw = self
+                .doc
+                .pages
+                .iter()
+                .map(|p| p.width())
+                .max()
+                .unwrap_or(1);
+            let (pw, ph) = apply_bg::process::page_size(
+                max_sw,
+                self.doc.bg_aspect_w,
+                self.doc.bg_aspect_h,
+            );
+            let bg_page = pw as u64 * ph as u64 * 3;
+            page.saturating_mul(2).saturating_add(bg_page)
+        };
         let conc = crate::page_cache::concurrency_for_peak(peak.max(128 * 1024 * 1024));
 
         cx.spawn(async move |this, cx| {
@@ -1623,7 +1709,7 @@ impl ScoreSyncApp {
                     }
                     Some(out)
                 });
-                let Ok(Some(gathered)) = gathered else {
+                let Ok(Some(mut gathered)) = gathered else {
                     crate::trace::log(&format!(
                         "video_pool: chunk {} 结束 cancelled=true",
                         chunk_i + 1
@@ -1632,6 +1718,7 @@ impl ScoreSyncApp {
                 };
                 let (tx, rx) = async_channel::bounded(1);
                 std::thread::spawn(move || {
+                    precrop_pool_bg_pages(&mut gathered);
                     let mut chunk_items = Vec::with_capacity(gathered.len());
                     for entry in gathered {
                         let VideoPoolRebuildEntry {
@@ -1646,7 +1733,13 @@ impl ScoreSyncApp {
                                 job.render()
                             })) {
                                 Ok(Ok(rgb)) => {
-                                    if rgb.save(&cache_path).is_ok() {
+                                    if crate::page_cache::save_rgb_png_fast(&rgb, &cache_path)
+                                        .is_ok()
+                                    {
+                                        let prev = crate::page_cache::pool_preview_jpeg(&cache_path);
+                                        let _ = crate::page_cache::save_rgb_preview_jpeg(
+                                            &rgb, &prev, 2048,
+                                        );
                                         item = Some(MaterialItem {
                                             group_id: gid.clone(),
                                             label: label.clone().into(),
@@ -1744,6 +1837,7 @@ impl ScoreSyncApp {
                 }
             })
             .ok();
+            crate::mem::release_unused_to_os();
         })
         .detach();
     }

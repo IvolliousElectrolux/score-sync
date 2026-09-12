@@ -306,6 +306,7 @@ pub struct GroupRenderJob {
     masks: Vec<MaskRect>,
     mask_opacity: f32,
     content_scale: f32,
+    sheet_w: u32,
     bg_enabled: bool,
     bg: Option<GroupRenderBg>,
 }
@@ -396,6 +397,30 @@ impl GroupRenderJob {
         }
         Ok(combined)
     }
+
+    /// 把完整底色换成已按最大谱面宽裁好的一页, 避免每个组合都对超宽扫描图做跨行拷贝.
+    /// 纯色底不改 (没有扫描图可裁).
+    pub(crate) fn attach_cropped_bg(&mut self, page: Arc<RgbImage>) {
+        if let Some(bg) = &mut self.bg {
+            if bg.image.is_some() {
+                bg.src_w = page.width();
+                bg.src_h = page.height();
+                bg.image = Some(page);
+            }
+        }
+    }
+
+    pub(crate) fn bg_full_image(&self) -> Option<Arc<RgbImage>> {
+        self.bg.as_ref().and_then(|b| b.image.clone())
+    }
+
+    pub(crate) fn bg_aspect(&self) -> Option<(u32, u32)> {
+        self.bg.as_ref().map(|b| (b.aspect_w, b.aspect_h))
+    }
+
+    pub(crate) fn sheet_w(&self) -> u32 {
+        self.sheet_w
+    }
 }
 
 /// 应用级文档状态 (页 / 组 / 选中).
@@ -447,7 +472,7 @@ pub struct DocState {
     pub bg_source_path: Option<PathBuf>,
     pub bg_aspect_w: u32,
     pub bg_aspect_h: u32,
-    /// `bg_image` 每次被替换 (`set_project_bg`/`clear_project_bg`) 时自增,
+    /// `bg_image` 每次被替换 (`set_project_bg_arc`/`clear_project_bg`) 时自增,
     /// 供 GUI 侧给「底色 GPU 贴图」做缓存判重: 完整底色只备份这一份,
     /// 贴图按目标页裁切后再缩放, 见 [`mask_tool::gui::BlockBgTile::from_full`].
     pub bg_gen: u64,
@@ -517,6 +542,22 @@ impl DocState {
             rid_page: HashMap::new(),
             display_max_side: self.display_max_side,
         }
+    }
+
+    /// 已加载显示代理的唯一像素字节 (同一 `Arc` 不计两次).
+    pub fn loaded_image_bytes_unique(
+        &self,
+        seen: &mut std::collections::HashSet<usize>,
+    ) -> (usize, u64) {
+        let mut n = 0usize;
+        let mut bytes = 0u64;
+        for p in &self.pages {
+            if let Some(img) = p.image.as_ref() {
+                n += 1;
+                bytes += crate::mem::rgb_arc_unique_bytes(img, seen);
+            }
+        }
+        (n, bytes)
     }
 
     pub fn display_max_side(&self) -> u32 {
@@ -972,10 +1013,10 @@ impl DocState {
         mask_tool::layout::compute_spans(&heights, self.get_block_layout(group_id))
     }
 
-    /// 启用工程底色层 (底层). 不修改页图 / 蒙版.
-    pub fn set_project_bg(
+    /// 启用工程底色层 (底层). 不修改页图 / 蒙版. `image` 与 UI 缓存可共享同一 `Arc`.
+    pub fn set_project_bg_arc(
         &mut self,
-        image: RgbImage,
+        image: Arc<RgbImage>,
         source: Option<PathBuf>,
         aspect_w: u32,
         aspect_h: u32,
@@ -983,7 +1024,7 @@ impl DocState {
         if aspect_w == 0 || aspect_h == 0 {
             return Err("比例宽高必须为正整数".into());
         }
-        self.bg_image = Some(Arc::new(image));
+        self.bg_image = Some(image);
         self.bg_solid = None;
         self.bg_source_path = source;
         self.bg_aspect_w = aspect_w;
@@ -1198,6 +1239,7 @@ impl DocState {
             masks,
             mask_opacity: self.mask_prefs.mask_opacity,
             content_scale,
+            sheet_w: self.group_sheet_width(group_id),
             bg_enabled: self.bg_enabled,
             bg,
         })
@@ -3063,6 +3105,33 @@ mod tests {
         assert_eq!(page.height(), 6000);
         assert_eq!(page.estimated_bytes(), 400 * 600 * 3);
         assert_eq!(page.estimated_full_bytes(), 4000 * 6000 * 3);
+    }
+
+    #[test]
+    fn loaded_image_bytes_unique_shares_arc() {
+        let img = Arc::new(image::RgbImage::from_pixel(8, 4, image::Rgb([1, 2, 3])));
+        let mut doc = DocState::new();
+        let mut a = stub_page(100);
+        a.image = Some(img.clone());
+        let mut b = stub_page(100);
+        b.image = Some(img);
+        doc.pages.push(a);
+        doc.pages.push(b);
+        let mut seen = std::collections::HashSet::new();
+        let (n, bytes) = doc.loaded_image_bytes_unique(&mut seen);
+        assert_eq!(n, 2);
+        assert_eq!(bytes, 8 * 4 * 3);
+    }
+
+    #[test]
+    fn set_project_bg_arc_shares_pixels() {
+        let mut doc = DocState::new();
+        let img = Arc::new(image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3])));
+        doc.set_project_bg_arc(img.clone(), None, 16, 9).unwrap();
+        assert!(Arc::ptr_eq(doc.bg_image.as_ref().unwrap(), &img));
+        let img2 = Arc::new(image::RgbImage::from_pixel(2, 2, image::Rgb([9, 9, 9])));
+        doc.set_project_bg_arc(img2, None, 16, 9).unwrap();
+        assert_eq!(doc.bg_image.as_ref().unwrap().dimensions(), (2, 2));
     }
 
     #[test]

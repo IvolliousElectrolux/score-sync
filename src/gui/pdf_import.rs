@@ -86,7 +86,7 @@ pub(super) struct PdfImportState {
     pub inspect_inflight: u32,
     active: Option<usize>,
     preview_page: u32,
-    preview_image: Option<Arc<RenderImage>>,
+    pub(super) preview_image: Option<Arc<RenderImage>>,
     preview_shown: Option<(PathBuf, u32)>,
     preview_gen: u64,
     preview_loading: bool,

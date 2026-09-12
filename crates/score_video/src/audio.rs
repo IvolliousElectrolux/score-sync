@@ -484,6 +484,105 @@ impl Drop for AtempoSource {
     }
 }
 
+/// 轨道波形峰值: 流式扫一遍采样, 不要 `collect` 整段 PCM.
+/// 长 CD 轨 stereo 44.1kHz 整段解开会到数百 MB, 峰值算完后堆又不还给 OS.
+pub fn waveform_peaks(
+    path: &Path,
+    buckets_per_sec: f64,
+    min_buckets: usize,
+    max_buckets: usize,
+) -> Option<Vec<f32>> {
+    let wav = ensure_preview_wav(path)?;
+    if let Some(peaks) = waveform_peaks_hound(&wav, buckets_per_sec, min_buckets, max_buckets) {
+        return Some(peaks);
+    }
+    let dec = open_decoder(path)?;
+    let channels = (dec.channels() as usize).max(1);
+    let sr = dec.sample_rate().max(1) as f64;
+    let frames = dec
+        .total_duration()
+        .map(|d| (d.as_secs_f64() * sr).round() as usize)
+        .filter(|n| *n > 0)?;
+    Some(peaks_from_i16(
+        dec,
+        channels,
+        frames,
+        sr,
+        buckets_per_sec,
+        min_buckets,
+        max_buckets,
+    ))
+}
+
+fn waveform_peaks_hound(
+    path: &Path,
+    buckets_per_sec: f64,
+    min_buckets: usize,
+    max_buckets: usize,
+) -> Option<Vec<f32>> {
+    let reader = hound::WavReader::open(path).ok()?;
+    if reader.spec().bits_per_sample != 16
+        || reader.spec().sample_format != hound::SampleFormat::Int
+    {
+        return None;
+    }
+    let channels = (reader.spec().channels as usize).max(1);
+    let sr = reader.spec().sample_rate.max(1) as f64;
+    let frames = reader.duration() as usize;
+    if frames == 0 {
+        return None;
+    }
+    Some(peaks_from_i16(
+        reader.into_samples::<i16>().filter_map(Result::ok),
+        channels,
+        frames,
+        sr,
+        buckets_per_sec,
+        min_buckets,
+        max_buckets,
+    ))
+}
+
+fn peaks_from_i16<I: Iterator<Item = i16>>(
+    samples: I,
+    channels: usize,
+    frames: usize,
+    sample_rate: f64,
+    buckets_per_sec: f64,
+    min_buckets: usize,
+    max_buckets: usize,
+) -> Vec<f32> {
+    let duration_secs = frames as f64 / sample_rate.max(1.0);
+    let buckets = ((duration_secs * buckets_per_sec).ceil() as usize)
+        .clamp(min_buckets.max(1), max_buckets.max(1));
+    let per_bucket = (frames as f64 / buckets as f64).max(1.0);
+    let mut peaks = vec![0f32; buckets];
+    let mut frame = 0usize;
+    let mut ch = 0usize;
+    let mut cur_b = 0usize;
+    let mut m: i32 = 0;
+    for s in samples {
+        let b = ((frame as f64 / per_bucket) as usize).min(buckets - 1);
+        if b != cur_b {
+            peaks[cur_b] = (m as f32 / i16::MAX as f32).clamp(0.0, 1.0);
+            m = 0;
+            cur_b = b;
+        }
+        m = m.max((s as i32).abs());
+        ch += 1;
+        if ch < channels {
+            continue;
+        }
+        ch = 0;
+        frame += 1;
+        if frame >= frames {
+            break;
+        }
+    }
+    peaks[cur_b] = (m as f32 / i16::MAX as f32).clamp(0.0, 1.0);
+    peaks
+}
+
 /// 打开预览解码器. m4a 只在已转好 WAV 时打开, 绝不让 rodio 直接碰 MPEG-4
 /// (会 unreachable panic). 未转好则返回 None, 调用方应先 `ensure_preview_wav`.
 pub fn open_decoder(path: &Path) -> Option<Decoder<BufReader<File>>> {
@@ -714,6 +813,33 @@ mod tests {
         assert_eq!(first, 4000);
         let n = 1 + src.count();
         assert_eq!(n, 2000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn waveform_peaks_streams_wav() {
+        let dir = std::env::temp_dir().join("score_video_wave_peaks");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tone.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 8000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            for i in 0..8000 {
+                let s = if i % 80 < 40 { 12_000i16 } else { 0 };
+                w.write_sample(s).unwrap();
+                w.write_sample(s).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let peaks = super::waveform_peaks(&path, 300.0, 64, 200_000).unwrap();
+        assert!(peaks.len() >= 64);
+        assert!(peaks.iter().any(|p| *p > 0.2));
+        let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

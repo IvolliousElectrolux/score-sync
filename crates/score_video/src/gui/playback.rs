@@ -52,6 +52,7 @@ impl ScoreVideoApp {
         self.item_gen.clear();
         self.render_cache.clear();
         self.image_loading.clear();
+        self.image_failed.clear();
         self.pool = pool;
         if let Some(gid) = &self.expanded_pool {
             if !self.pool.iter().any(|m| &m.group_id == gid) {
@@ -74,6 +75,7 @@ impl ScoreVideoApp {
             *self.item_gen.entry(gid.clone()).or_insert(0) += 1;
             self.render_cache.remove(&gid);
             self.image_loading.remove(&gid);
+            self.image_failed.remove(&gid);
             if let Some(old) = self.pool.iter_mut().find(|m| m.group_id == gid) {
                 *old = item;
             } else {
@@ -150,6 +152,9 @@ impl ScoreVideoApp {
         if let Some(img) = self.render_cache.get(group_id) {
             return Some(img.clone());
         }
+        if self.image_failed.contains(group_id) {
+            return None;
+        }
         if !self.image_loading.insert(group_id.to_string()) {
             return None; // 已经有一份后台任务在算这张, 别重复起线程
         }
@@ -162,24 +167,27 @@ impl ScoreVideoApp {
         let gid = group_id.to_string();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let render = item.load_rgba().ok().map(|rgba| {
-                // 谱面组合拼合 (+ 可能叠加的工程底色补边) 后经常是很高的整图; 预览限幅.
-                const MAX_PREVIEW_DIM: u32 = 2048;
-                let (w, h) = rgba.dimensions();
-                let mut small = if w > MAX_PREVIEW_DIM || h > MAX_PREVIEW_DIM {
-                    let scale = (MAX_PREVIEW_DIM as f32 / w.max(h) as f32).min(1.0);
-                    let nw = ((w as f32 * scale).round() as u32).max(1);
-                    let nh = ((h as f32 * scale).round() as u32).max(1);
-                    image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Triangle)
-                } else {
-                    rgba
-                };
-                // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素.
-                for px in small.chunks_exact_mut(4) {
-                    px.swap(0, 2);
-                }
-                Arc::new(RenderImage::new(smallvec![Frame::new(small)]))
-            });
+            const MAX_PREVIEW_DIM: u32 = 2048;
+            let render = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                item.load_preview_rgba(MAX_PREVIEW_DIM).ok().map(|mut rgba| {
+                    let (w, h) = rgba.dimensions();
+                    if w > MAX_PREVIEW_DIM || h > MAX_PREVIEW_DIM {
+                        let m = w.max(h).max(1);
+                        let nw = ((w as u64).saturating_mul(MAX_PREVIEW_DIM as u64) / m as u64).max(1)
+                            as u32;
+                        let nh = ((h as u64).saturating_mul(MAX_PREVIEW_DIM as u64) / m as u64).max(1)
+                            as u32;
+                        rgba = image::imageops::thumbnail(&rgba, nw, nh);
+                    }
+                    // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素.
+                    for px in rgba.chunks_exact_mut(4) {
+                        px.swap(0, 2);
+                    }
+                    Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]))
+                })
+            }))
+            .ok()
+            .flatten();
             let _ = tx.send_blocking(render);
         });
         cx.spawn(async move |this, cx| {
@@ -191,16 +199,16 @@ impl ScoreVideoApp {
                     view.image_loading.remove(&gid); // 素材池已整体刷新, 这份结果作废
                     return;
                 }
+                view.image_loading.remove(&gid);
                 match render {
                     Some(render) => {
-                        view.image_loading.remove(&gid);
+                        view.image_failed.remove(&gid);
                         view.render_cache.insert(gid, render);
                         cx.notify();
                     }
-                    // 解码失败 (如缓存文件损坏): 不移出 `image_loading`, 避免
-                    // 之后每帧都重新起一次注定失败的后台线程; 留到下次
-                    // `set_pool` 整体刷新时才会重试.
-                    None => {}
+                    None => {
+                        view.image_failed.insert(gid);
+                    }
                 }
             })
             .ok();

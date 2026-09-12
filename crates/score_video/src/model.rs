@@ -32,6 +32,40 @@ impl MaterialItem {
             .map_err(|e| format!("读取素材缓存失败 ({}): {e}", self.cache_path.display()))
             .map(|i| i.to_rgba8())
     }
+
+    /// 预览窗/素材池用: 优先读合成时写下的 `{gid}.prev.jpg`, 没有再缩全图.
+    /// 导出仍走 [`Self::load_rgba`] 全分辨率 PNG.
+    pub fn preview_path(&self) -> PathBuf {
+        let stem = self
+            .cache_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("pool");
+        self.cache_path.with_file_name(format!("{stem}.prev.jpg"))
+    }
+
+    pub fn load_preview_rgba(&self, max_side: u32) -> Result<RgbaImage, String> {
+        let prev = self.preview_path();
+        if prev.is_file() {
+            match image::open(&prev) {
+                Ok(im) => return Ok(im.to_rgba8()),
+                Err(_) => {}
+            }
+        }
+        let rgb = image::open(&self.cache_path)
+            .map_err(|e| format!("读取素材缓存失败 ({}): {e}", self.cache_path.display()))?
+            .to_rgb8();
+        let (w, h) = rgb.dimensions();
+        let m = w.max(h).max(1);
+        let small = if m > max_side {
+            let tw = ((w as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+            let th = ((h as u64).saturating_mul(max_side as u64) / m as u64).max(1) as u32;
+            image::imageops::thumbnail(&rgb, tw, th)
+        } else {
+            rgb
+        };
+        Ok(image::DynamicImage::ImageRgb8(small).to_rgba8())
+    }
 }
 
 /// 视频轨道上的一段.
@@ -778,6 +812,18 @@ mod tests {
             width: 1,
             height: 1,
         }
+    }
+
+    #[test]
+    fn preview_path_sits_beside_png() {
+        let item = MaterialItem {
+            group_id: "g".into(),
+            label: "g".into(),
+            cache_path: PathBuf::from("pool/abc.png"),
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(item.preview_path(), PathBuf::from("pool/abc.prev.jpg"));
     }
 
     #[test]

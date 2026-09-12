@@ -390,7 +390,11 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         }
 
         if doc.bg_enabled {
-            if let Some(img) = doc.bg_image.as_ref() {
+            if let Some(src) = doc.bg_source_path.as_ref().filter(|p| p.is_file()) {
+                zip.start_file("bg.png", png_opts)
+                    .map_err(|e| format!("写入 bg.png 失败: {e}"))?;
+                copy_file_into_zip(&mut zip, src)?;
+            } else if let Some(img) = doc.bg_image.as_ref() {
                 let png = encode_png(img).map_err(|e| format!("编码底色失败: {e}"))?;
                 zip.start_file("bg.png", png_opts)
                     .map_err(|e| format!("写入 bg.png 失败: {e}"))?;

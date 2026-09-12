@@ -167,6 +167,19 @@ pub fn bg_page_rect(
     ))
 }
 
+/// 从完整底色裁出当前谱面宽对应的一页. 盖不住则原样返回.
+pub fn working_bg_copy(
+    bg: RgbImage,
+    aspect_w: u32,
+    aspect_h: u32,
+    sheet_w: u32,
+) -> RgbImage {
+    if sheet_w == 0 {
+        return bg;
+    }
+    crop_bg_to_page(&bg, aspect_w, aspect_h, sheet_w).unwrap_or(bg)
+}
+
 /// 从完整底色备份裁出目标页 (恰好 [`page_size`] 那一块).
 /// 绘制/贴图用这一块, 不要把整张扫描图送去缩放.
 pub fn crop_bg_to_page(
@@ -426,7 +439,15 @@ pub fn composite_and_crop(
     if !frame.shows_bg {
         return Ok(sheet.clone());
     }
-    let mut canvas = crop_fast(bg, frame.bg_left, frame.bg_top, frame.canvas_w, frame.canvas_h);
+    let mut canvas = if bg.width() == frame.canvas_w
+        && bg.height() == frame.canvas_h
+        && frame.bg_left == 0
+        && frame.bg_top == 0
+    {
+        bg.clone()
+    } else {
+        crop_fast(bg, frame.bg_left, frame.bg_top, frame.canvas_w, frame.canvas_h)
+    };
     overlay_sheet(
         &mut canvas,
         sheet,
