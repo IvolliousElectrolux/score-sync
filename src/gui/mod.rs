@@ -848,6 +848,9 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &score_video::gui::InsertNext, _, cx| {
                 this.score_video.update(cx, |v, cx| v.insert_next(cx));
             }))
+            .on_action(cx.listener(|this, _: &score_video::gui::InsertNextWipe, _, cx| {
+                this.score_video.update(cx, |v, cx| v.insert_next_wipe(cx));
+            }))
             .on_action(cx.listener(|this, _: &score_video::gui::MarkFadeIn, _, cx| {
                 this.score_video.update(cx, |v, cx| v.mark_fade_in(cx));
             }))

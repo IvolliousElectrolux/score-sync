@@ -228,7 +228,7 @@ impl ScoreVideoApp {
                 self.drag = Some(VideoDrag::FadeTrimLeft { id });
             } else if (mouse_x - end_x).abs() <= EDGE_ZONE {
                 self.drag = Some(VideoDrag::FadeTrimRight { id });
-            } else {
+            } else if !f.kind.is_wipe() {
                 self.drag = Some(VideoDrag::FadeBody {
                     id,
                     last_t: self.x_to_time(mouse_x),

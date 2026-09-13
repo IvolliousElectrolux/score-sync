@@ -16,6 +16,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::model::{BlockAdjust, DocState, Group, Page, Region};
 use crate::staff_detect::StaffGrouping;
+use score_video::model::FadeKind;
 
 pub const PROJECT_EXT: &str = "staffcrop";
 pub const PROJECT_VERSION: u32 = 1;
@@ -88,11 +89,14 @@ struct ProjectVideoClip {
 struct ProjectFadeSpan {
     start: f64,
     end: f64,
-    /// true = 淡入, false = 淡出
+    /// true = 淡入, false = 淡出; 刷入时保持 false 以兼容旧读取器.
     fade_in: bool,
     /// 淡向工程底色而不是纯黑; 旧工程没有该字段, 视为 false.
     #[serde(default)]
     keep_bg: bool,
+    /// `"wipe_ltr"` = 左→右刷入; 缺省则按 `fade_in` 当淡入/淡出.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -310,11 +314,15 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
             .video_state
             .fades
             .iter()
-            .map(|(start, end, fade_in, keep_bg)| ProjectFadeSpan {
+            .map(|(start, end, kind, keep_bg)| ProjectFadeSpan {
                 start: *start,
                 end: *end,
-                fade_in: *fade_in,
+                fade_in: matches!(kind, FadeKind::In),
                 keep_bg: *keep_bg,
+                kind: match kind {
+                    FadeKind::WipeLtr => Some("wipe_ltr".into()),
+                    _ => None,
+                },
             })
             .collect(),
         audio_clips: doc
@@ -547,7 +555,14 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
                 .video
                 .fades
                 .into_iter()
-                .map(|f| (f.start, f.end, f.fade_in, f.keep_bg))
+                .map(|f| {
+                    let kind = match f.kind.as_deref() {
+                        Some("wipe_ltr") => FadeKind::WipeLtr,
+                        _ if f.fade_in => FadeKind::In,
+                        _ => FadeKind::Out,
+                    };
+                    (f.start, f.end, kind, f.keep_bg)
+                })
                 .collect(),
             audio_clips: meta
                 .video

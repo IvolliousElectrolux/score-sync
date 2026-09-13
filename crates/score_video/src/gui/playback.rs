@@ -116,12 +116,9 @@ impl ScoreVideoApp {
         self.play_gen = self.play_gen.wrapping_add(1);
         let gen = self.play_gen;
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(33))
-                .await;
             let result = this.update(cx, |view, cx| {
                 if view.play_gen != gen || !view.audio.is_playing() {
-                    return false;
+                    return None;
                 }
                 let t = view.audio.current_time();
                 let end = view.timeline.timeline_end();
@@ -131,15 +128,44 @@ impl ScoreVideoApp {
                 } else {
                     view.timeline.playhead = t;
                 }
+                view.prefetch_preview_pages(view.timeline.playhead, cx);
+                let delay = view.timeline.playback_tick_ms(view.timeline.playhead);
                 cx.notify();
-                true
+                Some(delay)
             });
             match result {
-                Ok(true) => continue,
+                Ok(Some(ms)) => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(ms.max(1)))
+                        .await;
+                }
                 _ => break,
             }
         })
         .detach();
+    }
+
+    /// 预热当前页及左右邻页的预览贴图, 刷入开始时才解码下一页会卡一拍.
+    pub(super) fn prefetch_preview_pages(&mut self, t: f64, cx: &mut Context<Self>) {
+        let idx = self.timeline.covering_clip_index(t).or_else(|| {
+            self.timeline
+                .video_clips
+                .iter()
+                .rposition(|c| t >= c.start)
+        });
+        let Some(idx) = idx else {
+            return;
+        };
+        let last = self.timeline.video_clips.len().saturating_sub(1);
+        let lo = idx.saturating_sub(1);
+        let hi = (idx + 1).min(last);
+        let gids: Vec<String> = self.timeline.video_clips[lo..=hi]
+            .iter()
+            .map(|c| c.group_id.clone())
+            .collect();
+        for gid in gids {
+            let _ = self.image_for(&gid, cx);
+        }
     }
 
     /// 素材缩略图 (预览窗当前帧 / 素材池展开预览用): 命中缓存直接返回;
@@ -317,6 +343,7 @@ impl ScoreVideoApp {
         let t = t.clamp(0.0, self.timeline.timeline_end());
         self.timeline.playhead = t;
         self.audio.seek(t);
+        self.prefetch_preview_pages(t, cx);
         cx.notify();
     }
 
@@ -341,6 +368,20 @@ impl ScoreVideoApp {
             Err(e) => {
                 self.undo_stack.pop();
                 self.show_error("无法插入下一张组合", e, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn insert_next_wipe(&mut self, cx: &mut Context<Self>) {
+        self.push_undo();
+        match self.timeline.insert_next_with_wipe(&self.pool) {
+            Ok(()) => {
+                self.prefetch_preview_pages(self.timeline.playhead, cx);
+            }
+            Err(e) => {
+                self.undo_stack.pop();
+                self.show_error("无法刷入下一张组合", e, cx);
             }
         }
         cx.notify();

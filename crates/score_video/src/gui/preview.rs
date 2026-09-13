@@ -65,6 +65,13 @@ impl ScoreVideoApp {
                 cx,
             ))
             .child(self.btn(
+                "sv_insert_wipe",
+                "刷入下一张 (W)",
+                false,
+                |this, _, cx| this.insert_next_wipe(cx),
+                cx,
+            ))
+            .child(self.btn(
                 "sv_fade_in",
                 "标记淡入 (I)",
                 false,
@@ -374,8 +381,14 @@ impl ScoreVideoApp {
 
     pub(super) fn preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.timeline.playhead;
+        self.prefetch_preview_pages(t, cx);
+        let (prev_group, wipe_p) = match self.timeline.wipe_at(t) {
+            Some((prev, _, p)) => (Some(prev.to_string()), Some(p as f32)),
+            None => (None, None),
+        };
         let cur_group = self.timeline.covering_clip(t).map(|c| c.group_id.clone());
         let img = cur_group.as_deref().and_then(|g| self.image_for(g, cx));
+        let prev_img = prev_group.as_deref().and_then(|g| self.image_for(g, cx));
         let fade = self.timeline.covering_fade(t);
         let fade_alpha = fade
             .map(|f| {
@@ -384,6 +397,7 @@ impl ScoreVideoApp {
                 match f.kind {
                     FadeKind::In => 1.0 - p,
                     FadeKind::Out => p,
+                    FadeKind::WipeLtr => 0.0,
                 }
             })
             .unwrap_or(0.0) as f32;
@@ -428,9 +442,7 @@ impl ScoreVideoApp {
                             size: size(px(dw), px(dh)),
                         };
                         window.paint_quad(gpui::fill(frame, rgb(0x111827)));
-                        if let Some(img) = &img {
-                            // 画进 16:9 框时按图片自身宽高比 contain, 不能把竖图
-                            // 强行拉满画框, 否则谱面会被压扁/拉瘦.
+                        let paint_page = |window: &mut Window, img: &Arc<RenderImage>| {
                             let sz = img.size(0);
                             let iw = (sz.width.0 as f32).max(1.0);
                             let ih = (sz.height.0 as f32).max(1.0);
@@ -451,6 +463,28 @@ impl ScoreVideoApp {
                                 0,
                                 false,
                             );
+                        };
+                        if let Some(p) = wipe_p {
+                            if let Some(prev) = &prev_img {
+                                paint_page(window, prev);
+                            }
+                            if let Some(next) = &img {
+                                let split_w = (dw * p.clamp(0.0, 1.0)).max(0.0);
+                                if split_w > 0.5 {
+                                    let clip = Bounds {
+                                        origin: frame.origin,
+                                        size: size(px(split_w), px(dh)),
+                                    };
+                                    window.with_content_mask(
+                                        Some(ContentMask { bounds: clip }),
+                                        |window| {
+                                            paint_page(window, next);
+                                        },
+                                    );
+                                }
+                            }
+                        } else if let Some(img) = &img {
+                            paint_page(window, img);
                         }
                         if fade_alpha > 0.004 {
                             let hex = if fade_keep_bg {

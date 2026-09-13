@@ -27,9 +27,9 @@ pub(crate) use std::time::Duration;
 
 pub(crate) use gpui::{
     actions, canvas, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds,
-    Context, Corners, CursorStyle, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Render,
-    RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    ContentMask, Context, Corners, CursorStyle, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
+    Pixels, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 pub(crate) use image::Frame;
@@ -49,6 +49,7 @@ actions!(
         SeekBackBig,
         SeekForwardBig,
         InsertNext,
+        InsertNextWipe,
         MarkFadeIn,
         MarkFadeOut,
         DeleteSelected,
@@ -86,6 +87,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-left", SeekBackBig, Some("ScoreVideo")),
         KeyBinding::new("shift-right", SeekForwardBig, Some("ScoreVideo")),
         KeyBinding::new("n", InsertNext, Some("ScoreVideo")),
+        KeyBinding::new("w", InsertNextWipe, Some("ScoreVideo")),
         KeyBinding::new("i", MarkFadeIn, Some("ScoreVideo")),
         KeyBinding::new("o", MarkFadeOut, Some("ScoreVideo")),
         KeyBinding::new("delete", DeleteSelected, Some("ScoreVideo")),
@@ -446,6 +448,7 @@ impl Render for ScoreVideoApp {
             .on_action(cx.listener(|this, _: &SeekBackBig, _, cx| this.seek_by(-5.0, cx)))
             .on_action(cx.listener(|this, _: &SeekForwardBig, _, cx| this.seek_by(5.0, cx)))
             .on_action(cx.listener(|this, _: &InsertNext, _, cx| this.insert_next(cx)))
+            .on_action(cx.listener(|this, _: &InsertNextWipe, _, cx| this.insert_next_wipe(cx)))
             .on_action(cx.listener(|this, _: &MarkFadeIn, _, cx| this.mark_fade_in(cx)))
             .on_action(cx.listener(|this, _: &MarkFadeOut, _, cx| this.mark_fade_out(cx)))
             .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| this.delete_selected(cx)))

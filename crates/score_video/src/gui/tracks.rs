@@ -92,6 +92,7 @@ impl ScoreVideoApp {
             let is_sel = self.timeline.fade_is_selected(f.id);
             let keep_bg = f.keep_bg;
             let label: SharedString = match (f.kind, keep_bg) {
+                (FadeKind::WipeLtr, _) => "刷入".into(),
                 (FadeKind::In, false) => "淡入".into(),
                 (FadeKind::Out, false) => "淡出".into(),
                 (FadeKind::In, true) => "淡入·底".into(),
@@ -99,6 +100,7 @@ impl ScoreVideoApp {
             };
             // 保持底色: 更浅的填充 + 米色描边, 和淡到黑的块一眼能分开.
             let base_color = match (f.kind, keep_bg) {
+                (FadeKind::WipeLtr, _) => rgb(0x7c3aed),
                 (FadeKind::In, false) => rgb(0x0d9488),
                 (FadeKind::Out, false) => rgb(0xb45309),
                 (FadeKind::In, true) => rgb(0x5eead4),
@@ -207,6 +209,11 @@ impl ScoreVideoApp {
     pub(super) fn open_fade_menu(&mut self, id: Uuid, x: f32, y: f32, cx: &mut Context<Self>) {
         if !self.timeline.fade_is_selected(id) {
             self.timeline.select_fade(id, false);
+        }
+        if self.timeline.selected_fades_are_all_wipes() {
+            self.fade_menu = None;
+            cx.notify();
+            return;
         }
         let ox = f32::from(self.left_bounds.origin.x);
         let oy = f32::from(self.left_bounds.origin.y);

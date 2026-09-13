@@ -285,11 +285,15 @@ fn load_pool_rgba(
 
 fn fade_overlay_at(timeline: &Timeline, t: f64, fade_bg: [u8; 3]) -> Option<(f32, [u8; 3])> {
     let fade = timeline.covering_fade(t)?;
+    if fade.kind.is_wipe() {
+        return None;
+    }
     let span = (fade.end - fade.start).max(1e-6);
     let p = ((t - fade.start) / span).clamp(0.0, 1.0);
     let alpha = match fade.kind {
         FadeKind::In => 1.0 - p,
         FadeKind::Out => p,
+        FadeKind::WipeLtr => return None,
     } as f32;
     let bg = if fade.keep_bg { fade_bg } else { [0, 0, 0] };
     Some((alpha, bg))
@@ -303,6 +307,25 @@ fn apply_fade_overlay(src: &[u8], dst: &mut [u8], alpha: f32, bg: [u8; 3]) {
         out[1] = (px[1] as f32 * ia + bg[1] as f32 * a + 0.5) as u8;
         out[2] = (px[2] as f32 * ia + bg[2] as f32 * a + 0.5) as u8;
         out[3] = 255;
+    }
+}
+
+/// 左→右硬切擦除: `progress` 为 0 时整帧上一页, 1 时整帧下一页.
+fn apply_wipe(prev: &[u8], next: &[u8], dst: &mut [u8], progress: f32, width: u32) {
+    let width = width.max(1) as usize;
+    let split = ((progress.clamp(0.0, 1.0) * width as f32) as usize).min(width);
+    let row_bytes = width * 4;
+    if dst.len() != prev.len() || dst.len() != next.len() || row_bytes == 0 {
+        dst.copy_from_slice(next);
+        return;
+    }
+    for (out_row, (prev_row, next_row)) in dst
+        .chunks_exact_mut(row_bytes)
+        .zip(prev.chunks_exact(row_bytes).zip(next.chunks_exact(row_bytes)))
+    {
+        let left = split * 4;
+        out_row[..left].copy_from_slice(&next_row[..left]);
+        out_row[left..].copy_from_slice(&prev_row[left..]);
     }
 }
 
@@ -531,6 +554,7 @@ fn encode_raw_video(
             .ok_or_else(|| "ffmpeg stdin 不可写".to_string())?;
         let mut stdin = BufWriter::with_capacity(frame_len.max(1) * 2, stdin);
         let mut scratch = vec![0u8; frame_len];
+        let black = vec![0u8; frame_len];
         let mut written = 0u64;
         let mut last_progress = Instant::now();
         for run in runs {
@@ -554,19 +578,35 @@ fn encode_raw_video(
                 }
             } else {
                 let base = written;
+                let is_wipe = matches!(run.fade, Some((FadeKind::WipeLtr, _)));
                 for i in 0..run.frames {
                     let t = frame_time(base + i, fps);
-                    match fade_overlay_at(timeline, t, opts.fade_bg_rgb) {
-                        Some((alpha, bg)) if alpha > 0.004 => {
-                            apply_fade_overlay(pixels, &mut scratch, alpha, bg);
+                    if is_wipe {
+                        if let Some((prev_gid, next_gid, p)) = timeline.wipe_at(t) {
+                            let next = images.get(next_gid).unwrap_or(pixels);
+                            let prev = images.get(prev_gid).unwrap_or(&black);
+                            apply_wipe(prev, next, &mut scratch, p as f32, w);
                             stdin
                                 .write_all(&scratch)
                                 .map_err(|e| format!("写入帧失败: {e}"))?;
-                        }
-                        _ => {
+                        } else {
                             stdin
                                 .write_all(pixels)
                                 .map_err(|e| format!("写入帧失败: {e}"))?;
+                        }
+                    } else {
+                        match fade_overlay_at(timeline, t, opts.fade_bg_rgb) {
+                            Some((alpha, bg)) if alpha > 0.004 => {
+                                apply_fade_overlay(pixels, &mut scratch, alpha, bg);
+                                stdin
+                                    .write_all(&scratch)
+                                    .map_err(|e| format!("写入帧失败: {e}"))?;
+                            }
+                            _ => {
+                                stdin
+                                    .write_all(pixels)
+                                    .map_err(|e| format!("写入帧失败: {e}"))?;
+                            }
                         }
                     }
                     written += 1;
@@ -930,6 +970,33 @@ mod tests {
         tl.fades[0].keep_bg = true;
         let (_, bg) = fade_overlay_at(&tl, 0.5, [9, 8, 7]).unwrap();
         assert_eq!(bg, [9, 8, 7]);
+    }
+
+    #[test]
+    fn wipe_overlay_is_not_a_color_fade() {
+        let mut tl = Timeline::new();
+        tl.video_clips = vec![clip("a", 0.0, 5.0), clip("b", 5.0, 10.0)];
+        tl.fades.push(fade(FadeKind::WipeLtr, 5.0, 6.0));
+        assert!(fade_overlay_at(&tl, 5.5, [1, 2, 3]).is_none());
+        let (prev, next, p) = tl.wipe_at(5.5).unwrap();
+        assert_eq!(prev, "a");
+        assert_eq!(next, "b");
+        assert!((p - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_wipe_copies_left_from_next() {
+        // 2x1 RGBA: prev = red, next = blue; p=0.5 → left blue, right red.
+        let prev = vec![255, 0, 0, 255, 255, 0, 0, 255];
+        let next = vec![0, 0, 255, 255, 0, 0, 255, 255];
+        let mut dst = vec![0u8; 8];
+        apply_wipe(&prev, &next, &mut dst, 0.5, 2);
+        assert_eq!(&dst[..4], &[0, 0, 255, 255]);
+        assert_eq!(&dst[4..], &[255, 0, 0, 255]);
+        apply_wipe(&prev, &next, &mut dst, 0.0, 2);
+        assert_eq!(dst, prev);
+        apply_wipe(&prev, &next, &mut dst, 1.0, 2);
+        assert_eq!(dst, next);
     }
 
     #[test]
