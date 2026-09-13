@@ -410,49 +410,27 @@ impl ScoreVideoApp {
                         );
                     }),
                 );
-            if let Some(peaks) = waveform {
+            if let Some(wave) = waveform {
+                let clip_offset = c.offset;
+                let clip_duration = c.duration;
+                let clip_start = cum;
+                let view_left = f32::from(self.tracks_bounds.origin.x);
+                let view_right = view_left + f32::from(self.tracks_bounds.size.width);
                 clip = clip.child(
                     canvas(
                         |_, _, _| {},
                         move |bounds, _, window, _| {
-                            let w = f32::from(bounds.size.width);
-                            let h = f32::from(bounds.size.height);
-                            let mid_y = f32::from(bounds.origin.y) + h * 0.5;
-                            let ox = f32::from(bounds.origin.x);
-                            let n_peaks = peaks.len();
-                            if n_peaks == 0 || w < 1.0 {
-                                return;
-                            }
-                            // 按当前屏幕宽度重新采样 (每列一像素): 缩放越小
-                            // 时一列覆盖多个原始峰值点, 取其中最大值 (标准
-                            // 波形降采样手法); 缩放越大时一列覆盖不到一个
-                            // 原始点, 则在相邻两点间线性插值. 分辨率因此
-                            // 始终跟着当前缩放丝滑变化, 而不是固定一批点被
-                            // 硬拉伸/压缩成同一个"采样率"的样子.
-                            let n_cols = (w.round() as usize).max(1).min(4000);
-                            let col_w = w / n_cols as f32;
-                            let step = n_peaks as f32 / n_cols as f32;
-                            for col in 0..n_cols {
-                                let start_f = col as f32 * step;
-                                let p = if step >= 1.0 {
-                                    let s = (start_f as usize).min(n_peaks - 1);
-                                    let e = ((start_f + step).ceil() as usize)
-                                        .clamp(s + 1, n_peaks);
-                                    peaks[s..e].iter().copied().fold(0.0f32, f32::max)
-                                } else {
-                                    let i0 = (start_f.floor() as usize).min(n_peaks - 1);
-                                    let i1 = (i0 + 1).min(n_peaks - 1);
-                                    let frac = start_f - i0 as f32;
-                                    peaks[i0] * (1.0 - frac) + peaks[i1] * frac
-                                };
-                                let bh = (h * 0.5 * p).max(1.0);
-                                let bx = ox + col as f32 * col_w;
-                                let bar_bounds = Bounds {
-                                    origin: point(px(bx), px(mid_y - bh)),
-                                    size: size(px(col_w.max(1.0)), px(bh * 2.0)),
-                                };
-                                window.paint_quad(gpui::fill(bar_bounds, rgba(0x5eead488)));
-                            }
+                            paint_waveform_in_view(
+                                &wave,
+                                clip_offset,
+                                clip_duration,
+                                clip_start,
+                                pps,
+                                bounds,
+                                view_left,
+                                view_right,
+                                window,
+                            );
                         },
                     )
                     .absolute()
@@ -604,7 +582,7 @@ impl ScoreVideoApp {
 
     /// 音频波形峰值 (命中缓存则直接返回; 否则后台解码一次并缓存, 本次先
     /// 返回 `None`, 解码完成后会自行 `cx.notify()` 刷新).
-    pub(super) fn waveform_for(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> Option<Arc<Vec<f32>>> {
+    pub(super) fn waveform_for(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> Option<CachedWaveform> {
         if let Some(w) = self.waveform_cache.get(path) {
             return Some(w.clone());
         }
@@ -612,7 +590,7 @@ impl ScoreVideoApp {
             return None;
         }
         let p = path.clone();
-        let (tx, rx) = async_channel::bounded::<Option<Vec<f32>>>(1);
+        let (tx, rx) = async_channel::bounded::<Option<CachedWaveform>>(1);
         std::thread::spawn(move || {
             let _ = tx.send_blocking(compute_waveform_peaks(&p));
         });
@@ -623,8 +601,8 @@ impl ScoreVideoApp {
             };
             this.update(cx, |view, cx| {
                 view.waveform_pending.remove(&path_key);
-                if let Some(peaks) = result {
-                    view.waveform_cache.insert(path_key, Arc::new(peaks));
+                if let Some(wave) = result {
+                    view.waveform_cache.insert(path_key, wave);
                     cx.notify();
                 }
             })

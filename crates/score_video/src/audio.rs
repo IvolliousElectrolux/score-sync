@@ -491,7 +491,7 @@ pub fn waveform_peaks(
     buckets_per_sec: f64,
     min_buckets: usize,
     max_buckets: usize,
-) -> Option<Vec<f32>> {
+) -> Option<(Vec<f32>, f64)> {
     let wav = ensure_preview_wav(path)?;
     if let Some(peaks) = waveform_peaks_hound(&wav, buckets_per_sec, min_buckets, max_buckets) {
         return Some(peaks);
@@ -519,7 +519,7 @@ fn waveform_peaks_hound(
     buckets_per_sec: f64,
     min_buckets: usize,
     max_buckets: usize,
-) -> Option<Vec<f32>> {
+) -> Option<(Vec<f32>, f64)> {
     let reader = hound::WavReader::open(path).ok()?;
     if reader.spec().bits_per_sample != 16
         || reader.spec().sample_format != hound::SampleFormat::Int
@@ -551,7 +551,7 @@ fn peaks_from_i16<I: Iterator<Item = i16>>(
     buckets_per_sec: f64,
     min_buckets: usize,
     max_buckets: usize,
-) -> Vec<f32> {
+) -> (Vec<f32>, f64) {
     let duration_secs = frames as f64 / sample_rate.max(1.0);
     let buckets = ((duration_secs * buckets_per_sec).ceil() as usize)
         .clamp(min_buckets.max(1), max_buckets.max(1));
@@ -580,7 +580,31 @@ fn peaks_from_i16<I: Iterator<Item = i16>>(
         }
     }
     peaks[cur_b] = (m as f32 / i16::MAX as f32).clamp(0.0, 1.0);
-    peaks
+    (peaks, duration_secs)
+}
+
+/// 源时间区间 `[t0, t1)` 上的波形峰值. 一列覆盖多个桶时取 max (缩小时
+/// 保峰值); 覆盖不到一个桶时线性插值 (放大时不出现台阶). 列宽由调用方
+/// 按当前轨道缩放决定, 因此粒度始终相对可视像素, 不是固定秒数.
+pub fn waveform_peak_in_range(peaks: &[f32], source_dur: f64, t0: f64, t1: f64) -> f32 {
+    let n = peaks.len();
+    if n == 0 || source_dur <= 0.0 {
+        return 0.0;
+    }
+    let nf = n as f64;
+    let start_f = (t0 / source_dur * nf).clamp(0.0, nf);
+    let end_f = (t1 / source_dur * nf).clamp(start_f, nf);
+    let span = end_f - start_f;
+    if span >= 1.0 {
+        let s = (start_f as usize).min(n - 1);
+        let e = (end_f.ceil() as usize).clamp(s + 1, n);
+        peaks[s..e].iter().copied().fold(0.0f32, f32::max)
+    } else {
+        let i0 = (start_f.floor() as usize).min(n - 1);
+        let i1 = (i0 + 1).min(n - 1);
+        let frac = (start_f - i0 as f64) as f32;
+        peaks[i0] * (1.0 - frac) + peaks[i1] * frac
+    }
 }
 
 /// 打开预览解码器. m4a 只在已转好 WAV 时打开, 绝不让 rodio 直接碰 MPEG-4
@@ -836,11 +860,25 @@ mod tests {
             }
             w.finalize().unwrap();
         }
-        let peaks = super::waveform_peaks(&path, 300.0, 64, 200_000).unwrap();
+        let (peaks, dur) = super::waveform_peaks(&path, 300.0, 64, 200_000).unwrap();
         assert!(peaks.len() >= 64);
         assert!(peaks.iter().any(|p| *p > 0.2));
+        assert!((dur - 1.0).abs() < 0.05);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn waveform_peak_in_range_follows_column_width() {
+        // 10 个等宽桶盖住 1 秒; 缩小时一列覆盖多桶取 max, 放大时插值.
+        let peaks: Vec<f32> = (0..10).map(|i| i as f32 / 9.0).collect();
+        let wide = super::waveform_peak_in_range(&peaks, 1.0, 0.0, 1.0);
+        assert!((wide - 1.0).abs() < 1e-5);
+        let mid = super::waveform_peak_in_range(&peaks, 1.0, 0.5, 0.6);
+        let left = super::waveform_peak_in_range(&peaks, 1.0, 0.0, 0.1);
+        assert!(mid > left);
+        let zoomed = super::waveform_peak_in_range(&peaks, 1.0, 0.55, 0.56);
+        assert!(zoomed > 0.4 && zoomed < 0.8);
     }
 
     #[test]

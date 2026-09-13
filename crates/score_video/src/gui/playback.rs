@@ -129,7 +129,7 @@ impl ScoreVideoApp {
                     view.timeline.playhead = t;
                 }
                 view.prefetch_preview_pages(view.timeline.playhead, cx);
-                let delay = view.timeline.playback_tick_ms(view.timeline.playhead);
+                let delay = view.playhead_tick_ms();
                 cx.notify();
                 Some(delay)
             });
@@ -241,6 +241,15 @@ impl ScoreVideoApp {
         })
         .detach();
         None
+    }
+
+    /// 播放头/进度条刷新间隔: 放大时按"大约 1 屏像素走一步"加密, 下限
+    /// 16ms (约 60Hz), 缩小时仍用 33ms. 刷入硬边仍可再压到 8ms.
+    pub(super) fn playhead_tick_ms(&self) -> u64 {
+        let fade = self.timeline.playback_tick_ms(self.timeline.playhead);
+        let pps = self.px_per_sec.max(0.01);
+        let px_ms = (1000.0 / pps).round() as u64;
+        fade.min(px_ms.clamp(FADE_TICK_MS, PLAY_TICK_MS))
     }
 
     pub(super) fn x_to_time(&self, x: f32) -> f64 {

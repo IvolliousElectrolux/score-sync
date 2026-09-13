@@ -38,7 +38,9 @@ pub(crate) use uuid::Uuid;
 
 pub(crate) use crate::audio::AudioEngine;
 pub(crate) use crate::export::{Container, ExportMsg, ExportOptions};
-pub(crate) use crate::model::{AudioClip, FadeKind, MaterialItem, Timeline};
+pub(crate) use crate::model::{
+    AudioClip, FadeKind, MaterialItem, Timeline, FADE_TICK_MS, PLAY_TICK_MS,
+};
 
 actions!(
     score_video,
@@ -135,10 +137,9 @@ pub struct ScoreVideoApp {
     pool_scroll: ScrollHandle,
     /// 素材池中当前展开显示预览图的条目 (点击而非拖动时切换).
     expanded_pool: Option<String>,
-    /// 音频波形峰值缓存: key = 源文件路径, 每个源按时长采样出足够密度的
-    /// 基础峰值点, 绘制时再按当前片段的屏幕宽度 (随缩放变化) 重新降采样/
-    /// 插值一次, 分辨率因此会跟着缩放丝滑改变.
-    waveform_cache: std::collections::HashMap<PathBuf, Arc<Vec<f32>>>,
+    /// 音频波形峰值缓存: key = 源文件路径. 缓存的是整段源文件; 绘制时再按
+    /// 当前片段 offset 和轨道可视像素列 (随缩放) 切, 粒度不固定.
+    waveform_cache: std::collections::HashMap<PathBuf, CachedWaveform>,
     /// 正在后台解码计算波形中的路径, 避免同一文件重复起线程.
     waveform_pending: std::collections::HashSet<PathBuf>,
     drag: Option<VideoDrag>,
@@ -239,8 +240,8 @@ impl ScoreVideoApp {
         for img in self.render_cache.values() {
             mem.pool_gpu += gpu_tex_bytes(img);
         }
-        for peaks in self.waveform_cache.values() {
-            mem.waveform += (peaks.len() * std::mem::size_of::<f32>()) as u64;
+        for wave in self.waveform_cache.values() {
+            mem.waveform += (wave.peaks.len() * std::mem::size_of::<f32>()) as u64;
         }
         mem
     }
