@@ -184,7 +184,7 @@ impl MaskToolApp {
             ToolMode::Brush => "画笔 (拖动画布涂抹; 可改颜色/粗细)".into(),
             ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光".into(),
             ToolMode::Select => format!(
-                "选择 (可 {}多选 / Shift 拖选); 未选中任何蒙版时可直接拖动/拉伸分块",
+                "选择 (可 {}多选 / Shift 拖选); 未选中蒙版时拖块上下移, Shift+拖左右移",
                 apply_bg::primary_mod()
             )
             .into(),

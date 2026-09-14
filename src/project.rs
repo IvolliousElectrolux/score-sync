@@ -164,6 +164,8 @@ struct ProjectBlockAdjust {
     gap_before: i32,
     #[serde(default)]
     gap_after: i32,
+    #[serde(default)]
+    shift_x: i32,
 }
 
 impl From<&BlockAdjust> for ProjectBlockAdjust {
@@ -174,6 +176,7 @@ impl From<&BlockAdjust> for ProjectBlockAdjust {
             extra_bottom: a.extra_bottom,
             gap_before: a.gap_before,
             gap_after: a.gap_after,
+            shift_x: a.shift_x,
         }
     }
 }
@@ -186,6 +189,7 @@ impl From<ProjectBlockAdjust> for BlockAdjust {
             extra_bottom: a.extra_bottom,
             gap_before: a.gap_before,
             gap_after: a.gap_after,
+            shift_x: a.shift_x,
         }
     }
 }

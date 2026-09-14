@@ -289,7 +289,7 @@ pub(crate) enum DragKind {
         last_iy: f32,
         undid: bool,
     },
-    /// 无模式: Shift 拖选
+    /// 无模式: Shift 拖选蒙版; 点在分块上则改为左右移块
     Marquee {
         x0: f32,
         y0: f32,
@@ -309,9 +309,11 @@ pub(crate) enum DragKind {
         undid: bool,
         wiping: bool,
     },
-    /// 「移动分块」: 整体拖动一个块上下移动, 优先消耗被拖动块与相邻块
-    /// 之间*已有*的间距, 只有真的撞上了才会继续波及下一个/上一个块, 见
-    /// `crate::layout::redistribute_for_block_move` 文档.
+    /// 「移动分块」: 整体拖动一个块. 未按 Shift 时只上下移动, 优先消耗
+    /// 被拖动块与相邻块之间*已有*的间距, 只有真的撞上了才会继续波及
+    /// 下一个/上一个块; 顶到页顶或底到页底即停, 见
+    /// `crate::layout::redistribute_for_block_move`.
+    /// 按住 Shift 按下时锁定为只左右移 (`horizontal`), 不夹页面左右.
     ///
     /// `start_layout` 是拖动起点时的完整快照 (每帧都从这份快照重新分配,
     /// 不做增量累加, 避免多帧误差累积). `start_voff` 是拖动起点时的
@@ -321,9 +323,11 @@ pub(crate) enum DragKind {
     /// 撤销栈).
     BlockMove {
         region_id: String,
+        start_ix: f32,
         start_iy: f32,
         start_layout: Vec<BlockAdjust>,
         start_voff: i32,
+        horizontal: bool,
         undid: bool,
     },
     /// 「移动分块」: 拖动块的上边界 (裁剪/扩展). 与下边界不同, 上边界要
@@ -342,6 +346,7 @@ pub(crate) enum DragKind {
     },
     /// 「移动分块」: 拖动块的下边界. 先消耗与下一块之间的空白 (最后一块
     /// 则消耗末端留白), 其它块绝对位置不动; 贴住之后才挤开下一块.
+    /// 挤开后若会让拼合图高过页面则停 (与上边界到顶即停对称).
     BlockResizeBottom {
         region_id: String,
         start_iy: f32,

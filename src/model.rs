@@ -982,8 +982,8 @@ impl DocState {
             .unwrap_or(0)
     }
 
-    /// 组合最后一块后面的末端留白 (旧版向上拖过页顶后缩小内部块用;
-    /// 现已改为碰到页顶即停, 此字段多为工程兼容).
+    /// 组合最后一块后面的末端留白 (旧版拖过页边后缩小内部块用;
+    /// 现已改为碰到页顶/页底即停, 此字段多为工程兼容).
     pub fn group_trailing_gap(&self, group_id: &str) -> u32 {
         let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
             return 0;

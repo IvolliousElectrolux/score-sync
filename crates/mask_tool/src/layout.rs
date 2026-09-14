@@ -1,8 +1,9 @@
 //! 「组合分块」位置/尺寸微调: 数据模型 + 拼接/几何计算.
 //!
-//! 蒙版编辑时可以对组合内某个分块的上下边做裁剪/扩展, 或在块与块之间插入
-//! 间距, 只影响该组合的拼合图 (蒙版预览/终稿导出/视频素材), 不改变分块
-//! 面板中的原始 `Region.y0/y1`. 这里同时给出:
+//! 蒙版编辑时可以对组合内某个分块的上下边做裁剪/扩展, 左右平移 (`shift_x`),
+//! 或在块与块之间插入间距, 只影响该组合的拼合图 (蒙版预览/终稿导出/视频
+//! 素材), 不改变分块面板中的原始 `Region.y0/y1`. 横向溢出在蒙版界面仍画出,
+//! 拼接/导出按页宽截掉. 这里同时给出:
 //! - 纯几何版本 [`compute_spans`] (不需要像素数据, 供列表/画布做位置显示
 //!   与命中测试);
 //! - 像素版本 [`stitch_with_layout`] (实际拼接输出图像, 新增区域用
@@ -25,14 +26,21 @@ pub struct BlockAdjust {
     /// 该值表示画布最顶端多出的留白 (同样有效, 并非被忽略).
     pub gap_before: i32,
     /// 整张拼合图最末端的留白 (只作用在最后一块上). 旧版「向上拖过页顶
-    /// 后改用高度缩放宽度」会写入这里; 现在碰到页顶即停, 不再新增.
-    /// 已有工程里的残留值仍会在向下拖时优先被吃掉.
+    /// / 向下拖过页底后改用高度缩放宽度」会写入这里; 现在两边碰到页边
+    /// 即停, 不再新增. 已有工程里的残留值仍会在向下拖时优先被吃掉.
     pub gap_after: i32,
+    /// 块内容相对拼合图左缘的横向偏移 (像素, 正值向右). 蒙版界面允许
+    /// 超出页面左右仍画出; 拼接 / 导出 / 视频按页宽截掉溢出部分.
+    pub shift_x: i32,
 }
 
 impl BlockAdjust {
     pub fn is_noop(&self) -> bool {
-        self.extra_top == 0 && self.extra_bottom == 0 && self.gap_before == 0 && self.gap_after == 0
+        self.extra_top == 0
+            && self.extra_bottom == 0
+            && self.gap_before == 0
+            && self.gap_after == 0
+            && self.shift_x == 0
     }
 
     pub fn find<'a>(layout: &'a [BlockAdjust], region_id: &str) -> Option<&'a BlockAdjust> {
@@ -138,33 +146,59 @@ pub fn stitch_with_layout(
     stitch_with_stats(parts, &stats, layout)
 }
 
-/// 把 `src` 第 `src_y0..src_y0+count` 行整块拷到 `dst` 左上角对齐 (x=0)、
-/// 纵向偏移 `dst_y` 的位置; 按行 `copy_from_slice`, 不用
-/// `image::imageops::replace`/`crop_imm` (内部逐像素调用 get_pixel/
-/// put_pixel, 拖动分块每帧都要重新拼接整张组合图, 大图这样调用的开销
-/// 很可观).
-fn blit_rows(dst: &mut RgbImage, src: &RgbImage, src_y0: u32, count: u32, dst_y: i64) {
-    if dst_y < 0 || count == 0 {
+/// 把 `src` 第 `src_y0..src_y0+count` 行拷到 `dst` (`dst_x`, `dst_y`);
+/// 超出 `dst` 左右/上下的部分直接丢掉 (导出 / 视频截掉横向溢出).
+/// 按行 `copy_from_slice`, 不用 `image::imageops::replace`/`crop_imm`.
+fn blit_rows(
+    dst: &mut RgbImage,
+    src: &RgbImage,
+    src_y0: u32,
+    count: u32,
+    dst_x: i64,
+    dst_y: i64,
+) {
+    if count == 0 {
         return;
     }
-    let dw = dst.width() as usize;
-    let dh = dst.height() as usize;
-    let sw = src.width() as usize;
-    let copy_w = sw.min(dw) * 3;
-    let dst_y = dst_y as usize;
+    let dw = dst.width() as i64;
+    let dh = dst.height() as i64;
+    let sw = src.width() as i64;
+    let src_x0 = if dst_x < 0 { -dst_x } else { 0 };
+    let dest_x = dst_x.max(0);
+    if dest_x >= dw || src_x0 >= sw {
+        return;
+    }
+    let copy_px = (sw - src_x0).min(dw - dest_x);
+    if copy_px <= 0 {
+        return;
+    }
+    let y_start = dst_y.max(0);
+    if y_start >= dh {
+        return;
+    }
+    let src_y_off = (y_start - dst_y) as u32;
+    if src_y_off >= count {
+        return;
+    }
+    let copy_h = (count - src_y_off).min((dh - y_start) as u32);
+    let copy_w = copy_px as usize * 3;
+    let dw_u = dw as usize;
+    let sw_u = sw as usize;
+    let dest_x_u = dest_x as usize;
+    let src_x0_u = src_x0 as usize;
     // `ImageBuffer` 同时实现了 `Index<(u32,u32)>` 与 `Deref<Target=[u8]>`,
     // 直接用 range 下标会被解析成前者报类型不匹配, 需要先显式解引用成
     // 裸字节切片再按 range 切.
     let src_buf: &[u8] = src;
     let dst_buf: &mut [u8] = dst;
-    for row in 0..count as usize {
-        let dy = dst_y + row;
-        if dy >= dh {
+    for row in 0..copy_h as usize {
+        let dy = y_start as usize + row;
+        let sy = src_y0 as usize + src_y_off as usize + row;
+        if sy >= src.height() as usize {
             break;
         }
-        let sy = src_y0 as usize + row;
-        let d0 = dy * dw * 3;
-        let s0 = sy * sw * 3;
+        let d0 = (dy * dw_u + dest_x_u) * 3;
+        let s0 = (sy * sw_u + src_x0_u) * 3;
         dst_buf[d0..d0 + copy_w].copy_from_slice(&src_buf[s0..s0 + copy_w]);
     }
 }
@@ -186,6 +220,7 @@ pub fn stitch_with_stats(
         stats: &'a PieceStats,
         trim_top: u32,
         content_h: u32,
+        shift_x: i64,
         img: &'a RgbImage,
     }
     let mut pieces: Vec<Piece> = Vec::with_capacity(parts.len());
@@ -200,6 +235,7 @@ pub fn stitch_with_stats(
             stats: stats.get(i).unwrap_or(&default_stats),
             trim_top,
             content_h,
+            shift_x: adj.shift_x as i64,
             img,
         });
     }
@@ -234,34 +270,30 @@ pub fn stitch_with_stats(
                 let top_half = p.gap_before / 2;
                 if top_half > 0 {
                     let fill = bg_fill::flat_fill(max_w, top_half, prev_color);
-                    blit_rows(&mut combined, &fill, 0, top_half, yy);
+                    blit_rows(&mut combined, &fill, 0, top_half, 0, yy);
                 }
                 let bottom_half = p.gap_before - top_half;
                 if bottom_half > 0 {
                     let fill = bg_fill::flat_fill(max_w, bottom_half, p.stats.top.0);
-                    blit_rows(&mut combined, &fill, 0, bottom_half, yy + top_half as i64);
+                    blit_rows(&mut combined, &fill, 0, bottom_half, 0, yy + top_half as i64);
                 }
             }
             yy += p.gap_before as i64;
         }
         if p.ext_top > 0 {
-            let fill = bg_fill::flat_fill(max_w, p.ext_top, p.stats.top.0);
-            blit_rows(&mut combined, &fill, 0, p.ext_top, yy);
+            let fill_w = if p.shift_x == 0 { max_w } else { p.img.width() };
+            let fill = bg_fill::flat_fill(fill_w, p.ext_top, p.stats.top.0);
+            blit_rows(&mut combined, &fill, 0, p.ext_top, p.shift_x, yy);
             yy += p.ext_top as i64;
         }
-        // 未裁剪且宽度已一致时直接整块搬原图 (拖动其它块时大多数块都是
-        // 这种情况, 是每帧最大的一块拷贝, 必须走快路径).
-        if p.img.width() == max_w {
-            blit_rows(&mut combined, p.img, p.trim_top, p.content_h, yy);
-        } else {
-            let mut padded = RgbImage::from_pixel(max_w, p.content_h, image::Rgb([255, 255, 255]));
-            blit_rows(&mut padded, p.img, p.trim_top, p.content_h, 0);
-            blit_rows(&mut combined, &padded, 0, p.content_h, yy);
-        }
+        // 未裁剪、未横移且宽度已一致时直接整块搬原图 (拖动其它块时大多数
+        // 块都是这种情况, 是每帧最大的一块拷贝, 必须走快路径).
+        blit_rows(&mut combined, p.img, p.trim_top, p.content_h, p.shift_x, yy);
         yy += p.content_h as i64;
         if p.ext_bottom > 0 {
-            let fill = bg_fill::flat_fill(max_w, p.ext_bottom, p.stats.bottom.0);
-            blit_rows(&mut combined, &fill, 0, p.ext_bottom, yy);
+            let fill_w = if p.shift_x == 0 { max_w } else { p.img.width() };
+            let fill = bg_fill::flat_fill(fill_w, p.ext_bottom, p.stats.bottom.0);
+            blit_rows(&mut combined, &fill, 0, p.ext_bottom, p.shift_x, yy);
             yy += p.ext_bottom as i64;
         }
     }
@@ -270,8 +302,9 @@ pub fn stitch_with_stats(
 
 /// 对比同一组 `heights` 在旧/新 `layout` 下, 算出每个块的内容整体挪动了
 /// 多少像素 (含拖间距导致的整体顺移、裁剪/扩展导致的内容在块自身范围内
-/// 错位两种来源的合计). 只返回*真的动过* (非 0) 的块. 供拖动分块时同步
-/// 平移归属该块的蒙版/画迹, 见 `MaskToolApp::sync_masks_to_block_shift`.
+/// 错位、以及 `shift_x` 横向偏移). 只返回*真的动过* (非 0) 的块. 供拖
+/// 动分块时同步平移归属该块的蒙版/画迹, 见
+/// `MaskToolApp::sync_masks_to_block_shift`.
 ///
 /// 原理: 块 i 顶端 `y0` 只受它自己 `gap_before` 与前面所有块总高的影响,
 /// 跟它自己的 `extra_top` 无关; 但 `extra_top` 变化会让"块内容真正开始
@@ -280,15 +313,19 @@ pub fn stitch_with_stats(
 /// 裁剪, `ext_top - trim_top` 恒等于 `extra_top`). 两者相加即为块内容在
 /// 画布坐标系下的总位移, 对块内任意"真正落在内容区"的点都是同一个常数
 /// (与该点在块内的具体偏移无关), 因此可以整体作为一个平移量应用.
+/// 横向只看该块自己的 `shift_x` 差.
 pub fn block_content_shifts(
     heights: &[(String, u32)],
     old_layout: &[BlockAdjust],
     new_layout: &[BlockAdjust],
-) -> std::collections::HashMap<String, i32> {
+) -> std::collections::HashMap<String, (i32, i32)> {
     let old_spans = compute_spans(heights, old_layout);
     let new_spans = compute_spans(heights, new_layout);
     let extra_top_of = |layout: &[BlockAdjust], id: &str| {
         BlockAdjust::find(layout, id).map(|a| a.extra_top).unwrap_or(0)
+    };
+    let shift_x_of = |layout: &[BlockAdjust], id: &str| {
+        BlockAdjust::find(layout, id).map(|a| a.shift_x).unwrap_or(0)
     };
     let mut deltas = std::collections::HashMap::new();
     for (rid, _) in heights {
@@ -297,12 +334,38 @@ pub fn block_content_shifts(
         let (Some(old_y0), Some(new_y0)) = (old_y0, new_y0) else {
             continue;
         };
-        let d = (new_y0 - old_y0) as i32 + (extra_top_of(new_layout, rid) - extra_top_of(old_layout, rid));
-        if d != 0 {
-            deltas.insert(rid.clone(), d);
+        let dy = (new_y0 - old_y0) as i32 + (extra_top_of(new_layout, rid) - extra_top_of(old_layout, rid));
+        let dx = shift_x_of(new_layout, rid) - shift_x_of(old_layout, rid);
+        if dx != 0 || dy != 0 {
+            deltas.insert(rid.clone(), (dx, dy));
         }
     }
     deltas
+}
+
+/// 从起点快照给指定块加上横向偏移, 其它字段原样保留. `snap` 用来把靠近
+/// 0 的值吸回 0. 不夹页面左右 (溢出由拼接/导出截掉).
+pub fn apply_block_shift_x(
+    start_layout: &[BlockAdjust],
+    region_id: &str,
+    delta: i32,
+    snap: impl Fn(i32) -> i32,
+) -> Vec<BlockAdjust> {
+    let mut layout = start_layout.to_vec();
+    let start = BlockAdjust::find(&layout, region_id)
+        .map(|a| a.shift_x)
+        .unwrap_or(0);
+    let shift_x = snap(start + delta);
+    if let Some(a) = layout.iter_mut().find(|a| a.region_id == region_id) {
+        a.shift_x = shift_x;
+    } else {
+        layout.push(BlockAdjust {
+            region_id: region_id.to_string(),
+            shift_x,
+            ..Default::default()
+        });
+    }
+    layout
 }
 
 /// 拖动块本体 (整体上下移动) 一帧的结果: 更新后的完整 `layout` (只有真的
@@ -366,26 +429,21 @@ pub fn fold_voff_into_leading_gap(
 /// `gap_before`) 完全不受影响, 绝对位置分毫不动. 两个方向完全对称,
 /// 只是传递方向相反.
 ///
-/// 向下 (`delta >= 0`): 被拖动块自己的 `gap_before` 直接加 `delta` (它是
-/// 唯一被鼠标直接拖动的把手, 没有上限). 从它*后面*第一个块开始依次尝试用
-/// 各自已有的 `gap_before` 吸收这次增量: 某块的间距足够吸收剩余量就地
-/// 打住 (它和它后面所有块绝对位置都不变); 吸收不完就把它自己的间距榨干
-/// (归零, 该块因此被"撞到", 自己也要跟着往下挪), 剩余量继续找它后面
-/// 那一个块吸收, 直至链条尽头 (最后一块之后不再有人吸收, 直接体现为
-/// 拼合图整体变高, 不设上限). 链条以外没有被波及的所有块, 包括拼合图
-/// 自身坐标系下"更前面"的所有块, 位置分毫不动; 但拼合图整体变高后, 若
-/// 启用了底色居中合成, 宿主重新居中会让画面在画布上整体上移 (留白自动
-/// 收缩), 因此这些"更前面"的块的*绝对*位置反而会跟着变——用
-/// `voff_shift_delta` 精确抵消掉这一部分 (向下拖恒为 0, 因为向下拖只会
-/// 让拼合图变高, 不会碰到画布最前端或外部居中留白, 所以只需要让手动偏移
-/// 保持不变即可精确抵消; 精确值由宿主结合真实宽高比 `frame_size` 重算,
-/// 这里不做任何假设).
+/// 向下 (`delta >= 0`): 被拖动块自己的 `gap_before` 直接加 `delta`. 从它
+/// *后面*第一个块开始依次尝试用各自已有的 `gap_before` 吸收这次增量:
+/// 某块的间距足够吸收剩余量就地打住 (它和它后面所有块绝对位置都不变);
+/// 吸收不完就把它自己的间距榨干 (归零, 该块因此被"撞到", 自己也要跟着
+/// 往下挪), 剩余量继续找它后面那一个块吸收. 链条尽头之后若还会让拼合图
+/// 变高: `page_h > 0` 时钳在页底 (与向上到顶丢弃剩余位移对称, 不再靠
+/// 加高拼合图去缩小内部块); `page_h == 0` 时没有页面锁, 才允许变高.
+/// 已有的 `gap_after` 仍优先吃掉 (旧工程残留). 链条以外没有被波及的块
+/// 位置分毫不动. 向下拖不借用居中留白, `voff_shift_delta` 恒为 0.
 ///
 /// 向上 (`delta < 0`, 与上面镜像): 从被拖动块自己面向"上一个块"的间距
 /// 开始尝试吸收, 吸收不完就依次往前传递, 直至到达画布最前端 (第一块的
 /// `gap_before`) 也吸收不完时, 先消耗底色居中留白 (`extra_room`);
-/// 居中留白也用尽即已顶到页面 Y=0, 剩余位移丢弃 (拖到页顶就停, 不再写成
-/// `gap_after` 去缩小内部块 — 那套只留给向下拖过页底).
+/// 居中留白也用尽即已顶到页面 Y=0, 剩余位移丢弃 (拖到页顶就停, 不写
+/// `gap_after` 去缩小内部块).
 /// 被拖动块的*下一个*块通过把内部吸收量 + 居中留白消耗量加到它自己的
 /// `gap_before` 上, 保持绝对位置不变.
 ///
@@ -402,6 +460,7 @@ pub fn redistribute_for_block_move(
     region_id: &str,
     extra_room: i32,
     delta: i32,
+    page_h: i32,
     snap: impl Fn(i32) -> i32,
 ) -> BlockMoveResult {
     let mut layout = start_layout.to_vec();
@@ -454,6 +513,7 @@ pub fn redistribute_for_block_move(
                 }
             }
         }
+        clamp_move_sheet_to_page(heights, start_layout, region_id, page_h, &mut layout);
         BlockMoveResult { layout, voff_shift_delta: 0 }
     } else {
         let mut overflow = -delta;
@@ -493,6 +553,29 @@ pub fn redistribute_for_block_move(
     }
 }
 
+/// 向下拖若会让拼合图高过页面, 把多出来的高度从被拖块的 `gap_before`
+/// 扣回去. 已经高过页面的旧布局不继续长高, 也不在这次下拖里偷偷缩短.
+/// `page_h <= 0` 表示没有页面锁, 原样留下.
+fn clamp_move_sheet_to_page(
+    heights: &[(String, u32)],
+    start_layout: &[BlockAdjust],
+    region_id: &str,
+    page_h: i32,
+    layout: &mut Vec<BlockAdjust>,
+) {
+    if page_h <= 0 {
+        return;
+    }
+    let start_sh = sheet_height(heights, start_layout) as i32;
+    let new_sh = sheet_height(heights, layout) as i32;
+    let excess = new_sh - page_h.max(start_sh);
+    if excess <= 0 {
+        return;
+    }
+    let own = gap_of(layout, region_id);
+    set_gap(layout, region_id, own - excess);
+}
+
 /// 拖上边界一帧: `extra_top += delta`, `gap_before -= delta` 以保持内容
 /// 与其它块不动. 吸附只作用在被拖的那条边上 —— `extra_top → 0` (回到
 /// 原内容顶) 或 `gap_before → 0` (贴住上一块/页顶); 两个目标同时落入
@@ -517,16 +600,26 @@ pub fn resize_top_apply_delta(
 
 /// 拖下边界一帧: `extra_bottom += delta`. 有下一块时用它的 `gap_before`
 /// (最后一块则用自己的 `gap_after`) 反向抵消, 先消耗空白, 其它块绝对
-/// 位置不动; 间距吃完后才继续加高、挤开下一块. 吸附只作用在被拖的底边上.
+/// 位置不动; 间距吃完后才继续加高、挤开下一块. `max_grow` 是间距吃完后
+/// 还允许拼合图变高的像素 (`i32::MAX` = 不限; 有页面锁时为页底剩余).
+/// 吸附只作用在被拖的底边上.
 pub fn resize_bottom_apply_delta(
     start_extra_bottom: i32,
     start_slack: i32,
     delta: i32,
     max_trim: i32,
+    max_grow: i32,
     snap: impl Fn(i32) -> i32,
 ) -> (i32, i32) {
     let extra_min = -max_trim;
-    let extra_clamped = (start_extra_bottom + delta).max(extra_min);
+    let extra_clamped = if max_grow == i32::MAX {
+        (start_extra_bottom + delta).max(extra_min)
+    } else {
+        let extra_max = start_extra_bottom
+            .saturating_add(start_slack.max(0))
+            .saturating_add(max_grow.max(0));
+        (start_extra_bottom + delta).clamp(extra_min, extra_max)
+    };
     let consumed = extra_clamped - start_extra_bottom;
     let raw_slack = start_slack - consumed;
     if raw_slack < 0 {
@@ -834,7 +927,7 @@ mod tests {
         // 不涉及外部居中留白的借用, 具体如何抵消拼合图变高后的居中收缩
         // 交给宿主结合真实宽高比精确计算).
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
-        let r = redistribute_for_block_move(&hs, &[], "b", 0, 10, |v| v);
+        let r = redistribute_for_block_move(&hs, &[], "b", 0, 10, 0, |v| v);
         assert_eq!(r.voff_shift_delta, 0);
         assert_eq!(gap(&r.layout, "a"), 0);
         assert_eq!(gap(&r.layout, "b"), 10);
@@ -854,7 +947,7 @@ mod tests {
         // gap_before 不变).
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
         let layout = vec![BlockAdjust { region_id: "c".into(), gap_before: 12, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "a", 0, 5, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "a", 0, 5, 0, |v| v);
         assert_eq!(gap(&r.layout, "a"), 5);
         assert_eq!(gap(&r.layout, "b"), 0); // 自己没有间距可吸收, 跟着顺移
         assert_eq!(gap(&r.layout, "c"), 7); // 12 - 5, 吸收掉推力
@@ -872,7 +965,7 @@ mod tests {
         // 的相对位置不变、一起被拖走 20px".
         let hs = heights(&[("p1", 30), ("p2", 30), ("p3", 30)]);
         let layout = vec![BlockAdjust { region_id: "p3".into(), gap_before: 12, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "p1", 0, 20, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "p1", 0, 20, 0, |v| v);
         assert_eq!(gap(&r.layout, "p1"), 20);
         assert_eq!(gap(&r.layout, "p2"), 0); // 跟着 p1 顺移 (自己没有间距可吸收)
         // p2 顺移 20px 之后, p2-p3 之间原有的 12px 缺口只剩 12-20 = -8,
@@ -889,7 +982,7 @@ mod tests {
         // 但这段位移被 2-3 间的既有间距完全吸收, 3 应该分毫不动.
         let hs = heights(&[("p1", 30), ("p2", 30), ("p3", 30)]);
         let layout = vec![BlockAdjust { region_id: "p3".into(), gap_before: 12, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "p1", 0, 5, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "p1", 0, 5, 0, |v| v);
         assert_eq!(gap(&r.layout, "p3"), 7); // 12 - 5, 部分吸收, 未榨干
         let spans_old = compute_spans(&hs, &layout);
         let spans_new = compute_spans(&hs, &r.layout);
@@ -904,7 +997,7 @@ mod tests {
         // 之间 (若存在) 要新增同样 20px 的间距保持下一块绝对位置不变.
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30), ("d", 30)]);
         let layout = vec![BlockAdjust { region_id: "c".into(), gap_before: 20, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "c", 0, -30, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "c", 0, -30, 0, |v| v);
         assert_eq!(gap(&r.layout, "a"), 0); // 完全没被波及
         assert_eq!(gap(&r.layout, "c"), 0);
         assert_eq!(gap(&r.layout, "d"), 20); // 只补偿内部吃掉的 20px
@@ -923,7 +1016,7 @@ mod tests {
             BlockAdjust { region_id: "b".into(), gap_before: 40, ..Default::default() },
             BlockAdjust { region_id: "c".into(), gap_before: 5, ..Default::default() },
         ];
-        let r = redistribute_for_block_move(&hs, &layout, "c", 0, -30, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "c", 0, -30, 0, |v| v);
         assert_eq!(gap(&r.layout, "a"), 0);
         assert_eq!(gap(&r.layout, "b"), 15); // 40 - 25
         assert_eq!(gap(&r.layout, "c"), 0); // 5 全部吃掉
@@ -940,7 +1033,7 @@ mod tests {
         // 刚加载的原始紧贴状态、又没有居中留白: 往上拖到页顶就停, 不写
         // 底端留白去缩小内部块.
         let hs = heights(&[("a", 30), ("b", 30)]);
-        let r = redistribute_for_block_move(&hs, &[], "b", 0, -30, |v| v);
+        let r = redistribute_for_block_move(&hs, &[], "b", 0, -30, 0, |v| v);
         assert_eq!(gap(&r.layout, "a"), 0);
         assert_eq!(gap(&r.layout, "b"), 0);
         assert_eq!(after(&r.layout, "b"), 0);
@@ -956,7 +1049,7 @@ mod tests {
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
         let layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 50, ..Default::default() }];
         let snap = |v: i32| if v.abs() <= 6 { 0 } else { v };
-        let r = redistribute_for_block_move(&hs, &layout, "b", 0, -45, snap);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 0, -45, 0, snap);
         assert_eq!(gap(&r.layout, "a"), 0); // 完全没被波及
         assert_eq!(gap(&r.layout, "b"), 0); // 5px 残余被吸附掉
         assert_eq!(gap(&r.layout, "c"), 50); // 守恒: 补偿吸附后的真实总量
@@ -972,7 +1065,7 @@ mod tests {
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
         let layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 50, ..Default::default() }];
         let snap = |v: i32| if v.abs() <= 6 { 0 } else { v };
-        let r = redistribute_for_block_move(&hs, &layout, "b", 0, -4, snap);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 0, -4, 0, snap);
         assert_eq!(gap(&r.layout, "b"), 46);
         assert_eq!(gap(&r.layout, "c"), 4);
         let spans_old = compute_spans(&hs, &layout);
@@ -987,7 +1080,7 @@ mod tests {
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
         let layout = vec![BlockAdjust { region_id: "c".into(), gap_before: 12, ..Default::default() }];
         let snap = |v: i32| if v.abs() <= 6 { 0 } else { v };
-        let r = redistribute_for_block_move(&hs, &layout, "b", 0, 4, snap);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 0, 4, 0, snap);
         assert_eq!(gap(&r.layout, "b"), 0);
         assert_eq!(gap(&r.layout, "c"), 12);
         let spans_old = compute_spans(&hs, &layout);
@@ -1003,7 +1096,7 @@ mod tests {
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
         let layout = vec![BlockAdjust { region_id: "c".into(), gap_before: 20, ..Default::default() }];
         let snap = |v: i32| if v.abs() <= 6 { 0 } else { v };
-        let r = redistribute_for_block_move(&hs, &layout, "b", 0, 17, snap);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 0, 17, 0, snap);
         assert_eq!(gap(&r.layout, "b"), 20);
         assert_eq!(gap(&r.layout, "c"), 0);
         let spans_old = compute_spans(&hs, &layout);
@@ -1034,7 +1127,7 @@ mod tests {
         let hs = heights(&[("a", 30), ("b", 40)]);
         let old_layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 20, ..Default::default() }];
         let old_spans = compute_spans(&hs, &old_layout);
-        let (extra, slack) = resize_bottom_apply_delta(0, 20, 8, 29, |v| v);
+        let (extra, slack) = resize_bottom_apply_delta(0, 20, 8, 29, i32::MAX, |v| v);
         assert_eq!((extra, slack), (8, 12));
         let new_layout = vec![
             BlockAdjust { region_id: "a".into(), extra_bottom: extra, ..Default::default() },
@@ -1048,7 +1141,7 @@ mod tests {
 
     #[test]
     fn resize_bottom_pushes_next_only_after_gap_exhausted() {
-        let (extra, slack) = resize_bottom_apply_delta(0, 20, 25, 29, |v| v);
+        let (extra, slack) = resize_bottom_apply_delta(0, 20, 25, 29, i32::MAX, |v| v);
         assert_eq!((extra, slack), (25, 0));
         let hs = heights(&[("a", 30), ("b", 40)]);
         let old_layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 20, ..Default::default() }];
@@ -1067,7 +1160,7 @@ mod tests {
         let hs = heights(&[("a", 30), ("b", 40)]);
         let old_layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 20, ..Default::default() }];
         let old_spans = compute_spans(&hs, &old_layout);
-        let (extra, slack) = resize_bottom_apply_delta(0, 20, -6, 29, |v| v);
+        let (extra, slack) = resize_bottom_apply_delta(0, 20, -6, 29, i32::MAX, |v| v);
         assert_eq!((extra, slack), (-6, 26));
         let new_layout = vec![
             BlockAdjust { region_id: "a".into(), extra_bottom: extra, ..Default::default() },
@@ -1080,12 +1173,24 @@ mod tests {
     #[test]
     fn resize_bottom_snaps_only_the_dragged_edge() {
         let snap = |v: i32| if v.abs() <= 6 { 0 } else { v };
-        let (e, s) = resize_bottom_apply_delta(0, 40, 4, 29, snap);
+        let (e, s) = resize_bottom_apply_delta(0, 40, 4, 29, i32::MAX, snap);
         assert_eq!((e, s), (0, 40));
-        let (e, s) = resize_bottom_apply_delta(0, 40, 37, 29, snap);
+        let (e, s) = resize_bottom_apply_delta(0, 40, 37, 29, i32::MAX, snap);
         assert_eq!((e, s), (40, 0));
-        let (e, s) = resize_bottom_apply_delta(0, 8, 4, 29, snap);
+        let (e, s) = resize_bottom_apply_delta(0, 8, 4, 29, i32::MAX, snap);
         assert_eq!((e, s), (4, 4));
+    }
+
+    #[test]
+    fn resize_bottom_stops_after_slack_when_max_grow_zero() {
+        let (extra, slack) = resize_bottom_apply_delta(0, 20, 25, 29, 0, |v| v);
+        assert_eq!((extra, slack), (20, 0));
+    }
+
+    #[test]
+    fn resize_bottom_grows_only_up_to_max_grow() {
+        let (extra, slack) = resize_bottom_apply_delta(0, 0, 25, 29, 10, |v| v);
+        assert_eq!((extra, slack), (10, 0));
     }
 
     #[test]
@@ -1093,10 +1198,53 @@ mod tests {
         // 向下拖不受 extra_room (居中留白) 影响, voff_shift_delta 恒为 0
         // (交由宿主结合真实宽高比精确抵消居中收缩).
         let hs = heights(&[("a", 30), ("b", 30)]);
-        let r1 = redistribute_for_block_move(&hs, &[], "b", 0, 21, |v| v);
-        let r2 = redistribute_for_block_move(&hs, &[], "b", 999, 21, |v| v);
+        let r1 = redistribute_for_block_move(&hs, &[], "b", 0, 21, 0, |v| v);
+        let r2 = redistribute_for_block_move(&hs, &[], "b", 999, 21, 0, |v| v);
         assert_eq!(r1.voff_shift_delta, 0);
         assert_eq!(r2.voff_shift_delta, 0);
+    }
+
+    #[test]
+    fn block_move_down_stops_at_page_bottom() {
+        // a+b=60, 页高 70: 往下拖 20 只能长 10, 到页底停.
+        let hs = heights(&[("a", 30), ("b", 30)]);
+        let r = redistribute_for_block_move(&hs, &[], "b", 0, 20, 70, |v| v);
+        assert_eq!(gap(&r.layout, "b"), 10);
+        assert_eq!(sheet_height(&hs, &r.layout), 70);
+        assert_eq!(r.voff_shift_delta, 0);
+    }
+
+    #[test]
+    fn block_move_down_eats_following_slack_then_stops_at_page() {
+        // 已有 12px 下间隙, 页高比拼合图多 8: 先吃间隙, 再长到页底, 多的丢掉.
+        let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
+        let layout = vec![BlockAdjust { region_id: "c".into(), gap_before: 12, ..Default::default() }];
+        assert_eq!(sheet_height(&hs, &layout), 102);
+        let r = redistribute_for_block_move(&hs, &layout, "a", 0, 30, 110, |v| v);
+        assert_eq!(gap(&r.layout, "a"), 20);
+        assert_eq!(gap(&r.layout, "c"), 0);
+        assert_eq!(sheet_height(&hs, &r.layout), 110);
+    }
+
+    #[test]
+    fn block_move_down_already_past_page_does_not_grow() {
+        let hs = heights(&[("a", 40), ("b", 40)]);
+        let r = redistribute_for_block_move(&hs, &[], "b", 0, 20, 70, |v| v);
+        assert_eq!(gap(&r.layout, "b"), 0);
+        assert_eq!(sheet_height(&hs, &r.layout), 80);
+    }
+
+    #[test]
+    fn block_move_down_converts_trailing_gap_without_growing() {
+        // 旧工程残留 gap_after 使拼合图已高于页: 下拖先吃末端留白 (30 里
+        // 的 20), 余量 10 才变成位移, 拼合图落到页高即停.
+        let hs = heights(&[("a", 30), ("b", 30)]);
+        let layout = vec![BlockAdjust { region_id: "b".into(), gap_after: 20, ..Default::default() }];
+        assert_eq!(sheet_height(&hs, &layout), 80);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 0, 30, 70, |v| v);
+        assert_eq!(gap(&r.layout, "b"), 10);
+        assert_eq!(after(&r.layout, "b"), 0);
+        assert_eq!(sheet_height(&hs, &r.layout), 70);
     }
 
     #[test]
@@ -1107,7 +1255,7 @@ mod tests {
         // 精确报告"借了多少外部留白").
         let hs = heights(&[("a", 30), ("b", 30)]);
         let layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 5, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "b", 40, -30, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 40, -30, 0, |v| v);
         assert_eq!(gap(&r.layout, "b"), 0);
         assert_eq!(r.voff_shift_delta, -25);
     }
@@ -1118,7 +1266,7 @@ mod tests {
         // 居中 10px 吃完即已到页顶, 剩余位移丢掉, 不写 gap_after.
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
         let layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 5, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "b", 10, -100, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 10, -100, 0, |v| v);
         assert_eq!(gap(&r.layout, "b"), 0);
         assert_eq!(gap(&r.layout, "c"), 15); // 内部 5 + 居中 10
         assert_eq!(after(&r.layout, "c"), 0);
@@ -1131,7 +1279,7 @@ mod tests {
         // 居中留白 (哪怕它还有很多).
         let hs = heights(&[("a", 30), ("b", 30), ("c", 30)]);
         let layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 20, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "b", 999, -10, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "b", 999, -10, 0, |v| v);
         assert_eq!(gap(&r.layout, "b"), 10);
         assert_eq!(gap(&r.layout, "c"), 10);
         assert_eq!(r.voff_shift_delta, 0);
@@ -1147,8 +1295,8 @@ mod tests {
         let new_layout = vec![BlockAdjust { region_id: "b".into(), gap_before: 10, ..Default::default() }];
         let deltas = block_content_shifts(&hs, &old_layout, &new_layout);
         assert_eq!(deltas.get("a"), None);
-        assert_eq!(deltas.get("b"), Some(&10));
-        assert_eq!(deltas.get("c"), Some(&10));
+        assert_eq!(deltas.get("b"), Some(&(0, 10)));
+        assert_eq!(deltas.get("c"), Some(&(0, 10)));
     }
 
     #[test]
@@ -1250,8 +1398,8 @@ mod tests {
         // 上"往上移了 8px"); b 的 y0 也跟着往上挪 8px (a 变矮了).
         let new_layout = vec![BlockAdjust { region_id: "a".into(), extra_top: -8, ..Default::default() }];
         let deltas = block_content_shifts(&hs, &old_layout, &new_layout);
-        assert_eq!(deltas.get("a"), Some(&-8));
-        assert_eq!(deltas.get("b"), Some(&-8));
+        assert_eq!(deltas.get("a"), Some(&(0, -8)));
+        assert_eq!(deltas.get("b"), Some(&(0, -8)));
     }
 
     #[test]
@@ -1263,7 +1411,7 @@ mod tests {
         let new_layout = vec![BlockAdjust { region_id: "a".into(), extra_bottom: 5, ..Default::default() }];
         let deltas = block_content_shifts(&hs, &old_layout, &new_layout);
         assert_eq!(deltas.get("a"), None);
-        assert_eq!(deltas.get("b"), Some(&5));
+        assert_eq!(deltas.get("b"), Some(&(0, 5)));
     }
 
     #[test]
@@ -1329,9 +1477,9 @@ mod tests {
     #[test]
     fn block_move_first_block_down_gains_top_padding() {
         // 拖第一块 (a) 本身往下移: 没有"上一块", 直接加到自己 (即画布
-        // 顶端留白) 上, 没有上限; a 后面没有既有间距可吸收, b 跟着顺移.
+        // 顶端留白) 上; 本测试无页面锁. a 后面没有既有间距可吸收, b 跟着顺移.
         let hs = heights(&[("a", 20), ("b", 20)]);
-        let r = redistribute_for_block_move(&hs, &[], "a", 0, 8, |v| v);
+        let r = redistribute_for_block_move(&hs, &[], "a", 0, 8, 0, |v| v);
         assert_eq!(gap(&r.layout, "a"), 8);
         assert_eq!(r.voff_shift_delta, 0);
         let spans = compute_spans(&hs, &r.layout);
@@ -1345,7 +1493,7 @@ mod tests {
         // 直接消耗; 补给下一块 b 的量与吃掉的量守恒.
         let hs = heights(&[("a", 20), ("b", 20)]);
         let layout = vec![BlockAdjust { region_id: "a".into(), gap_before: 15, ..Default::default() }];
-        let r = redistribute_for_block_move(&hs, &layout, "a", 0, -20, |v| v);
+        let r = redistribute_for_block_move(&hs, &layout, "a", 0, -20, 0, |v| v);
         assert_eq!(gap(&r.layout, "a"), 0);
         assert_eq!(gap(&r.layout, "b"), 15);
         assert_eq!(after(&r.layout, "b"), 0); // 超出页顶的 5px 丢掉
@@ -1466,5 +1614,56 @@ mod tests {
             spans[0].1 as i32 + 125
         };
         assert_eq!(hit, 180);
+    }
+
+    #[test]
+    fn is_noop_includes_shift_x() {
+        assert!(BlockAdjust::default().is_noop());
+        assert!(!BlockAdjust { shift_x: 4, ..Default::default() }.is_noop());
+    }
+
+    #[test]
+    fn apply_block_shift_x_keeps_vertical_and_snaps_zero() {
+        let start = vec![BlockAdjust {
+            region_id: "a".into(),
+            gap_before: 8,
+            shift_x: 3,
+            ..Default::default()
+        }];
+        let moved = apply_block_shift_x(&start, "a", 10, |v| v);
+        assert_eq!(BlockAdjust::find(&moved, "a").map(|a| a.shift_x), Some(13));
+        assert_eq!(gap(&moved, "a"), 8);
+        let snapped = apply_block_shift_x(&start, "a", -5, |v| if v.abs() <= 6 { 0 } else { v });
+        assert_eq!(BlockAdjust::find(&snapped, "a").map(|a| a.shift_x), Some(0));
+    }
+
+    #[test]
+    fn block_content_shifts_includes_shift_x() {
+        let hs = heights(&[("a", 30), ("b", 30)]);
+        let old = vec![BlockAdjust { region_id: "a".into(), shift_x: 2, ..Default::default() }];
+        let new = vec![BlockAdjust { region_id: "a".into(), shift_x: -5, ..Default::default() }];
+        let deltas = block_content_shifts(&hs, &old, &new);
+        assert_eq!(deltas.get("a"), Some(&(-7, 0)));
+        assert_eq!(deltas.get("b"), None);
+    }
+
+    #[test]
+    fn stitch_clips_horizontal_overflow_and_keeps_in_page_pixels() {
+        use image::{Rgb, RgbImage};
+        let mut a = RgbImage::from_pixel(8, 4, Rgb([10, 20, 30]));
+        a.put_pixel(0, 0, Rgb([1, 2, 3]));
+        a.put_pixel(7, 0, Rgb([4, 5, 6]));
+        let parts = vec![("a".to_string(), a)];
+        let layout = vec![BlockAdjust { region_id: "a".into(), shift_x: 3, ..Default::default() }];
+        let combined = stitch_with_layout(&parts, &layout, 200);
+        assert_eq!(combined.dimensions(), (8, 4));
+        assert_eq!(*combined.get_pixel(2, 0), Rgb([255, 255, 255]));
+        assert_eq!(*combined.get_pixel(3, 0), Rgb([1, 2, 3]));
+        let left = vec![BlockAdjust { region_id: "a".into(), shift_x: -3, ..Default::default() }];
+        let clipped = stitch_with_layout(&parts, &left, 200);
+        assert_eq!(clipped.dimensions(), (8, 4));
+        assert_eq!(*clipped.get_pixel(0, 0), Rgb([10, 20, 30]));
+        assert_eq!(*clipped.get_pixel(4, 0), Rgb([4, 5, 6]));
+        assert_eq!(*clipped.get_pixel(5, 0), Rgb([255, 255, 255]));
     }
 }

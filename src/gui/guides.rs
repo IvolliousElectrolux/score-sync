@@ -552,8 +552,8 @@ impl ScoreSyncApp {
                     .map(|(rid, ..)| rid.clone())
             });
             if let Some(rid) = target {
-                if let Some(&d) = deltas.get(&rid) {
-                    m.offset_y(d);
+                if let Some(&(dx, dy)) = deltas.get(&rid) {
+                    m.translate(dx, dy);
                 }
             }
         }

@@ -210,8 +210,11 @@ pub struct MaskToolApp {
     /// 当前选中/拖动的块 (未选中任何蒙版时才生效).
     pub(crate) block_selected: Option<String>,
     /// 鼠标当前是否悬停在可拖动的分块区域上 (无拖动时按位置实时更新),
-    /// 只有这时才把光标换成上下拉伸样式, 不能整个画布都换.
+    /// 只有这时才把光标换成上下 / 左右拉伸样式, 不能整个画布都换.
     pub(crate) block_hover: bool,
+    /// 最近一次鼠标事件是否按着 Shift (悬停时光标左右 / 上下切换用;
+    /// 拖动轴向在按下时锁定, 见 `DragKind::BlockMove::horizontal`).
+    pub(crate) last_shift: bool,
     /// 锁定的 (img_w, img_h), 用于计算显示缩放比例, 并作为「分块贴图预览」
     /// 开关: `Some` 时画布画分块 GPU 贴图而不是可能过期的整图. 拼合图总
     /// 高会随拖动实时变化, 如果每帧都按最新尺寸重算「适应视口」缩放,
@@ -349,6 +352,7 @@ impl MaskToolApp {
             voff_target: 0,
             block_selected: None,
             block_hover: false,
+            last_shift: false,
             block_drag_freeze: None,
             masks_are_sheet: true,
             guides: GuideState::default(),

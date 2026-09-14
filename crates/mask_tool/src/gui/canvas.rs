@@ -120,6 +120,7 @@ impl MaskToolApp {
         }
         let control = apply_bg::is_primary_mod(&ev.modifiers);
         let shift = ev.modifiers.shift;
+        self.last_shift = shift;
 
         match self.mode {
             ToolMode::Draw => {
@@ -219,7 +220,51 @@ impl MaskToolApp {
                 }
             }
             ToolMode::Select => {
-                if shift {
+                let hit = self.hit_mask(ix, iy);
+                let tol = xform.edge_tol();
+                let guide_hit = if hit.is_none() && self.selected.is_empty() {
+                    self.guide_hit_test(iy, tol)
+                } else {
+                    None
+                };
+                // 未选中任何蒙版时: 先命中辅助线 (优先级最高, 细线容易被块
+                // 边界线盖住), 否则点在分块上就是拖动/拉伸分块; Shift+点块
+                // 本体/边 = 左右移 (不再开框选). 空白处 Shift 仍是框选蒙版.
+                if let Some(idx) = guide_hit {
+                    if control {
+                        if self.guide_selected.contains(&idx) {
+                            self.guide_selected.remove(&idx);
+                        } else {
+                            self.guide_selected.insert(idx);
+                        }
+                    } else {
+                        self.begin_guide_drag(idx);
+                    }
+                } else if hit.is_none() && self.selected.is_empty() && self.has_block_pieces() {
+                    self.guide_selected.clear();
+                    match self.hit_block_at(ix, iy, tol) {
+                        Some((rid, _)) if shift => self.begin_block_move(rid, ix, iy, true),
+                        Some((rid, BlockHitZone::Top)) => self.begin_block_resize_top(rid, iy),
+                        Some((rid, BlockHitZone::Bottom)) => {
+                            self.begin_block_resize_bottom(rid, iy)
+                        }
+                        Some((rid, BlockHitZone::Body)) => {
+                            self.begin_block_move(rid, ix, iy, false)
+                        }
+                        None if shift => {
+                            self.drag = Some(DragKind::Marquee {
+                                x0: ix,
+                                y0: iy,
+                                x1: ix,
+                                y1: iy,
+                                additive: control,
+                            });
+                        }
+                        None => {}
+                    }
+                } else if shift {
+                    self.guide_selected.clear();
+                    self.block_selected = None;
                     self.drag = Some(DragKind::Marquee {
                         x0: ix,
                         y0: iy,
@@ -228,42 +273,9 @@ impl MaskToolApp {
                         additive: control,
                     });
                 } else {
-                    let hit = self.hit_mask(ix, iy);
-                    let tol = xform.edge_tol();
-                    let guide_hit = if hit.is_none() && self.selected.is_empty() {
-                        self.guide_hit_test(iy, tol)
-                    } else {
-                        None
-                    };
-                    // 未选中任何蒙版时: 先命中辅助线 (优先级最高, 细线容易被块
-                    // 边界线盖住), 否则点在分块上就是拖动/拉伸分块; 一旦选中了
-                    // 某个蒙版, 后续操作都按蒙版处理 (与蒙版列表/画布保持一致).
-                    if let Some(idx) = guide_hit {
-                        if control {
-                            // Ctrl+点选: 只切换多选, 不触发拖动 (拖动只支持单条).
-                            if self.guide_selected.contains(&idx) {
-                                self.guide_selected.remove(&idx);
-                            } else {
-                                self.guide_selected.insert(idx);
-                            }
-                        } else {
-                            self.begin_guide_drag(idx);
-                        }
-                    } else if hit.is_none() && self.selected.is_empty() && self.has_block_pieces() {
-                        self.guide_selected.clear();
-                        match self.hit_block_at(iy, tol) {
-                            Some((rid, BlockHitZone::Top)) => self.begin_block_resize_top(rid, iy),
-                            Some((rid, BlockHitZone::Bottom)) => {
-                                self.begin_block_resize_bottom(rid, iy)
-                            }
-                            Some((rid, BlockHitZone::Body)) => self.begin_block_move(rid, iy),
-                            None => {}
-                        }
-                    } else {
-                        self.guide_selected.clear();
-                        self.block_selected = None;
-                        self.apply_selection_click(hit, control);
-                    }
+                    self.guide_selected.clear();
+                    self.block_selected = None;
+                    self.apply_selection_click(hit, control);
                 }
             }
         }
@@ -309,6 +321,11 @@ impl MaskToolApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let shift = ev.modifiers.shift;
+        if shift != self.last_shift {
+            self.last_shift = shift;
+            cx.notify();
+        }
         self.apply_mouse_move_at(ev.position, cx);
     }
 
@@ -464,20 +481,33 @@ impl MaskToolApp {
             }
             Some(DragKind::BlockMove {
                 region_id,
+                start_ix,
                 start_iy,
                 start_layout,
                 start_voff,
+                horizontal,
                 undid,
             }) => {
                 let xform = self.xform();
-                let (_, iy) = xform.screen_to_image(sx, sy);
-                let (undid, changed) =
-                    self.apply_block_move(&region_id, start_iy, &start_layout, start_voff, undid, iy);
+                let (ix, iy) = xform.screen_to_image(sx, sy);
+                let (undid, changed) = self.apply_block_move(
+                    &region_id,
+                    start_ix,
+                    start_iy,
+                    &start_layout,
+                    start_voff,
+                    horizontal,
+                    undid,
+                    ix,
+                    iy,
+                );
                 self.drag = Some(DragKind::BlockMove {
                     region_id,
+                    start_ix,
                     start_iy,
                     start_layout,
                     start_voff,
+                    horizontal,
                     undid,
                 });
                 if changed {
@@ -577,14 +607,14 @@ impl MaskToolApp {
                     cx.notify();
                 } else if self.mode == ToolMode::Select && self.selected.is_empty() && self.has_block_pieces() {
                     let xform = self.xform();
-                    let (_, iy) = xform.screen_to_image(sx, sy);
+                    let (ix, iy) = xform.screen_to_image(sx, sy);
                     let tol = xform.edge_tol();
                     let guide_hover = self.guide_hit_test(iy, tol);
                     if guide_hover != self.guide_hover {
                         self.guide_hover = guide_hover;
                         cx.notify();
                     }
-                    let hover = guide_hover.is_none() && self.hit_block_at(iy, tol).is_some();
+                    let hover = guide_hover.is_none() && self.hit_block_at(ix, iy, tol).is_some();
                     if hover != self.block_hover {
                         self.block_hover = hover;
                         cx.notify();
@@ -718,8 +748,13 @@ impl MaskToolApp {
                 self.opacity_undid = false;
                 cx.notify();
             }
-            Some(DragKind::BlockMove { region_id, .. }) => {
-                self.status = format!("已移动分块 {region_id}").into();
+            Some(DragKind::BlockMove { region_id, horizontal, .. }) => {
+                self.status = if horizontal {
+                    format!("已左右移动分块 {region_id}")
+                } else {
+                    format!("已移动分块 {region_id}")
+                }
+                .into();
                 cx.notify();
             }
             Some(DragKind::BlockResizeTop { region_id, .. })
@@ -864,7 +899,7 @@ impl MaskToolApp {
             && self.mode == ToolMode::Select
             && self.selected.is_empty()
             && self.has_block_pieces();
-        let block_spans = if show_blocks { self.block_spans() } else { Vec::new() };
+        let block_boxes = if show_blocks { self.block_overlay_boxes() } else { Vec::new() };
         let block_selected = self.block_selected.clone();
         let guide_lines = if self.preview_only {
             Vec::new()
@@ -895,6 +930,7 @@ impl MaskToolApp {
         let block_shows_bg = self.block_shows_bg;
         let content_scale = self.content_scale;
         let canvas_loading = self.canvas_loading;
+        let allow_tile_overflow = !self.preview_only;
         let cursor = if self.host_pick_armed || self.eyedropper_armed {
             CursorStyle::Crosshair
         } else if self.preview_only {
@@ -905,14 +941,22 @@ impl MaskToolApp {
                 ToolMode::Draw | ToolMode::Poly | ToolMode::Eraser => CursorStyle::Crosshair,
                 ToolMode::Pan => CursorStyle::OpenHand,
                 ToolMode::Select => {
-                    let dragging_block = matches!(
+                    let dragging_h = matches!(
                         self.drag,
-                        Some(DragKind::BlockMove { .. })
+                        Some(DragKind::BlockMove { horizontal: true, .. })
+                    );
+                    let dragging_v = matches!(
+                        self.drag,
+                        Some(DragKind::BlockMove { horizontal: false, .. })
                             | Some(DragKind::BlockResizeTop { .. })
                             | Some(DragKind::BlockResizeBottom { .. })
                             | Some(DragKind::GuideMove { .. })
                     );
-                    if dragging_block
+                    if dragging_h
+                        || (self.block_hover && self.last_shift && self.selected.is_empty())
+                    {
+                        CursorStyle::ResizeColumn
+                    } else if dragging_v
                         || (self.guide_hover.is_some() && self.selected.is_empty())
                         || (self.block_hover && self.selected.is_empty())
                     {
@@ -1001,6 +1045,7 @@ impl MaskToolApp {
                             paint_live_block_tiles(
                                 window,
                                 img_bounds,
+                                bounds,
                                 xform,
                                 &block_tiles,
                                 &block_layout_paint,
@@ -1009,6 +1054,7 @@ impl MaskToolApp {
                                 block_bg.as_ref(),
                                 block_shows_bg,
                                 content_scale,
+                                allow_tile_overflow,
                             );
                         } else if let Some(ref img) = render {
                             let _ = window.paint_image(
@@ -1021,29 +1067,38 @@ impl MaskToolApp {
                         }
 
                         if show_blocks {
-                            for (rid, y0, y1) in &block_spans {
+                            for (rid, x0, y0, x1, y1) in &block_boxes {
                                 let is_sel = block_selected.as_deref() == Some(rid.as_str());
                                 // 选中的块不再叠色块 (会遮住原图颜色, 不方便对色),
                                 // 改成更粗的实线边框; 未选中的块只画细虚线示意.
+                                // 框跟着 shift_x, 可以画出页面左右.
                                 let line_color = if is_sel {
                                     rgb(0xf97316)
                                 } else {
                                     rgb(0x38bdf8)
                                 };
-                                for &y in &[*y0, *y1] {
-                                    let sy = bounds.origin.y + px(xform.origin_y + y as f32 * xform.scale);
-                                    let mut line = PathBuilder::stroke(if is_sel { px(2.5) } else { px(1.) });
-                                    if !is_sel {
-                                        line = line.dash_array(&[px(6.), px(4.)]);
-                                    }
-                                    line.move_to(point(bounds.origin.x, sy));
-                                    line.line_to(point(
-                                        bounds.origin.x + px(img_w as f32 * xform.scale),
-                                        sy,
-                                    ));
-                                    if let Ok(path) = line.build() {
-                                        window.paint_path(path, line_color);
-                                    }
+                                let mut b = xform.image_rect_to_screen(
+                                    x0.round() as i32,
+                                    y0.round() as i32,
+                                    x1.round() as i32,
+                                    y1.round() as i32,
+                                );
+                                b.origin.x = bounds.origin.x + b.origin.x;
+                                b.origin.y = bounds.origin.y + b.origin.y;
+                                let mut stroke = PathBuilder::stroke(if is_sel { px(2.5) } else { px(1.) });
+                                if !is_sel {
+                                    stroke = stroke.dash_array(&[px(6.), px(4.)]);
+                                }
+                                stroke.move_to(b.origin);
+                                stroke.line_to(point(b.origin.x + b.size.width, b.origin.y));
+                                stroke.line_to(point(
+                                    b.origin.x + b.size.width,
+                                    b.origin.y + b.size.height,
+                                ));
+                                stroke.line_to(point(b.origin.x, b.origin.y + b.size.height));
+                                stroke.close();
+                                if let Ok(path) = stroke.build() {
+                                    window.paint_path(path, line_color);
                                 }
                             }
                         }
@@ -1350,6 +1405,7 @@ impl MaskToolApp {
 fn paint_live_block_tiles(
     window: &mut Window,
     img_bounds: Bounds<Pixels>,
+    view_bounds: Bounds<Pixels>,
     xform: ViewXform,
     tiles: &[BlockTile],
     layout: &[BlockAdjust],
@@ -1358,6 +1414,7 @@ fn paint_live_block_tiles(
     bg: Option<&BlockBgTile>,
     shows_bg: bool,
     content_scale: f32,
+    allow_overflow: bool,
 ) {
     if tiles.is_empty() {
         return;
@@ -1427,7 +1484,10 @@ fn paint_live_block_tiles(
                 Default::default(),
             ));
         }
+    });
 
+    let tile_clip = if allow_overflow { view_bounds } else { img_bounds };
+    window.with_content_mask(Some(ContentMask { bounds: tile_clip }), |window| {
         let sheet_w = tiles.iter().map(|t| t.width).max().unwrap_or(1) as f32;
         let hx = canvas_x(0.0);
         let dw = canvas_s(sheet_w);
@@ -1439,6 +1499,8 @@ fn paint_live_block_tiles(
                 .unwrap_or_default();
             let (gap, ext_top, content_h, ext_bottom, _trim_top) =
                 crate::layout::effective_metrics(tile.height as i32, &adj);
+            let hx_block = canvas_x(adj.shift_x as f32);
+            let dw_block = canvas_s(tile.width as f32);
             if gap > 0 {
                 if i > 0 {
                     if let Some(prev) = prev_bottom {
@@ -1471,9 +1533,9 @@ fn paint_live_block_tiles(
             if ext_top > 0 {
                 fill_rect(
                     window,
-                    hx,
+                    hx_block,
                     canvas_y(yy as f32),
-                    dw,
+                    dw_block,
                     canvas_s(ext_top as f32),
                     tile.top_fill,
                 );
@@ -1482,13 +1544,13 @@ fn paint_live_block_tiles(
             if content_h > 0 {
                 let piece_origin_y = canvas_y((yy + adj.extra_top as i64) as f32);
                 let piece_bounds = img_rect(
-                    hx,
+                    hx_block,
                     piece_origin_y,
                     canvas_s(tile.width as f32),
                     canvas_s(tile.height as f32),
                 );
                 let clip = img_rect(
-                    hx,
+                    hx_block,
                     canvas_y(content_y as f32),
                     canvas_s(tile.width as f32),
                     canvas_s(content_h as f32),
@@ -1507,9 +1569,9 @@ fn paint_live_block_tiles(
             if ext_bottom > 0 {
                 fill_rect(
                     window,
-                    hx,
+                    hx_block,
                     canvas_y(yy as f32),
-                    dw,
+                    dw_block,
                     canvas_s(ext_bottom as f32),
                     tile.bottom_fill,
                 );

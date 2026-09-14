@@ -433,7 +433,7 @@ impl MaskToolApp {
         if self.img_w == 0 || self.img_h == 0 || self.block_tiles.is_empty() {
             return None;
         }
-        let x = ix.clamp(0.0, (self.img_w - 1) as f32);
+        let x = ix;
         let y = iy.clamp(0.0, (self.img_h - 1) as f32);
         let cs = self.content_scale_or_1();
         let hoff = self.block_hoff as f32;
@@ -472,7 +472,10 @@ impl MaskToolApp {
                 }
                 yy += gap as i64;
             }
-            if ext_top > 0 && in_sheet_x {
+            let hx_block = canvas_x(adj.shift_x as f32);
+            let dw_block = canvas_s(tile.width as f32);
+            let in_block_x = x >= hx_block && x < hx_block + dw_block;
+            if ext_top > 0 && in_block_x {
                 let y0 = canvas_y(yy as f32);
                 let y1 = canvas_y((yy + ext_top as i64) as f32);
                 if y >= y0 && y < y1 {
@@ -480,12 +483,12 @@ impl MaskToolApp {
                 }
             }
             let content_y = yy + ext_top as i64;
-            if content_h > 0 && in_sheet_x {
+            if content_h > 0 && in_block_x {
                 let piece_origin_y = canvas_y((yy + adj.extra_top as i64) as f32);
                 let clip_y0 = canvas_y(content_y as f32);
                 let clip_y1 = canvas_y((content_y + content_h as i64) as f32);
                 if y >= clip_y0 && y < clip_y1 {
-                    let local_x = (x - hx) / cs;
+                    let local_x = (x - hx_block) / cs;
                     let local_y = (y - piece_origin_y) / cs;
                     if let Some(rgb) = sample_thumb(
                         &tile.thumb,
@@ -499,7 +502,7 @@ impl MaskToolApp {
                 }
             }
             yy += ext_top as i64 + content_h as i64;
-            if ext_bottom > 0 && in_sheet_x {
+            if ext_bottom > 0 && in_block_x {
                 let y0 = canvas_y(yy as f32);
                 let y1 = canvas_y((yy + ext_bottom as i64) as f32);
                 if y >= y0 && y < y1 {
@@ -670,6 +673,18 @@ impl MaskToolApp {
         }
     }
 
+    /// 底色页在谱面坐标里的高度; 无底色 / 无比例时为 0 (没有页面锁).
+    fn page_lock_height(&self) -> i32 {
+        let Some(bg) = self.block_bg.as_ref() else {
+            return 0;
+        };
+        if bg.aspect_w == 0 || bg.aspect_h == 0 {
+            return 0;
+        }
+        let sw = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1);
+        apply_bg::process::page_size(sw, bg.aspect_w, bg.aspect_h).1 as i32
+    }
+
     /// 谱面在画布上的横向范围 (已叠加 `block_hoff` / `content_scale`).
     /// 五线谱/大括号扫描必须用这个范围, 不能用整张画布宽 (底色 letterbox
     /// 会把谱线占宽稀释到判不成谱表).
@@ -836,8 +851,8 @@ impl MaskToolApp {
                     .map(|(rid, ..)| rid.clone())
             });
             if let Some(rid) = target {
-                if let Some(&d) = deltas.get(&rid) {
-                    m.offset_y(d);
+                if let Some(&(dx, dy)) = deltas.get(&rid) {
+                    m.translate(dx, dy);
                 }
             }
         }
@@ -861,15 +876,52 @@ impl MaskToolApp {
         self.block_layout.len() - 1
     }
 
-    /// 拖动命中测试: 在画布 y=`iy` (图像坐标, 已含 `block_voff`) 处, 找
-    /// 最靠近的块上/下边界 (容差 `tol`, 图像像素) 或落在哪个块本体内.
-    pub(super) fn hit_block_at(&self, iy: f32, tol: f32) -> Option<(String, BlockHitZone)> {
+    fn block_piece_width(&self, region_id: &str) -> u32 {
+        self.block_tiles
+            .iter()
+            .find(|t| t.region_id == region_id)
+            .map(|t| t.width)
+            .or_else(|| self.block_tiles.iter().map(|t| t.width).max())
+            .unwrap_or(self.img_w.max(1))
+    }
+
+    /// 块内容在画布坐标系下的左右缘 (已叠加 `block_hoff` / `shift_x` /
+    /// `content_scale`). 可以超出页面, 供命中与叠加框使用.
+    fn block_canvas_x_range(&self, region_id: &str) -> (f32, f32) {
+        let cs = self.content_scale_or_1();
+        let sx = BlockAdjust::find(&self.block_layout, region_id)
+            .map(|a| a.shift_x)
+            .unwrap_or(0);
+        let w = self.block_piece_width(region_id) as f32;
+        let x0 = self.block_hoff as f32 + sx as f32 * cs;
+        (x0, x0 + w * cs - 1.0)
+    }
+
+    /// 各块在画布坐标系下的框 (`x0, y0, x1, y1`), 含横向偏移.
+    pub(super) fn block_overlay_boxes(&self) -> Vec<(String, f32, f32, f32, f32)> {
+        self.block_spans()
+            .into_iter()
+            .map(|(rid, y0, y1)| {
+                let (x0, x1) = self.block_canvas_x_range(&rid);
+                (rid, x0, y0 as f32, x1, y1 as f32)
+            })
+            .collect()
+    }
+
+    /// 拖动命中测试: 在画布 (`ix`, `iy`) (图像坐标, 已含 hoff/voff) 处,
+    /// 找最靠近的块上/下边界 (容差 `tol`) 或落在哪个块本体内. 横向按
+    /// `shift_x` 后的实际位置 (含溢出页面的部分).
+    pub(super) fn hit_block_at(&self, ix: f32, iy: f32, tol: f32) -> Option<(String, BlockHitZone)> {
         let spans = self.block_spans();
         if spans.is_empty() {
             return None;
         }
         let mut best: Option<(String, BlockHitZone, f32)> = None;
         for (rid, y0, y1) in &spans {
+            let (x0, x1) = self.block_canvas_x_range(rid);
+            if ix + tol < x0 || ix - tol > x1 {
+                continue;
+            }
             let d_top = (iy - *y0 as f32).abs();
             let d_bot = (iy - *y1 as f32).abs();
             if d_top <= tol && best.as_ref().map(|(_, _, d)| d_top < *d).unwrap_or(true) {
@@ -884,14 +936,24 @@ impl MaskToolApp {
         }
         spans
             .iter()
-            .find(|(_, y0, y1)| (*y0 as f32) <= iy && iy <= (*y1 as f32))
+            .find(|(rid, y0, y1)| {
+                let (x0, x1) = self.block_canvas_x_range(rid);
+                ix >= x0 && ix <= x1 && (*y0 as f32) <= iy && iy <= (*y1 as f32)
+            })
             .map(|(rid, ..)| (rid.clone(), BlockHitZone::Body))
     }
 
-    /// 开始拖动块本体 (整体上下移动). 记录完整的 `block_layout` 快照
-    /// (供每帧重新分配用, 不做增量累加) 与当前 `block_voff` (折进第一块
-    /// `gap_before` 后变成页面绝对坐标, y=0 即页顶).
-    pub(super) fn begin_block_move(&mut self, region_id: String, iy: f32) {
+    /// 开始拖动块本体. `horizontal` 为 true 时锁定左右 (Shift 按下时);
+    /// 否则只上下. 记录完整的 `block_layout` 快照 (供每帧重新分配用,
+    /// 不做增量累加) 与当前 `block_voff` (折进第一块 `gap_before` 后变成
+    /// 页面绝对坐标, y=0 即页顶).
+    pub(super) fn begin_block_move(
+        &mut self,
+        region_id: String,
+        ix: f32,
+        iy: f32,
+        horizontal: bool,
+    ) {
         if !self.block_heights.iter().any(|(id, _)| *id == region_id) {
             return;
         }
@@ -899,9 +961,11 @@ impl MaskToolApp {
         self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
         self.drag = Some(DragKind::BlockMove {
             region_id,
+            start_ix: ix,
             start_iy: iy,
             start_layout: self.block_layout.clone(),
             start_voff: self.block_voff.max(0).min(i32::MAX as i64) as i32,
+            horizontal,
             undid: false,
         });
     }
@@ -941,19 +1005,26 @@ impl MaskToolApp {
     }
 
     /// 每帧都从拖动起点的快照重新分配 (不做增量累加, 避免多帧误差), 见
-    /// `layout::redistribute_for_block_move` 文档. 首次真正产生位移时
-    /// push 一次撤销快照 (`undid` 之前是否已经 push 过), 返回
-    /// `(undid, changed)`: `changed` 为 false 时调用方不必 `cx.notify()`.
+    /// `layout::redistribute_for_block_move` 文档. 有页面锁时向下拖到页底
+    /// 即停, 与向上到顶对称. 首次真正产生位移时 push 一次撤销快照
+    /// (`undid` 之前是否已经 push 过), 返回 `(undid, changed)`:
+    /// `changed` 为 false 时调用方不必 `cx.notify()`.
     /// 完成后同步跟着这次布局变化平移归属受影响块的蒙版, 并刷新预览几何.
     pub(super) fn apply_block_move(
         &mut self,
         region_id: &str,
+        start_ix: f32,
         start_iy: f32,
         start_layout: &[BlockAdjust],
         start_voff: i32,
+        horizontal: bool,
         undid: bool,
+        ix: f32,
         iy: f32,
     ) -> (bool, bool) {
+        if horizontal {
+            return self.apply_block_shift_x_drag(region_id, start_ix, start_layout, undid, ix);
+        }
         let cs = self.content_scale_or_1();
         let delta = ((iy - start_iy) / cs).round() as i32;
         if delta == 0 {
@@ -970,6 +1041,7 @@ impl MaskToolApp {
             region_id,
             0,
             delta,
+            self.page_lock_height(),
             snap_zero,
         );
         let new_voff_target = 0i64;
@@ -984,6 +1056,36 @@ impl MaskToolApp {
         let old_layout = self.block_layout.clone();
         self.block_layout = r.layout;
         self.voff_target = new_voff_target;
+        self.sync_masks_to_block_shift(&old_layout);
+        self.refresh_preview_geom();
+        (undid, true)
+    }
+
+    /// Shift 左右拖: 只改被拖块的 `shift_x`, 上下布局不动, 不夹页面左右.
+    fn apply_block_shift_x_drag(
+        &mut self,
+        region_id: &str,
+        start_ix: f32,
+        start_layout: &[BlockAdjust],
+        undid: bool,
+        ix: f32,
+    ) -> (bool, bool) {
+        let cs = self.content_scale_or_1();
+        let delta = ((ix - start_ix) / cs).round() as i32;
+        if delta == 0 {
+            return (undid, false);
+        }
+        let layout = layout::apply_block_shift_x(start_layout, region_id, delta, snap_zero);
+        if layout == self.block_layout {
+            return (undid, false);
+        }
+        let mut undid = undid;
+        if !undid {
+            self.push_undo();
+            undid = true;
+        }
+        let old_layout = self.block_layout.clone();
+        self.block_layout = layout;
         self.sync_masks_to_block_shift(&old_layout);
         self.refresh_preview_geom();
         (undid, true)
@@ -1059,6 +1161,8 @@ impl MaskToolApp {
         (undid, true)
     }
 
+    /// 拖下边界: 先消耗与下一块之间的空白, 贴住之后才挤开. 有页面锁时
+    /// 拼合图高到页底即停, 与上边界到顶对称.
     pub(super) fn apply_block_resize_bottom(
         &mut self,
         region_id: &str,
@@ -1096,11 +1200,19 @@ impl MaskToolApp {
                 .map(|a| a.gap_after)
                 .unwrap_or(0)
         };
+        let start_sh = layout::sheet_height(&self.block_heights, &layout) as i32;
+        let page_h = self.page_lock_height();
+        let max_grow = if page_h > 0 {
+            (page_h - start_sh).max(0)
+        } else {
+            i32::MAX
+        };
         let (new_extra_bottom, new_slack) = layout::resize_bottom_apply_delta(
             start_extra_bottom,
             start_slack,
             delta,
             max_trim,
+            max_grow,
             snap_zero,
         );
         if let Some(a) = layout.iter_mut().find(|a| a.region_id == region_id) {
