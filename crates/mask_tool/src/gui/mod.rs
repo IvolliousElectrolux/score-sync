@@ -209,9 +209,9 @@ pub struct MaskToolApp {
     pub(crate) voff_target: i64,
     /// 当前选中/拖动的块 (未选中任何蒙版时才生效).
     pub(crate) block_selected: Option<String>,
-    /// 鼠标当前是否悬停在可拖动的分块区域上 (无拖动时按位置实时更新),
+    /// 鼠标当前悬停在分块的哪一区 (无拖动时按位置实时更新),
     /// 只有这时才把光标换成上下 / 左右拉伸样式, 不能整个画布都换.
-    pub(crate) block_hover: bool,
+    pub(crate) block_hover: Option<BlockHitZone>,
     /// 最近一次鼠标事件是否按着 Shift (悬停时光标左右 / 上下切换用;
     /// 拖动轴向在按下时锁定, 见 `DragKind::BlockMove::horizontal`).
     pub(crate) last_shift: bool,
@@ -351,7 +351,7 @@ impl MaskToolApp {
             piece_staff_ys: HashMap::new(),
             voff_target: 0,
             block_selected: None,
-            block_hover: false,
+            block_hover: None,
             last_shift: false,
             block_drag_freeze: None,
             masks_are_sheet: true,

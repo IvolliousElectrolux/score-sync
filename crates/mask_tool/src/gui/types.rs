@@ -41,7 +41,7 @@ pub(crate) fn brush_size_to_t(size: f32, min: f32, max: f32) -> f32 {
 pub(crate) const POLY_SNAP_SCREEN_PX: f32 = 12.0;
 /// 橡皮: 超过此图像像素位移才视为拖擦 (否则为单击擦顶层).
 pub(crate) const ERASE_DRAG_SLOP_IMG: f32 = 3.0;
-/// 拖动「组合分块」时, 命中块上下边界线的容差 (屏幕像素).
+/// 拖动「组合分块」时, 命中块四条边界线的容差 (屏幕像素).
 pub(crate) const BLOCK_EDGE_HIT_PX: f32 = 8.0;
 /// 拖动「组合分块」边界/间距时, 靠近 0 的吸附容差 (图像像素).
 /// 只吸附正在拖的那一侧, 其它块按守恒保持不动.
@@ -313,7 +313,7 @@ pub(crate) enum DragKind {
     /// 被拖动块与相邻块之间*已有*的间距, 只有真的撞上了才会继续波及
     /// 下一个/上一个块; 顶到页顶或底到页底即停, 见
     /// `crate::layout::redistribute_for_block_move`.
-    /// 按住 Shift 按下时锁定为只左右移 (`horizontal`), 不夹页面左右.
+    /// 按住 Shift 按下时锁定为只左右移 (`horizontal`), 不夹原块左右.
     ///
     /// `start_layout` 是拖动起点时的完整快照 (每帧都从这份快照重新分配,
     /// 不做增量累加, 避免多帧误差累积). `start_voff` 是拖动起点时的
@@ -353,6 +353,22 @@ pub(crate) enum DragKind {
         start_layout: Vec<BlockAdjust>,
         start_voff: i32,
         max_trim: i32,
+        undid: bool,
+    },
+    /// 「移动分块」: 拖动块的左/右边界 (裁剪/扩展). 内容位置不动; 向内
+    /// 裁掉的空位用谱纸色填, 向外扩在蒙版界面画出, 导出仍按原块左右截掉.
+    BlockResizeLeft {
+        region_id: String,
+        start_ix: f32,
+        start_layout: Vec<BlockAdjust>,
+        orig_w: i32,
+        undid: bool,
+    },
+    BlockResizeRight {
+        region_id: String,
+        start_ix: f32,
+        start_layout: Vec<BlockAdjust>,
+        orig_w: i32,
         undid: bool,
     },
     /// 拖动辅助线. 始终按「全局按比例联动」: `orig_lines` 是拖动开始时

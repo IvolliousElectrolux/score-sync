@@ -1,9 +1,10 @@
 //! 「组合分块」位置/尺寸微调: 数据模型 + 拼接/几何计算.
 //!
-//! 蒙版编辑时可以对组合内某个分块的上下边做裁剪/扩展, 左右平移 (`shift_x`),
-//! 或在块与块之间插入间距, 只影响该组合的拼合图 (蒙版预览/终稿导出/视频
-//! 素材), 不改变分块面板中的原始 `Region.y0/y1`. 横向溢出在蒙版界面仍画出,
-//! 拼接/导出按页宽截掉. 这里同时给出:
+//! 蒙版编辑时可以对组合内某个分块的上下边、左右边做裁剪/扩展, 左右平移
+//! (`shift_x`), 或在块与块之间插入间距, 只影响该组合的拼合图 (蒙版预览/
+//! 终稿导出/视频素材), 不改变分块面板中的原始 `Region.y0/y1`. 横向超出原
+//! 块左右在蒙版界面仍画出 (原块左右画裁切示意线); 拼接 / 导出 / 底色预览
+//! 按原块左右截掉. 左右向内裁会留下谱纸色. 这里同时给出:
 //! - 纯几何版本 [`compute_spans`] (不需要像素数据, 供列表/画布做位置显示
 //!   与命中测试);
 //! - 像素版本 [`stitch_with_layout`] (实际拼接输出图像, 新增区域用
@@ -22,6 +23,12 @@ pub struct BlockAdjust {
     pub extra_top: i32,
     /// 底边调整: 同上, 作用于底边.
     pub extra_bottom: i32,
+    /// 左边调整: 负值向内裁掉该数值像素 (裁进图内容, 空出的位置用谱纸色
+    /// 填), 正值向外扩展 (蒙版界面画出; 拼接 / 导出 / 底色预览仍按原块
+    /// 左右截掉).
+    pub extra_left: i32,
+    /// 右边调整: 同上, 作用于右边.
+    pub extra_right: i32,
     /// 与上一个块之间的额外间距 (像素, 背景色模式填充); 组合内第一块的
     /// 该值表示画布最顶端多出的留白 (同样有效, 并非被忽略).
     pub gap_before: i32,
@@ -30,7 +37,7 @@ pub struct BlockAdjust {
     /// 即停, 不再新增. 已有工程里的残留值仍会在向下拖时优先被吃掉.
     pub gap_after: i32,
     /// 块内容相对拼合图左缘的横向偏移 (像素, 正值向右). 蒙版界面允许
-    /// 超出页面左右仍画出; 拼接 / 导出 / 视频按页宽截掉溢出部分.
+    /// 超出原块左右仍画出; 拼接 / 导出 / 视频 / 底色预览按原块左右截掉.
     pub shift_x: i32,
 }
 
@@ -38,6 +45,8 @@ impl BlockAdjust {
     pub fn is_noop(&self) -> bool {
         self.extra_top == 0
             && self.extra_bottom == 0
+            && self.extra_left == 0
+            && self.extra_right == 0
             && self.gap_before == 0
             && self.gap_after == 0
             && self.shift_x == 0
@@ -61,6 +70,27 @@ pub fn effective_metrics(orig_h: i32, adj: &BlockAdjust) -> (u32, u32, u32, u32,
     let content_h = (orig_h - trim_top - trim_bottom).max(0) as u32;
     let gap_before = adj.gap_before.max(0) as u32;
     (gap_before, ext_top, content_h, ext_bottom, trim_top as u32)
+}
+
+/// 单块左右调整后的裁剪/扩展与剩余内容宽, 纯几何.
+/// 返回 `(trim_left, trim_right, ext_left, ext_right, content_w)`.
+pub fn effective_h_metrics(orig_w: i32, adj: &BlockAdjust) -> (u32, u32, u32, u32, u32) {
+    let max_trim = (orig_w - 1).max(0);
+    let trim_left = (-adj.extra_left).clamp(0, max_trim);
+    let remaining = max_trim - trim_left;
+    let trim_right = (-adj.extra_right).clamp(0, remaining);
+    let ext_left = adj.extra_left.max(0) as u32;
+    let ext_right = adj.extra_right.max(0) as u32;
+    let content_w = (orig_w - trim_left - trim_right).max(0) as u32;
+    (trim_left as u32, trim_right as u32, ext_left, ext_right, content_w)
+}
+
+/// 块在拼合图中的横向框 (`x0`, `w`), 已含 `shift_x` 与左右裁/扩.
+/// `w` 至少为 1. 超出 `[0, orig_w)` 的部分导出时截掉.
+pub fn overlay_x_w(orig_w: i32, adj: &BlockAdjust) -> (i64, i64) {
+    let x0 = adj.shift_x as i64 - adj.extra_left as i64;
+    let w = orig_w as i64 + adj.extra_left as i64 + adj.extra_right as i64;
+    (x0, w.max(1))
 }
 
 /// 计算组合内各块在最终拼合图中的纵向范围 (`comp_y0..=comp_y1`), 按
@@ -157,18 +187,50 @@ fn blit_rows(
     dst_x: i64,
     dst_y: i64,
 ) {
-    if count == 0 {
+    blit_src_rect(
+        dst,
+        src,
+        0,
+        src_y0,
+        src.width() as i64,
+        count,
+        dst_x,
+        dst_y,
+    );
+}
+
+/// 同 [`blit_rows`], 但只拷 `src` 的 `[src_x0, src_x0+src_w)` 列.
+fn blit_src_rect(
+    dst: &mut RgbImage,
+    src: &RgbImage,
+    src_x0: i64,
+    src_y0: u32,
+    src_w: i64,
+    count: u32,
+    dst_x: i64,
+    dst_y: i64,
+) {
+    if count == 0 || src_w <= 0 {
         return;
     }
     let dw = dst.width() as i64;
     let dh = dst.height() as i64;
     let sw = src.width() as i64;
-    let src_x0 = if dst_x < 0 { -dst_x } else { 0 };
-    let dest_x = dst_x.max(0);
-    if dest_x >= dw || src_x0 >= sw {
+    let src_x0 = src_x0.max(0);
+    if src_x0 >= sw {
         return;
     }
-    let copy_px = (sw - src_x0).min(dw - dest_x);
+    let src_w = src_w.min(sw - src_x0);
+    let skip = if dst_x < 0 { -dst_x } else { 0 };
+    if skip >= src_w {
+        return;
+    }
+    let dest_x = dst_x + skip;
+    let src_x = src_x0 + skip;
+    if dest_x >= dw || src_x >= sw {
+        return;
+    }
+    let copy_px = (src_w - skip).min(dw - dest_x).min(sw - src_x);
     if copy_px <= 0 {
         return;
     }
@@ -185,7 +247,7 @@ fn blit_rows(
     let dw_u = dw as usize;
     let sw_u = sw as usize;
     let dest_x_u = dest_x as usize;
-    let src_x0_u = src_x0 as usize;
+    let src_x_u = src_x as usize;
     // `ImageBuffer` 同时实现了 `Index<(u32,u32)>` 与 `Deref<Target=[u8]>`,
     // 直接用 range 下标会被解析成前者报类型不匹配, 需要先显式解引用成
     // 裸字节切片再按 range 切.
@@ -198,9 +260,24 @@ fn blit_rows(
             break;
         }
         let d0 = (dy * dw_u + dest_x_u) * 3;
-        let s0 = (sy * sw_u + src_x0_u) * 3;
+        let s0 = (sy * sw_u + src_x_u) * 3;
         dst_buf[d0..d0 + copy_w].copy_from_slice(&src_buf[s0..s0 + copy_w]);
     }
+}
+
+fn fill_rect_rgb(
+    dst: &mut RgbImage,
+    x: i64,
+    y: i64,
+    w: u32,
+    h: u32,
+    color: [f32; 3],
+) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let fill = bg_fill::flat_fill(w, h, color);
+    blit_rows(dst, &fill, 0, h, x, y);
 }
 
 /// 同 [`stitch_with_layout`], 但背景色统计由调用方预先算好传入 (`stats`
@@ -221,6 +298,13 @@ pub fn stitch_with_stats(
         trim_top: u32,
         content_h: u32,
         shift_x: i64,
+        extra_left: i32,
+        extra_right: i32,
+        trim_left: u32,
+        trim_right: u32,
+        ext_left: u32,
+        ext_right: u32,
+        content_w: u32,
         img: &'a RgbImage,
     }
     let mut pieces: Vec<Piece> = Vec::with_capacity(parts.len());
@@ -228,6 +312,8 @@ pub fn stitch_with_stats(
         let adj = BlockAdjust::find(layout, rid).cloned().unwrap_or_default();
         let (gap_before, ext_top, content_h, ext_bottom, trim_top) =
             effective_metrics(img.height() as i32, &adj);
+        let (trim_left, trim_right, ext_left, ext_right, content_w) =
+            effective_h_metrics(img.width() as i32, &adj);
         pieces.push(Piece {
             gap_before,
             ext_top,
@@ -236,6 +322,13 @@ pub fn stitch_with_stats(
             trim_top,
             content_h,
             shift_x: adj.shift_x as i64,
+            extra_left: adj.extra_left,
+            extra_right: adj.extra_right,
+            trim_left,
+            trim_right,
+            ext_left,
+            ext_right,
+            content_w,
             img,
         });
     }
@@ -280,21 +373,73 @@ pub fn stitch_with_stats(
             }
             yy += p.gap_before as i64;
         }
+        let orig_w = p.img.width() as i64;
+        let h_adj = p.shift_x != 0 || p.extra_left != 0 || p.extra_right != 0;
+        let overlay_x = if h_adj {
+            p.shift_x - p.extra_left as i64
+        } else {
+            0
+        };
+        let overlay_w = if h_adj {
+            (orig_w + p.extra_left as i64 + p.extra_right as i64).max(1)
+        } else {
+            max_w as i64
+        };
+        let span_y = yy;
+        let span_h = p.ext_top + p.content_h + p.ext_bottom;
+        let paper = p.stats.top.0;
         if p.ext_top > 0 {
-            let fill_w = if p.shift_x == 0 { max_w } else { p.img.width() };
+            let fill_w = overlay_w.max(1) as u32;
             let fill = bg_fill::flat_fill(fill_w, p.ext_top, p.stats.top.0);
-            blit_rows(&mut combined, &fill, 0, p.ext_top, p.shift_x, yy);
+            blit_rows(&mut combined, &fill, 0, p.ext_top, overlay_x, yy);
             yy += p.ext_top as i64;
         }
         // 未裁剪、未横移且宽度已一致时直接整块搬原图 (拖动其它块时大多数
         // 块都是这种情况, 是每帧最大的一块拷贝, 必须走快路径).
-        blit_rows(&mut combined, p.img, p.trim_top, p.content_h, p.shift_x, yy);
+        if p.content_w > 0 && p.content_h > 0 {
+            blit_src_rect(
+                &mut combined,
+                p.img,
+                p.trim_left as i64,
+                p.trim_top,
+                p.content_w as i64,
+                p.content_h,
+                p.shift_x + p.trim_left as i64,
+                yy,
+            );
+        }
         yy += p.content_h as i64;
         if p.ext_bottom > 0 {
-            let fill_w = if p.shift_x == 0 { max_w } else { p.img.width() };
+            let fill_w = overlay_w.max(1) as u32;
             let fill = bg_fill::flat_fill(fill_w, p.ext_bottom, p.stats.bottom.0);
-            blit_rows(&mut combined, &fill, 0, p.ext_bottom, p.shift_x, yy);
+            blit_rows(&mut combined, &fill, 0, p.ext_bottom, overlay_x, yy);
             yy += p.ext_bottom as i64;
+        }
+        // 左右向内裁掉的空位用谱纸色填; 向外扩的部分也先画上, 超出原块
+        // 左右的由 blit 截掉 (画布宽 = 原块宽).
+        if span_h > 0 {
+            let left_w = p.ext_left + p.trim_left;
+            if left_w > 0 {
+                fill_rect_rgb(
+                    &mut combined,
+                    p.shift_x - p.ext_left as i64,
+                    span_y,
+                    left_w,
+                    span_h,
+                    paper,
+                );
+            }
+            let right_w = p.trim_right + p.ext_right;
+            if right_w > 0 {
+                fill_rect_rgb(
+                    &mut combined,
+                    p.shift_x + orig_w - p.trim_right as i64,
+                    span_y,
+                    right_w,
+                    span_h,
+                    paper,
+                );
+            }
         }
     }
     combined
@@ -344,7 +489,7 @@ pub fn block_content_shifts(
 }
 
 /// 从起点快照给指定块加上横向偏移, 其它字段原样保留. `snap` 用来把靠近
-/// 0 的值吸回 0. 不夹页面左右 (溢出由拼接/导出截掉).
+/// 0 的值吸回 0. 不夹原块左右 (溢出由拼接/导出/底色预览截掉).
 pub fn apply_block_shift_x(
     start_layout: &[BlockAdjust],
     region_id: &str,
@@ -362,6 +507,47 @@ pub fn apply_block_shift_x(
         layout.push(BlockAdjust {
             region_id: region_id.to_string(),
             shift_x,
+            ..Default::default()
+        });
+    }
+    layout
+}
+
+/// 拖左右边界一帧: 只改被拖的那条边的 `extra_left` / `extra_right`, 内容
+/// 位置与另一侧不动. `delta` 已按边定向 (左边鼠标右移为负, 右边鼠标右
+/// 移为正). 向内裁不能把内容宽收到 0 以下; 向外扩不限 (超出原块由拼接
+/// 截掉). 靠近 0 时吸回原边.
+pub fn apply_block_resize_side(
+    start_layout: &[BlockAdjust],
+    region_id: &str,
+    left: bool,
+    delta: i32,
+    orig_w: i32,
+    snap: impl Fn(i32) -> i32,
+) -> Vec<BlockAdjust> {
+    let mut layout = start_layout.to_vec();
+    let start = BlockAdjust::find(&layout, region_id)
+        .map(|a| if left { a.extra_left } else { a.extra_right })
+        .unwrap_or(0);
+    let other_trim = BlockAdjust::find(&layout, region_id)
+        .map(|a| {
+            let (tl, tr, ..) = effective_h_metrics(orig_w, a);
+            if left { tr } else { tl }
+        })
+        .unwrap_or(0) as i32;
+    let extra_min = -((orig_w - 1).max(0) - other_trim).max(0);
+    let extra = snap((start + delta).max(extra_min));
+    if let Some(a) = layout.iter_mut().find(|a| a.region_id == region_id) {
+        if left {
+            a.extra_left = extra;
+        } else {
+            a.extra_right = extra;
+        }
+    } else {
+        layout.push(BlockAdjust {
+            region_id: region_id.to_string(),
+            extra_left: if left { extra } else { 0 },
+            extra_right: if left { 0 } else { extra },
             ..Default::default()
         });
     }
@@ -1665,5 +1851,81 @@ mod tests {
         assert_eq!(*clipped.get_pixel(0, 0), Rgb([10, 20, 30]));
         assert_eq!(*clipped.get_pixel(4, 0), Rgb([4, 5, 6]));
         assert_eq!(*clipped.get_pixel(5, 0), Rgb([255, 255, 255]));
+    }
+
+    #[test]
+    fn is_noop_includes_extra_left_right() {
+        assert!(!BlockAdjust { extra_left: -4, ..Default::default() }.is_noop());
+        assert!(!BlockAdjust { extra_right: 3, ..Default::default() }.is_noop());
+    }
+
+    #[test]
+    fn apply_block_resize_side_crops_and_snaps_zero() {
+        let start = vec![BlockAdjust {
+            region_id: "a".into(),
+            extra_left: -2,
+            extra_right: -1,
+            shift_x: 4,
+            ..Default::default()
+        }];
+        let cropped = apply_block_resize_side(&start, "a", true, -5, 20, |v| v);
+        let a = BlockAdjust::find(&cropped, "a").unwrap();
+        assert_eq!(a.extra_left, -7);
+        assert_eq!(a.extra_right, -1);
+        assert_eq!(a.shift_x, 4);
+        let snapped = apply_block_resize_side(&start, "a", true, 4, 20, |v| {
+            if v.abs() <= 6 { 0 } else { v }
+        });
+        assert_eq!(BlockAdjust::find(&snapped, "a").map(|a| a.extra_left), Some(0));
+    }
+
+    #[test]
+    fn apply_block_resize_side_keeps_at_least_one_content_px() {
+        let start = vec![BlockAdjust {
+            region_id: "a".into(),
+            extra_right: -5,
+            ..Default::default()
+        }];
+        let cropped = apply_block_resize_side(&start, "a", true, -100, 10, |v| v);
+        assert_eq!(BlockAdjust::find(&cropped, "a").map(|a| a.extra_left), Some(-4));
+    }
+
+    #[test]
+    fn stitch_horizontal_crop_fills_paper_and_keeps_middle() {
+        use image::{Rgb, RgbImage};
+        let mut a = RgbImage::from_pixel(8, 4, Rgb([200, 200, 200]));
+        a.put_pixel(0, 1, Rgb([1, 2, 3]));
+        a.put_pixel(3, 1, Rgb([4, 5, 6]));
+        a.put_pixel(7, 1, Rgb([7, 8, 9]));
+        let parts = vec![("a".to_string(), a)];
+        let layout = vec![BlockAdjust {
+            region_id: "a".into(),
+            extra_left: -3,
+            extra_right: -2,
+            ..Default::default()
+        }];
+        let combined = stitch_with_layout(&parts, &layout, 200);
+        assert_eq!(combined.dimensions(), (8, 4));
+        assert_eq!(*combined.get_pixel(3, 1), Rgb([4, 5, 6]));
+        assert_ne!(*combined.get_pixel(0, 1), Rgb([1, 2, 3]));
+        assert_ne!(*combined.get_pixel(7, 1), Rgb([7, 8, 9]));
+    }
+
+    #[test]
+    fn stitch_horizontal_extend_clips_to_original_width() {
+        use image::{Rgb, RgbImage};
+        let mut a = RgbImage::from_pixel(8, 4, Rgb([10, 20, 30]));
+        a.put_pixel(0, 0, Rgb([1, 2, 3]));
+        let parts = vec![("a".to_string(), a)];
+        let layout = vec![BlockAdjust {
+            region_id: "a".into(),
+            extra_left: 5,
+            extra_right: 6,
+            ..Default::default()
+        }];
+        let combined = stitch_with_layout(&parts, &layout, 200);
+        assert_eq!(combined.dimensions(), (8, 4));
+        assert_eq!(*combined.get_pixel(0, 0), Rgb([1, 2, 3]));
+        assert_eq!(*combined.get_pixel(7, 0), Rgb([10, 20, 30]));
     }
 }

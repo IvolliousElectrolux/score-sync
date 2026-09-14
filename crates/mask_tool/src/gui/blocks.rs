@@ -11,6 +11,8 @@ use crate::layout;
 pub(crate) enum BlockHitZone {
     Top,
     Bottom,
+    Left,
+    Right,
     Body,
 }
 
@@ -402,6 +404,8 @@ impl MaskToolApp {
             Some(DragKind::BlockMove { .. })
                 | Some(DragKind::BlockResizeTop { .. })
                 | Some(DragKind::BlockResizeBottom { .. })
+                | Some(DragKind::BlockResizeLeft { .. })
+                | Some(DragKind::BlockResizeRight { .. })
         )
     }
 
@@ -473,8 +477,22 @@ impl MaskToolApp {
                 yy += gap as i64;
             }
             let hx_block = canvas_x(adj.shift_x as f32);
-            let dw_block = canvas_s(tile.width as f32);
-            let in_block_x = x >= hx_block && x < hx_block + dw_block;
+            let (trim_l, trim_r, ext_l, ext_r, _content_w) =
+                crate::layout::effective_h_metrics(tile.width as i32, &adj);
+            let overlay_x = canvas_x((adj.shift_x - adj.extra_left) as f32);
+            let overlay_w = canvas_s(
+                (tile.width as i32 + adj.extra_left + adj.extra_right).max(1) as f32,
+            );
+            // 后续界面 (preview_only) 按原块左右裁, 溢出区取样落到后面的底色.
+            let in_overlay_x = x >= overlay_x
+                && x < overlay_x + overlay_w
+                && (!self.preview_only || in_sheet_x);
+            let paper_left_x1 = canvas_x((adj.shift_x + trim_l as i32) as f32);
+            let paper_right_x0 = canvas_x((adj.shift_x + tile.width as i32 - trim_r as i32) as f32);
+            let in_paper_x = (x >= canvas_x((adj.shift_x - ext_l as i32) as f32) && x < paper_left_x1)
+                || (x >= paper_right_x0
+                    && x < canvas_x((adj.shift_x + tile.width as i32 + ext_r as i32) as f32));
+            let in_block_x = in_overlay_x || (in_paper_x && (!self.preview_only || in_sheet_x));
             if ext_top > 0 && in_block_x {
                 let y0 = canvas_y(yy as f32);
                 let y1 = canvas_y((yy + ext_top as i64) as f32);
@@ -488,6 +506,9 @@ impl MaskToolApp {
                 let clip_y0 = canvas_y(content_y as f32);
                 let clip_y1 = canvas_y((content_y + content_h as i64) as f32);
                 if y >= clip_y0 && y < clip_y1 {
+                    if in_paper_x {
+                        return Some(tile.top_fill);
+                    }
                     let local_x = (x - hx_block) / cs;
                     let local_y = (y - piece_origin_y) / cs;
                     if let Some(rgb) = sample_thumb(
@@ -886,15 +907,43 @@ impl MaskToolApp {
     }
 
     /// 块内容在画布坐标系下的左右缘 (已叠加 `block_hoff` / `shift_x` /
-    /// `content_scale`). 可以超出页面, 供命中与叠加框使用.
+    /// 左右裁扩 / `content_scale`). 可以超出页面, 供命中与叠加框使用.
     fn block_canvas_x_range(&self, region_id: &str) -> (f32, f32) {
         let cs = self.content_scale_or_1();
-        let sx = BlockAdjust::find(&self.block_layout, region_id)
-            .map(|a| a.shift_x)
-            .unwrap_or(0);
+        let adj = BlockAdjust::find(&self.block_layout, region_id)
+            .cloned()
+            .unwrap_or_default();
+        let w = self.block_piece_width(region_id) as i32;
+        let (x0_sheet, w_sheet) = layout::overlay_x_w(w, &adj);
+        let x0 = self.block_hoff as f32 + x0_sheet as f32 * cs;
+        (x0, x0 + w_sheet as f32 * cs - 1.0)
+    }
+
+    /// 未横移时块的左右缘 (后续界面裁切线; 右缘为裁切边界, 不含最后一列
+    /// 之后的像素).
+    fn block_orig_canvas_x_range(&self, region_id: &str) -> (f32, f32) {
+        let cs = self.content_scale_or_1();
         let w = self.block_piece_width(region_id) as f32;
-        let x0 = self.block_hoff as f32 + sx as f32 * cs;
-        (x0, x0 + w * cs - 1.0)
+        let x0 = self.block_hoff as f32;
+        (x0, x0 + w * cs)
+    }
+
+    /// 有 `shift_x` 或左右向外扩展的块: 原左右边界 + 块纵向范围, 供蒙版
+    /// 界面画裁切示意线 (导出仍按这里截).
+    pub(super) fn block_shift_crop_marks(&self) -> Vec<(f32, f32, f32, f32)> {
+        self.block_spans()
+            .into_iter()
+            .filter_map(|(rid, y0, y1)| {
+                let adj = BlockAdjust::find(&self.block_layout, &rid)
+                    .cloned()
+                    .unwrap_or_default();
+                if adj.shift_x == 0 && adj.extra_left <= 0 && adj.extra_right <= 0 {
+                    return None;
+                }
+                let (ox0, ox1) = self.block_orig_canvas_x_range(&rid);
+                Some((ox0, ox1, y0 as f32, y1 as f32))
+            })
+            .collect()
     }
 
     /// 各块在画布坐标系下的框 (`x0, y0, x1, y1`), 含横向偏移.
@@ -909,27 +958,33 @@ impl MaskToolApp {
     }
 
     /// 拖动命中测试: 在画布 (`ix`, `iy`) (图像坐标, 已含 hoff/voff) 处,
-    /// 找最靠近的块上/下边界 (容差 `tol`) 或落在哪个块本体内. 横向按
-    /// `shift_x` 后的实际位置 (含溢出页面的部分).
+    /// 找最靠近的块四边 (容差 `tol`) 或落在哪个块本体内. 横向按 `shift_x`
+    /// 与左右裁扩后的实际位置 (含溢出页面的部分).
     pub(super) fn hit_block_at(&self, ix: f32, iy: f32, tol: f32) -> Option<(String, BlockHitZone)> {
         let spans = self.block_spans();
         if spans.is_empty() {
             return None;
         }
         let mut best: Option<(String, BlockHitZone, f32)> = None;
+        let consider = |best: &mut Option<(String, BlockHitZone, f32)>,
+                        rid: &str,
+                        zone: BlockHitZone,
+                        d: f32| {
+            if d <= tol && best.as_ref().map(|(_, _, bd)| d < *bd).unwrap_or(true) {
+                *best = Some((rid.to_string(), zone, d));
+            }
+        };
         for (rid, y0, y1) in &spans {
             let (x0, x1) = self.block_canvas_x_range(rid);
-            if ix + tol < x0 || ix - tol > x1 {
+            let y0 = *y0 as f32;
+            let y1 = *y1 as f32;
+            if ix + tol < x0 || ix - tol > x1 || iy + tol < y0 || iy - tol > y1 {
                 continue;
             }
-            let d_top = (iy - *y0 as f32).abs();
-            let d_bot = (iy - *y1 as f32).abs();
-            if d_top <= tol && best.as_ref().map(|(_, _, d)| d_top < *d).unwrap_or(true) {
-                best = Some((rid.clone(), BlockHitZone::Top, d_top));
-            }
-            if d_bot <= tol && best.as_ref().map(|(_, _, d)| d_bot < *d).unwrap_or(true) {
-                best = Some((rid.clone(), BlockHitZone::Bottom, d_bot));
-            }
+            consider(&mut best, rid, BlockHitZone::Top, (iy - y0).abs());
+            consider(&mut best, rid, BlockHitZone::Bottom, (iy - y1).abs());
+            consider(&mut best, rid, BlockHitZone::Left, (ix - x0).abs());
+            consider(&mut best, rid, BlockHitZone::Right, (ix - x1).abs());
         }
         if let Some((rid, zone, _)) = best {
             return Some((rid, zone));
@@ -1004,6 +1059,40 @@ impl MaskToolApp {
         });
     }
 
+    pub(super) fn begin_block_resize_left(&mut self, region_id: String, ix: f32) {
+        let orig_w = self.block_piece_width(&region_id) as i32;
+        if orig_w <= 0 {
+            return;
+        }
+        self.ensure_layout_entry(&region_id);
+        self.block_selected = Some(region_id.clone());
+        self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+        self.drag = Some(DragKind::BlockResizeLeft {
+            region_id,
+            start_ix: ix,
+            start_layout: self.block_layout.clone(),
+            orig_w,
+            undid: false,
+        });
+    }
+
+    pub(super) fn begin_block_resize_right(&mut self, region_id: String, ix: f32) {
+        let orig_w = self.block_piece_width(&region_id) as i32;
+        if orig_w <= 0 {
+            return;
+        }
+        self.ensure_layout_entry(&region_id);
+        self.block_selected = Some(region_id.clone());
+        self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+        self.drag = Some(DragKind::BlockResizeRight {
+            region_id,
+            start_ix: ix,
+            start_layout: self.block_layout.clone(),
+            orig_w,
+            undid: false,
+        });
+    }
+
     /// 每帧都从拖动起点的快照重新分配 (不做增量累加, 避免多帧误差), 见
     /// `layout::redistribute_for_block_move` 文档. 有页面锁时向下拖到页底
     /// 即停, 与向上到顶对称. 首次真正产生位移时 push 一次撤销快照
@@ -1061,7 +1150,7 @@ impl MaskToolApp {
         (undid, true)
     }
 
-    /// Shift 左右拖: 只改被拖块的 `shift_x`, 上下布局不动, 不夹页面左右.
+    /// Shift 左右拖: 只改被拖块的 `shift_x`, 上下布局不动, 不夹原块左右.
     fn apply_block_shift_x_drag(
         &mut self,
         region_id: &str,
@@ -1250,6 +1339,41 @@ impl MaskToolApp {
         let old_layout = self.block_layout.clone();
         self.block_layout = layout;
         self.voff_target = 0;
+        self.sync_masks_to_block_shift(&old_layout);
+        self.refresh_preview_geom();
+        (undid, true)
+    }
+
+    /// 拖左右边界: 边线跟手, 内容与另一侧不动. 向内裁掉的空位用谱纸色
+    /// 填; 向外扩不夹原块, 导出仍按原块左右截掉.
+    pub(super) fn apply_block_resize_side(
+        &mut self,
+        region_id: &str,
+        start_ix: f32,
+        start_layout: &[BlockAdjust],
+        orig_w: i32,
+        left: bool,
+        undid: bool,
+        ix: f32,
+    ) -> (bool, bool) {
+        let cs = self.content_scale_or_1();
+        let mouse = ((ix - start_ix) / cs).round() as i32;
+        if mouse == 0 {
+            return (undid, false);
+        }
+        let delta = if left { -mouse } else { mouse };
+        let layout =
+            layout::apply_block_resize_side(start_layout, region_id, left, delta, orig_w, snap_zero);
+        if layout == self.block_layout {
+            return (undid, false);
+        }
+        let mut undid = undid;
+        if !undid {
+            self.push_undo();
+            undid = true;
+        }
+        let old_layout = self.block_layout.clone();
+        self.block_layout = layout;
         self.sync_masks_to_block_shift(&old_layout);
         self.refresh_preview_geom();
         (undid, true)

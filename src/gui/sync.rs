@@ -1923,6 +1923,8 @@ mod layout_diff_tests {
             region_id: id.into(),
             extra_top,
             extra_bottom: 0,
+            extra_left: 0,
+            extra_right: 0,
             gap_before: 0,
             gap_after: 0,
             shift_x: 0,

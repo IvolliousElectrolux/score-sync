@@ -161,6 +161,10 @@ struct ProjectBlockAdjust {
     #[serde(default)]
     extra_bottom: i32,
     #[serde(default)]
+    extra_left: i32,
+    #[serde(default)]
+    extra_right: i32,
+    #[serde(default)]
     gap_before: i32,
     #[serde(default)]
     gap_after: i32,
@@ -174,6 +178,8 @@ impl From<&BlockAdjust> for ProjectBlockAdjust {
             region_id: a.region_id.clone(),
             extra_top: a.extra_top,
             extra_bottom: a.extra_bottom,
+            extra_left: a.extra_left,
+            extra_right: a.extra_right,
             gap_before: a.gap_before,
             gap_after: a.gap_after,
             shift_x: a.shift_x,
@@ -187,6 +193,8 @@ impl From<ProjectBlockAdjust> for BlockAdjust {
             region_id: a.region_id,
             extra_top: a.extra_top,
             extra_bottom: a.extra_bottom,
+            extra_left: a.extra_left,
+            extra_right: a.extra_right,
             gap_before: a.gap_before,
             gap_after: a.gap_after,
             shift_x: a.shift_x,
