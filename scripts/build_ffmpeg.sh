@@ -236,7 +236,6 @@ ff_cfg=(
   --disable-everything
   --disable-autodetect
   --disable-network
-  --disable-avdevice
   --disable-postproc
   --disable-doc
   --disable-htmlpages
@@ -248,6 +247,8 @@ ff_cfg=(
   --disable-debug
   --disable-iconv
   --enable-small
+  --enable-avdevice
+  --enable-indev=lavfi
   --enable-protocol=file,pipe
   --enable-encoder="$ENCODERS"
   --enable-decoder="$DECODERS"
@@ -272,6 +273,7 @@ if [ "$MINGW_CROSS" = 1 ]; then
   ff_cfg+=(
     --enable-cross-compile
     --cross-prefix=x86_64-w64-mingw32-
+    --pkg-config=pkg-config
     --cc=x86_64-w64-mingw32-gcc
     --cxx=x86_64-w64-mingw32-g++
     --nm=x86_64-w64-mingw32-nm
