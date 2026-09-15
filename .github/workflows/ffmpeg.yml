@@ -75,7 +75,7 @@ jobs:
         with:
           msystem: MSYS
           update: false
-          install: make
+          install: make pkg-config
           path-type: inherit
 
       - name: Install Windows build deps

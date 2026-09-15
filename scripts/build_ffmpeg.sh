@@ -92,7 +92,7 @@ if [ "$TARGET" = mingw64 ]; then
     exit 1
   fi
 elif [ "$TARGET" = msvc ]; then
-  # fasterthanlime gist: POSIX 壳只跑 configure, 编译器用 cl, 成品无 msys dll.
+  # fasterthanlime gist: POSIX 壳 + GNU make, 编译器用 cl, 成品无 msys dll.
   # https://gist.github.com/fasterthanlime/b674346115e88b762d76dac02fef6bd3
   MSVC=1
   ARCH=x86_64
@@ -228,21 +228,22 @@ unset CC CFLAGS LDFLAGS
 
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+if [ "$MSVC" = 1 ] && [ -x /usr/bin/pkg-config ]; then
+  export PKG_CONFIG=/usr/bin/pkg-config
+fi
 X264_CFLAGS="-I$PREFIX/include"
 X264_LIBS="-L$PREFIX/lib -lx264"
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists x264; then
-  X264_CFLAGS="$(pkg-config --cflags x264)"
-  X264_LIBS="$(pkg-config --static --libs x264 2>/dev/null || pkg-config --libs x264)"
+if command -v "${PKG_CONFIG:-pkg-config}" >/dev/null 2>&1 && "${PKG_CONFIG:-pkg-config}" --exists x264; then
+  X264_CFLAGS="$("${PKG_CONFIG:-pkg-config}" --cflags x264)"
+  X264_LIBS="$("${PKG_CONFIG:-pkg-config}" --static --libs x264 2>/dev/null || "${PKG_CONFIG:-pkg-config}" --libs x264)"
 fi
 if [ "$MSVC" = 1 ]; then
   PREFIX_WIN="$(cygpath -w "$PREFIX")"
-  PREFIX_MIXED="$(cygpath -m "$PREFIX")"
   X264_CFLAGS="//I${PREFIX_WIN}\\include"
   X264_LIBS=""
-  if [ -f "$PREFIX/lib/pkgconfig/x264.pc" ]; then
-    sed -i "s|^prefix=.*|prefix=${PREFIX_MIXED}|" "$PREFIX/lib/pkgconfig/x264.pc"
-  fi
-  export MSYS_NO_PATHCONV=1
+  echo "==> pkg-config: ${PKG_CONFIG:-pkg-config}"
+  "${PKG_CONFIG:-pkg-config}" --modversion x264 || true
+  echo "==> x264.pc prefix=$(sed -n 's/^prefix=//p' "$PREFIX/lib/pkgconfig/x264.pc" 2>/dev/null || true)"
 fi
 
 echo "==> build ffmpeg $FFMPEG_TAG"
@@ -305,7 +306,7 @@ if [ "$MSVC" = 1 ]; then
     --target-os=win64
     --arch=x86_64
     --enable-w32threads
-    --pkg-config=pkg-config
+    --pkg-config="${PKG_CONFIG:-pkg-config}"
     --extra-cflags="//I${PREFIX_WIN}\\include"
     --extra-ldflags="//LIBPATH:${PREFIX_WIN}\\lib"
   )
