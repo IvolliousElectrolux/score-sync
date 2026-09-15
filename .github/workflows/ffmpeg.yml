@@ -1,5 +1,6 @@
 # 裁剪版 ffmpeg sidecar: 不改上游源码, 只按 scripts/build_ffmpeg.sh 的 configure 编.
-# Windows: windows-2025 + MSVC (cl / --toolchain=msvc, Git Bash 只跑 configure, 成品无 msys dll).
+# Windows: windows-2025 + MSVC (cl / --toolchain=msvc, 成品无 msys dll).
+#   MSYS2 只提供能认 POSIX 路径的 GNU make; 编译器仍是 cl.
 #   配方参照 fasterthanlime gist: CC=cl 编 x264, ffmpeg --toolchain=msvc.
 # macOS 两个架构在 macos-14.
 # 成品 cache 命中则跳过编译; 源码 tarball 另 cache. 成功后挂到 sidecars release.
@@ -68,11 +69,20 @@ jobs:
         with:
           arch: amd64
 
+      - name: Setup MSYS2 make
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: false
+          install: make
+          path-type: inherit
+
       - name: Install Windows build deps
         if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          choco install nasm make pkgconfiglite upx -y --no-progress
+          choco install nasm pkgconfiglite upx -y --no-progress
           echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
@@ -89,12 +99,23 @@ jobs:
         if: runner.os == 'macOS' && steps.bin.outputs.cache-hit != 'true'
         run: brew install nasm pkgconf
 
-      - name: Build slim ffmpeg
-        if: steps.bin.outputs.cache-hit != 'true'
-        shell: bash
+      - name: Build slim ffmpeg (Windows MSVC)
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        shell: msys2 {0}
         run: |
           set -euo pipefail
           export PATH="/c/Program Files/NASM:/c/ProgramData/chocolatey/bin:$PATH"
+          bash scripts/build_ffmpeg.sh \
+            --out-dir vendor/ffmpeg-slim \
+            --work-dir "$RUNNER_TEMP/score_sync-ffmpeg" \
+            --arch ${{ matrix.arch }} \
+            --target ${{ matrix.target }}
+
+      - name: Build slim ffmpeg
+        if: matrix.target != 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
           bash scripts/build_ffmpeg.sh \
             --out-dir vendor/ffmpeg-slim \
             --work-dir "$RUNNER_TEMP/score_sync-ffmpeg" \
