@@ -4,7 +4,7 @@
 
 从扫描谱或 PDF 出发, 在同一界面完成 **谱表分块 → 蒙版清理 → 加底色裁切 → 视频剪辑导出**, 支持工程保存/继续编辑, 一路做到可以直接发布的同步曲谱视频 (MP4/MKV).
 
-当前版本: **1.4.10**
+当前版本: **1.4.11**
 
 ## 功能
 
@@ -29,11 +29,52 @@
   [sidecars](https://github.com/IvolliousElectrolux/score-sync/releases/tag/sidecars)
   (GitHub 附件名不能用中文, 底色文件为 `background.png`, 可改名为 `底色.png`).
   各平台安装包已带对应的 ffmpeg 与 pdfium, 一般不用再下.
-  随包 ffmpeg 是 Actions (`.github/workflows/ffmpeg.yml`) 按现有导出/预览需求裁过的
-  GPL sidecar (AVC/`libx264` + AAC/FLAC, 解码仍覆盖 wav/mp3/flac/ogg/m4a/aac 等边界),
-  挂在 sidecars: `ffmpeg-windows-x64.exe` / `ffmpeg-macos-arm64` / `ffmpeg-macos-x64`.
-  Windows 包在 windows-2025 上用 MSVC (`--toolchain=msvc`) 编, 再 UPX; 主程序 MIT, 只当外部进程调用.
-  不要在本地编译. 发行目录带 `ffmpeg-COPYING.txt`.
+  裁剪版 ffmpeg 的能力清单见下节 (写视频/音频功能时对照这个, 不要假定完整 ffmpeg).
+
+## 裁剪版 ffmpeg
+
+配方是 `scripts/build_ffmpeg.sh` (configure 列表是唯一准绳), Actions 是
+`.github/workflows/ffmpeg.yml`. 成品挂在
+[sidecars](https://github.com/IvolliousElectrolux/score-sync/releases/tag/sidecars):
+`ffmpeg-windows-x64.exe` (windows-2025 + MSVC, 无 msys dll) /
+`ffmpeg-macos-arm64` / `ffmpeg-macos-x64` /
+`ffmpeg-linux-x64` / `ffmpeg-linux-arm64`. 不要在开发机上编.
+macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
+主程序 MIT, sidecar 因 `libx264` 为 GPL, 只当外部进程调用; 发行目录带
+`ffmpeg-COPYING.txt`.
+
+写新功能时: 先看自己要不要 sidecar 里已经有的东西; 没有就改脚本里的
+`ENCODERS` / `DECODERS` / `MUXERS` / `FILTERS` / 协议再跑 ffmpeg workflow,
+不要去调用系统 PATH 上那份完整 ffmpeg 来"先能跑". 画面转场继续在 Rust 里按帧画,
+不要指望 `xfade` / `overlay` / `fade`.
+
+**程序实际在用的:**
+
+| 场景 | sidecar 做什么 |
+|------|----------------|
+| 导出画面 | stdin `rawvideo` RGBA (`-i -`, 协议必须有 `fd`) → `-vf format=yuv420p` → `libx264` (yuv420p, CRF, preset=medium, tune=stillimage) |
+| 导出音频 | MP4: `aac`; MKV: `flac`. 多段: `filter_complex` 里 `atrim` / `asetpts` / `aformat` / `apad` / `concat`. 无音轨: `lavfi` `anullsrc` |
+| 预览解码 | m4a/aac/mp4/mov/wav/mp3/flac/ogg 等到 WAV `pcm_s16le` |
+| 预览倍速 | `-af atempo` (单级 0.5–2, 3x 拆成两级); 导出仍是 1x |
+| 最终封装 | 视频+音频 stream copy 进 mp4/mkv |
+
+**编进去了 (脚本里的列表, 摘常用项):**
+
+- 编码: `libx264`, `aac`, `flac`, `pcm_s16le`
+- 解码: `aac` / HE-AAC / `alac` / `mp3` / `flac` / `vorbis` / `opus` / `speex` / 多种 PCM 与 wav-ADPCM / `rawvideo`. **没有视频解码器** (含 h264)
+- 解复用: `rawvideo`, `lavfi`, `mov` (mp4/m4a/m4b), `mp3`, `aac`, `flac`, `ogg`, `wav`, `w64`, `aiff`, `matroska`
+- 复用: `mp4`, `mov`, `ipod`, `matroska`, `wav`, `s16le`, `flac`, `null`, `adts`
+- 滤镜: `format`, `scale`, `aformat`, `aresample`, `atrim`, `setpts`, `asetpts`, `apad`, `concat`, `atempo`, `anull`, `anullsrc` 以及 buffer 类
+- 协议: `file`, `pipe`, `fd` (FFmpeg 7.1 把 `-i -` 当成 `fd`, 缺了 stdin 编码会 `Protocol not found`)
+- 设备: `lavfi` indev (静音轨)
+
+**不要假定能做 (常见踩坑):**
+
+- 抽自己导出的 mp4 帧 / 解码别人的视频: 没有 h264 decoder, 也没有 `ffprobe`
+- 写出 jpg/png: 没有这些图像编码器
+- 视频转场、烧字、叠图: 没有 `xfade` / `overlay` / `fade` / `drawtext`
+- 网络流: `--disable-network`
+- 缩放补边导出: 已改成 Rust `fit_pad`, 滤镜里虽留了 `scale` 但导出路径不再用它拼静帧
 
 ## 构建与运行
 
@@ -46,6 +87,7 @@ cargo run -r
 
 ```bash
 cargo build --profile release-max
+# Windows 本体再压一刀: upx --best --lzma target/release-max/score_sync.exe
 ```
 
 也可传入初始文件:
@@ -105,6 +147,10 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
   `W` 刷入下一张 (切页并附 1 秒左→右转场), `I`/`O` 标记淡入/淡出, 轨道区 `Ctrl+滚轮` 缩放; 预览按素材自身比例装进 16:9, 不拉扁
 
 ## 版本摘要
+
+### 1.4.11
+- 导出: 随包 ffmpeg 换成 Actions 裁剪的 7.1.1 sidecar (Windows MSVC / macOS arm64+x64 / Linux x64+arm64), 替代原先约百兆的完整构建; 编码仍是 AVC/libx264 + AAC/FLAC, 导出耗时与完整版相当. 主程序 MIT, sidecar 因 libx264 为 GPL, 只当外部进程调用
+- Windows 本体 `score_sync.exe` 发包时 UPX
 
 ### 1.4.10
 - 蒙版: 悬停分块左右边可拖裁, 手感和上下边一样; 向内裁掉的空位用谱纸色填 (导出保留), 向外超出仍按原块左右截掉

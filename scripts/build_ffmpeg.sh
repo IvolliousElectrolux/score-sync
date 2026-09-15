@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 给 GitHub Actions 编裁剪版 ffmpeg sidecar (GPL, 因 libx264). 不改上游源码.
 # 不要在开发机上跑: 费时费电, 成品由 ffmpeg.yml 挂到 sidecars release.
+# 能力清单 (写功能时对照): README.md 「裁剪版 ffmpeg」; 改能力只改下面 ENCODERS 等变量.
 set -euo pipefail
 
 FFMPEG_TAG="${FFMPEG_TAG:-n7.1.1}"
@@ -128,7 +129,10 @@ if is_windows || [ "$MINGW_CROSS" = 1 ] || [ "$MSVC" = 1 ]; then
   EXE_SUFFIX=".exe"
 fi
 if [ -z "$DO_UPX" ]; then
+  # Windows / Linux ELF 可以 UPX. macOS Mach-O 不压, 免得 Gatekeeper 拒签.
   if [ "$TARGET_WIN" = 1 ]; then
+    DO_UPX=1
+  elif [ "$(uname -s)" = Linux ]; then
     DO_UPX=1
   else
     DO_UPX=0
@@ -344,6 +348,15 @@ if is_macos; then
       --extra-cflags="$X264_CFLAGS -arch $ARCH"
       --extra-ldflags="-L$PREFIX/lib -arch $ARCH -Wl,-dead_strip"
     )
+  fi
+fi
+if [ "$(uname -s)" = Linux ] && [ "$MINGW_CROSS" != 1 ]; then
+  ff_cfg+=(
+    --enable-pic
+    --extra-ldflags="-L$PREFIX/lib -Wl,--gc-sections"
+  )
+  if command -v "${PKG_CONFIG:-pkg-config}" >/dev/null 2>&1 && "${PKG_CONFIG:-pkg-config}" --exists zlib; then
+    ff_cfg+=(--enable-zlib)
   fi
 fi
 
