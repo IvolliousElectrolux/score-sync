@@ -147,13 +147,26 @@ SRC="$WORK_DIR/src"
 mkdir -p "$OUT_DIR" "$PREFIX" "$SRC"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
-# chocolatey 的 Win32 make 不认 Git Bash 的 /d/a/...; MSVC 要 D:/a/...
-if [ "$MSVC" = 1 ] && command -v cygpath >/dev/null 2>&1; then
-  OUT_DIR="$(cygpath -m "$OUT_DIR")"
-  WORK_DIR="$(cygpath -m "$WORK_DIR")"
-fi
 PREFIX="$WORK_DIR/prefix"
 SRC="$WORK_DIR/src"
+
+# Git Bash 的 tar 把 D:/ 当成远程主机; chocolatey 的 Win32 make 又不认 /d/a/...
+# 解包用 POSIX 路径, 编的时候再把 PWD / config.mak 换成 D:/
+msvc_win_pwd() {
+  if [ "$MSVC" = 1 ] && command -v cygpath >/dev/null 2>&1; then
+    PWD="$(cygpath -m "$(pwd -P)")"
+    export PWD
+  fi
+}
+
+msvc_fix_mak_paths() {
+  [ "$MSVC" = 1 ] || return 0
+  local f
+  for f in config.mak ffbuild/config.mak; do
+    [ -f "$f" ] || continue
+    sed -i 's,/d/,D:/,g; s,/c/,C:/,g' "$f"
+  done
+}
 
 OUT_BIN="$OUT_DIR/ffmpeg${EXE_SUFFIX}"
 
@@ -179,13 +192,18 @@ fetch_tar() {
   echo "==> download $url"
   curl -fL --retry 5 --retry-delay 2 -o "$tmp" "$url"
   mkdir -p "$dest"
-  tar -xf "$tmp" -C "$dest" --strip-components=1
+  tar --force-local -xf "$tmp" -C "$dest" --strip-components=1
   rm -f "$tmp"
   : >"$marker"
 }
 
 fetch_tar "$X264_URL" "$SRC/x264" "$SRC/x264.ok"
 fetch_tar "$FFMPEG_URL" "$SRC/ffmpeg" "$SRC/ffmpeg.ok"
+
+if [ "$MSVC" = 1 ] && command -v cygpath >/dev/null 2>&1; then
+  PREFIX="$(cygpath -m "$PREFIX")"
+  OUT_DIR="$(cygpath -m "$OUT_DIR")"
+fi
 
 X264_REV=""
 if [ -f "$SRC/x264/version.sh" ]; then
@@ -194,6 +212,7 @@ fi
 
 echo "==> build x264"
 cd "$SRC/x264"
+msvc_win_pwd
 x264_cfg=(
   --prefix="$PREFIX"
   --enable-static
@@ -224,6 +243,7 @@ elif [ "$CROSS" = 1 ] && is_macos; then
 fi
 if [ ! -f "$PREFIX/lib/libx264.a" ] && [ ! -f "$PREFIX/lib/libx264.lib" ]; then
   ./configure "${x264_cfg[@]}"
+  msvc_fix_mak_paths
   make -j"$JOBS"
   make install
 else
@@ -252,6 +272,7 @@ fi
 
 echo "==> build ffmpeg $FFMPEG_TAG"
 cd "$SRC/ffmpeg"
+msvc_win_pwd
 
 # 覆盖现有导入格式的边界: wav (含 24bit/float/adpcm), mp3, flac,
 # ogg (vorbis/opus/speex/flac), m4a/m4b/aac/mp4/mov (aac / HE-AAC / alac).
@@ -352,6 +373,7 @@ if is_macos; then
 fi
 
 ./configure "${ff_cfg[@]}"
+msvc_fix_mak_paths
 make -j"$JOBS"
 make install
 
