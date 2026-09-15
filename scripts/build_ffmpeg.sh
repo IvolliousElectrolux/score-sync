@@ -183,8 +183,25 @@ fetch_tar() {
   : >"$marker"
 }
 
+# 源码 cache 跨平台共用; Windows 编完留下的 .o/.obj/.depend 不能给 Linux/macOS 链.
+wipe_build_tree() {
+  local dir="$1"
+  [ -d "$dir" ] || return 0
+  echo "==> wipe stale objects in $dir"
+  if [ -f "$dir/Makefile" ] || [ -f "$dir/ffbuild/config.mak" ] || [ -f "$dir/config.mak" ]; then
+    make -C "$dir" distclean >/dev/null 2>&1 || make -C "$dir" clean >/dev/null 2>&1 || true
+  fi
+  find "$dir" -type f \( \
+    -name '*.o' -o -name '*.obj' -o -name '*.a' -o -name '*.lib' \
+    -o -name '*.d' -o -name '*.def' -o -name '.depend' -o -name '*.exe' \
+    -o -name 'ffmpeg' -o -name 'ffmpeg_g' -o -name 'x264' \
+  \) -delete 2>/dev/null || true
+}
+
 fetch_tar "$X264_URL" "$SRC/x264" "$SRC/x264.ok"
 fetch_tar "$FFMPEG_URL" "$SRC/ffmpeg" "$SRC/ffmpeg.ok"
+wipe_build_tree "$SRC/x264"
+wipe_build_tree "$SRC/ffmpeg"
 
 X264_REV=""
 if [ -f "$SRC/x264/version.sh" ]; then

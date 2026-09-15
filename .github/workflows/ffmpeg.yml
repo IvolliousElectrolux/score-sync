@@ -141,6 +141,15 @@ jobs:
             --arch ${{ matrix.arch }} \
             --target ${{ matrix.target }}
 
+      - name: Strip objects before saving sources
+        if: steps.bin.outputs.cache-hit != 'true' && steps.src.outputs.cache-hit != 'true' && matrix.id == 'windows-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${RUNNER_TEMP}/score_sync-ffmpeg/src"
+          [ -d "$SRC" ] || exit 0
+          find "$SRC" -type f \( -name '*.o' -o -name '*.obj' -o -name '*.a' -o -name '*.lib' -o -name '*.d' -o -name '.depend' -o -name '*.exe' -o -name 'ffmpeg' -o -name 'ffmpeg_g' \) -delete 2>/dev/null || true
+
       - name: Save sources
         if: steps.bin.outputs.cache-hit != 'true' && steps.src.outputs.cache-hit != 'true' && matrix.id == 'windows-x64'
         uses: actions/cache/save@v4
