@@ -249,7 +249,7 @@ ff_cfg=(
   --enable-small
   --enable-avdevice
   --enable-indev=lavfi
-  --enable-protocol=file,pipe
+  --enable-protocol=file,pipe,fd
   --enable-encoder="$ENCODERS"
   --enable-decoder="$DECODERS"
   --enable-demuxer="$DEMUXERS"
