@@ -29,6 +29,10 @@
   [sidecars](https://github.com/IvolliousElectrolux/score-sync/releases/tag/sidecars)
   (GitHub 附件名不能用中文, 底色文件为 `background.png`, 可改名为 `底色.png`).
   各平台安装包已带对应的 ffmpeg 与 pdfium, 一般不用再下.
+  随包 ffmpeg 是 Actions (`.github/workflows/ffmpeg.yml`) 按现有导出/预览需求裁过的
+  GPL sidecar (AVC/`libx264` + AAC/FLAC, 解码仍覆盖 wav/mp3/flac/ogg/m4a/aac 等边界),
+  挂在 sidecars: `ffmpeg-windows-x64.exe` / `ffmpeg-macos-arm64` / `ffmpeg-macos-x64`.
+  主程序 MIT, 只当外部进程调用; 不要在本地编译. Windows 包另过 UPX, 带 `ffmpeg-COPYING.txt`.
 
 ## 构建与运行
 

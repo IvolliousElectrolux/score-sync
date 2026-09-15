@@ -1,5 +1,6 @@
 # macOS 发行包: 在 GitHub 的 Mac runner 上编译 (维护者没有本地 Mac).
 # 两个架构都在 macos-14 上编 (arm64 本机, x86_64 交叉), 避开排队极久的 macos-13.
+# ffmpeg 不在本 workflow 里编, 从 sidecars 拉 ffmpeg.yml 编好的裁剪版.
 # 触发: 推送 v* 标签, 或 Actions 页手动 workflow_dispatch (可填已有 tag 把 zip 挂上去).
 
 name: macOS
@@ -27,11 +28,9 @@ jobs:
           - target: aarch64-apple-darwin
             asset: macos-arm64
             pdfium: mac-arm64
-            ffmpeg: darwin-arm64
           - target: x86_64-apple-darwin
             asset: macos-x64
             pdfium: mac-x64
-            ffmpeg: darwin-x64
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -68,11 +67,21 @@ jobs:
           test -n "$DYLIB"
           cp "$DYLIB" "$STAGE/libpdfium.dylib"
 
-          echo "download ffmpeg ${{ matrix.ffmpeg }}"
-          curl -fsSL -o ffmpeg.gz \
-            "https://github.com/eugeneware/ffmpeg-static/releases/latest/download/ffmpeg-${{ matrix.ffmpeg }}.gz"
-          gunzip -c ffmpeg.gz > "$STAGE/ffmpeg"
+          echo "download slim ffmpeg ffmpeg-${{ matrix.asset }} (sidecars, from ffmpeg.yml)"
+          FF_URL="https://github.com/${{ github.repository }}/releases/download/sidecars/ffmpeg-${{ matrix.asset }}"
+          for i in $(seq 1 30); do
+            if curl -fsSL -o "$STAGE/ffmpeg" "$FF_URL"; then
+              break
+            fi
+            echo "waiting for sidecars ffmpeg ($i)"
+            sleep 20
+          done
+          test -s "$STAGE/ffmpeg"
           chmod +x "$STAGE/ffmpeg"
+          curl -fsSL -o "$STAGE/ffmpeg-COPYING.txt" \
+            "https://github.com/${{ github.repository }}/releases/download/sidecars/ffmpeg-COPYING.txt" || true
+          curl -fsSL -o "$STAGE/ffmpeg-SOURCE.txt" \
+            "https://github.com/${{ github.repository }}/releases/download/sidecars/ffmpeg-SOURCE.txt" || true
 
           ditto -c -k --sequesterRsrc --keepParent "$STAGE" "${STAGE}.zip"
           echo "STAGE=$STAGE" >> "$GITHUB_ENV"

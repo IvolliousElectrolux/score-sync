@@ -1,0 +1,134 @@
+# 裁剪版 ffmpeg sidecar: 不改上游源码, 只按 scripts/build_ffmpeg.sh 的 configure 编.
+# Windows 在 Ubuntu 上 mingw 交叉 (再 UPX); macOS 两个架构在 macos-14.
+# 成品 cache 命中则跳过编译; 源码 tarball 另 cache. 成功后挂到 sidecars release.
+
+name: slim ffmpeg
+
+on:
+  push:
+    paths:
+      - scripts/build_ffmpeg.sh
+      - .github/workflows/ffmpeg.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ffmpeg-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  ffmpeg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x64
+            os: ubuntu-24.04
+            arch: x86_64
+            target: mingw64
+            asset: ffmpeg-windows-x64.exe
+          - id: macos-arm64
+            os: macos-14
+            arch: arm64
+            target: native
+            asset: ffmpeg-macos-arm64
+          - id: macos-x64
+            os: macos-14
+            arch: x86_64
+            target: native
+            asset: ffmpeg-macos-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      SRC_CACHE_KEY: ffmpeg-src-n7.1.1-x264-stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore slim binary
+        id: bin
+        uses: actions/cache/restore@v4
+        with:
+          path: vendor/ffmpeg-slim
+          key: ffmpeg-bin-${{ matrix.id }}-${{ hashFiles('scripts/build_ffmpeg.sh') }}
+
+      - name: Restore sources
+        if: steps.bin.outputs.cache-hit != 'true'
+        id: src
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/score_sync-ffmpeg/src
+          key: ${{ env.SRC_CACHE_KEY }}
+
+      - name: Install Ubuntu mingw toolchain
+        if: runner.os == 'Linux' && steps.bin.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            nasm make pkg-config upx-ucl \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+      - name: Install macOS build deps
+        if: runner.os == 'macOS' && steps.bin.outputs.cache-hit != 'true'
+        run: brew install nasm pkgconf
+
+      - name: Build slim ffmpeg
+        if: steps.bin.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          bash scripts/build_ffmpeg.sh \
+            --out-dir vendor/ffmpeg-slim \
+            --work-dir "$RUNNER_TEMP/score_sync-ffmpeg" \
+            --arch ${{ matrix.arch }} \
+            --target ${{ matrix.target }}
+
+      - name: Save sources
+        if: steps.bin.outputs.cache-hit != 'true' && steps.src.outputs.cache-hit != 'true' && matrix.id == 'windows-x64'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/score_sync-ffmpeg/src
+          key: ${{ env.SRC_CACHE_KEY }}
+
+      - name: Save slim binary
+        if: steps.bin.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vendor/ffmpeg-slim
+          key: ffmpeg-bin-${{ matrix.id }}-${{ hashFiles('scripts/build_ffmpeg.sh') }}
+
+      - name: Stage asset
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ -f vendor/ffmpeg-slim/ffmpeg.exe ]; then
+            cp vendor/ffmpeg-slim/ffmpeg.exe "dist/${{ matrix.asset }}"
+          else
+            cp vendor/ffmpeg-slim/ffmpeg "dist/${{ matrix.asset }}"
+          fi
+          chmod +x "dist/${{ matrix.asset }}" || true
+          cp vendor/ffmpeg-slim/ffmpeg-COPYING.txt dist/ 2>/dev/null || true
+          cp vendor/ffmpeg-slim/ffmpeg-SOURCE.txt dist/ 2>/dev/null || true
+          ls -lh dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+      - name: Publish to sidecars release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view sidecars >/dev/null 2>&1; then
+            gh release create sidecars --title sidecars --notes "pdfium / ffmpeg / background sidecars"
+          fi
+          gh release upload sidecars "dist/${{ matrix.asset }}" --clobber
+          if [ -f dist/ffmpeg-COPYING.txt ]; then
+            gh release upload sidecars dist/ffmpeg-COPYING.txt --clobber
+          fi
+          if [ -f dist/ffmpeg-SOURCE.txt ]; then
+            gh release upload sidecars dist/ffmpeg-SOURCE.txt --clobber
+          fi
