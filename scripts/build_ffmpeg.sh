@@ -147,6 +147,11 @@ SRC="$WORK_DIR/src"
 mkdir -p "$OUT_DIR" "$PREFIX" "$SRC"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
+# chocolatey 的 Win32 make 不认 Git Bash 的 /d/a/...; MSVC 要 D:/a/...
+if [ "$MSVC" = 1 ] && command -v cygpath >/dev/null 2>&1; then
+  OUT_DIR="$(cygpath -m "$OUT_DIR")"
+  WORK_DIR="$(cygpath -m "$WORK_DIR")"
+fi
 PREFIX="$WORK_DIR/prefix"
 SRC="$WORK_DIR/src"
 

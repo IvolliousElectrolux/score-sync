@@ -95,9 +95,13 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="/c/Program Files/NASM:/c/ProgramData/chocolatey/bin:$PATH"
+          WD="$RUNNER_TEMP/score_sync-ffmpeg"
+          if command -v cygpath >/dev/null 2>&1; then
+            WD="$(cygpath -m "$RUNNER_TEMP")/score_sync-ffmpeg"
+          fi
           bash scripts/build_ffmpeg.sh \
             --out-dir vendor/ffmpeg-slim \
-            --work-dir "$RUNNER_TEMP/score_sync-ffmpeg" \
+            --work-dir "$WD" \
             --arch ${{ matrix.arch }} \
             --target ${{ matrix.target }}
 
