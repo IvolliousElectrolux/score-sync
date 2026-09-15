@@ -1,5 +1,7 @@
 # 裁剪版 ffmpeg sidecar: 不改上游源码, 只按 scripts/build_ffmpeg.sh 的 configure 编.
-# Windows 在 Ubuntu 上 mingw 交叉 (再 UPX); macOS 两个架构在 macos-14.
+# Windows: windows-2025 + MSVC (cl / --toolchain=msvc, Git Bash 只跑 configure, 成品无 msys dll).
+#   配方参照 fasterthanlime gist: CC=cl 编 x264, ffmpeg --toolchain=msvc.
+# macOS 两个架构在 macos-14.
 # 成品 cache 命中则跳过编译; 源码 tarball 另 cache. 成功后挂到 sidecars release.
 
 name: slim ffmpeg
@@ -25,9 +27,9 @@ jobs:
       matrix:
         include:
           - id: windows-x64
-            os: ubuntu-24.04
+            os: windows-2025
             arch: x86_64
-            target: mingw64
+            target: msvc
             asset: ffmpeg-windows-x64.exe
           - id: macos-arm64
             os: macos-14
@@ -60,8 +62,22 @@ jobs:
           path: ${{ runner.temp }}/score_sync-ffmpeg/src
           key: ${{ env.SRC_CACHE_KEY }}
 
+      - name: Setup MSVC
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install Windows build deps
+        if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install nasm make pkgconfiglite upx -y --no-progress
+          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       - name: Install Ubuntu mingw toolchain
-        if: runner.os == 'Linux' && steps.bin.outputs.cache-hit != 'true'
+        if: matrix.target == 'mingw64' && steps.bin.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -75,8 +91,10 @@ jobs:
 
       - name: Build slim ffmpeg
         if: steps.bin.outputs.cache-hit != 'true'
+        shell: bash
         run: |
           set -euo pipefail
+          export PATH="/c/Program Files/NASM:/c/ProgramData/chocolatey/bin:$PATH"
           bash scripts/build_ffmpeg.sh \
             --out-dir vendor/ffmpeg-slim \
             --work-dir "$RUNNER_TEMP/score_sync-ffmpeg" \
@@ -99,6 +117,7 @@ jobs:
 
       - name: Stage asset
         if: success()
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -121,6 +140,7 @@ jobs:
       - name: Publish to sidecars release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
           if ! gh release view sidecars >/dev/null 2>&1; then

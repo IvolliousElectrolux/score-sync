@@ -32,7 +32,8 @@
   随包 ffmpeg 是 Actions (`.github/workflows/ffmpeg.yml`) 按现有导出/预览需求裁过的
   GPL sidecar (AVC/`libx264` + AAC/FLAC, 解码仍覆盖 wav/mp3/flac/ogg/m4a/aac 等边界),
   挂在 sidecars: `ffmpeg-windows-x64.exe` / `ffmpeg-macos-arm64` / `ffmpeg-macos-x64`.
-  主程序 MIT, 只当外部进程调用; 不要在本地编译. Windows 包另过 UPX, 带 `ffmpeg-COPYING.txt`.
+  Windows 包在 windows-2025 上用 MSVC (`--toolchain=msvc`) 编, 再 UPX; 主程序 MIT, 只当外部进程调用.
+  不要在本地编译. 发行目录带 `ffmpeg-COPYING.txt`.
 
 ## 构建与运行
 

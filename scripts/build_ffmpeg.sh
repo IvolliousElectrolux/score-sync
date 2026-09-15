@@ -17,7 +17,7 @@ DO_UPX=""
 TARGET="native"
 
 usage() {
-  echo "usage: $0 [--out-dir DIR] [--work-dir DIR] [--arch arm64|x86_64] [--target native|mingw64] [--jobs N] [--skip-upx]" >&2
+  echo "usage: $0 [--out-dir DIR] [--work-dir DIR] [--arch arm64|x86_64] [--target native|mingw64|msvc] [--jobs N] [--skip-upx]" >&2
   exit 2
 }
 
@@ -70,13 +70,6 @@ if ! command -v make >/dev/null 2>&1; then
   fi
 fi
 
-for req in gcc tar curl nasm; do
-  if ! command -v "$req" >/dev/null 2>&1; then
-    echo "need $req on PATH" >&2
-    exit 1
-  fi
-done
-
 if [ -z "$ARCH" ]; then
   ARCH="$(host_arch)"
 fi
@@ -90,6 +83,7 @@ if [ -z "$JOBS" ]; then
 fi
 
 MINGW_CROSS=0
+MSVC=0
 if [ "$TARGET" = mingw64 ]; then
   MINGW_CROSS=1
   ARCH=x86_64
@@ -97,14 +91,39 @@ if [ "$TARGET" = mingw64 ]; then
     echo "need x86_64-w64-mingw32-gcc (apt: gcc-mingw-w64-x86-64)" >&2
     exit 1
   fi
+elif [ "$TARGET" = msvc ]; then
+  # fasterthanlime gist: POSIX 壳只跑 configure, 编译器用 cl, 成品无 msys dll.
+  # https://gist.github.com/fasterthanlime/b674346115e88b762d76dac02fef6bd3
+  MSVC=1
+  ARCH=x86_64
+  if ! command -v cl >/dev/null 2>&1 && ! command -v cl.exe >/dev/null 2>&1; then
+    echo "need cl.exe (MSVC Developer Command Prompt / ilammy/msvc-dev-cmd)" >&2
+    exit 1
+  fi
 elif [ "$TARGET" != native ]; then
-  echo "unknown --target $TARGET (native|mingw64)" >&2
+  echo "unknown --target $TARGET (native|mingw64|msvc)" >&2
   exit 2
+fi
+
+if [ "$MSVC" != 1 ]; then
+  for req in gcc tar curl nasm; do
+    if ! command -v "$req" >/dev/null 2>&1; then
+      echo "need $req on PATH" >&2
+      exit 1
+    fi
+  done
+else
+  for req in tar curl nasm; do
+    if ! command -v "$req" >/dev/null 2>&1; then
+      echo "need $req on PATH" >&2
+      exit 1
+    fi
+  done
 fi
 
 TARGET_WIN=0
 EXE_SUFFIX=""
-if is_windows || [ "$MINGW_CROSS" = 1 ]; then
+if is_windows || [ "$MINGW_CROSS" = 1 ] || [ "$MSVC" = 1 ]; then
   TARGET_WIN=1
   EXE_SUFFIX=".exe"
 fi
@@ -133,8 +152,13 @@ SRC="$WORK_DIR/src"
 
 OUT_BIN="$OUT_DIR/ffmpeg${EXE_SUFFIX}"
 
-echo "==> gcc: $(command -v gcc)"
-gcc --version | head -n 1
+if [ "$MSVC" = 1 ]; then
+  echo "==> cl: $(command -v cl || command -v cl.exe)"
+  cl 2>&1 | head -n 1 || true
+else
+  echo "==> gcc: $(command -v gcc)"
+  gcc --version | head -n 1
+fi
 echo "==> nasm: $(nasm -v)"
 echo "==> arch=$ARCH jobs=$JOBS target=$TARGET cross=$CROSS upx=$DO_UPX"
 echo "==> work=$WORK_DIR"
@@ -173,10 +197,13 @@ x264_cfg=(
   --enable-pic
   --enable-strip
 )
-if [ "$TARGET_WIN" = 1 ]; then
+if [ "$TARGET_WIN" = 1 ] && [ "$MSVC" != 1 ]; then
   x264_cfg+=(--extra-ldflags="-static")
 fi
-if [ "$MINGW_CROSS" = 1 ]; then
+if [ "$MSVC" = 1 ]; then
+  export CC=cl
+  x264_cfg+=(--host=x86_64-w64-mingw32)
+elif [ "$MINGW_CROSS" = 1 ]; then
   x264_cfg+=(
     --host=x86_64-w64-mingw32
     --cross-prefix=x86_64-w64-mingw32-
@@ -190,7 +217,7 @@ elif [ "$CROSS" = 1 ] && is_macos; then
   export CFLAGS="-arch $ARCH"
   export LDFLAGS="-arch $ARCH"
 fi
-if [ ! -f "$PREFIX/lib/libx264.a" ]; then
+if [ ! -f "$PREFIX/lib/libx264.a" ] && [ ! -f "$PREFIX/lib/libx264.lib" ]; then
   ./configure "${x264_cfg[@]}"
   make -j"$JOBS"
   make install
@@ -206,6 +233,16 @@ X264_LIBS="-L$PREFIX/lib -lx264"
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists x264; then
   X264_CFLAGS="$(pkg-config --cflags x264)"
   X264_LIBS="$(pkg-config --static --libs x264 2>/dev/null || pkg-config --libs x264)"
+fi
+if [ "$MSVC" = 1 ]; then
+  PREFIX_WIN="$(cygpath -w "$PREFIX")"
+  PREFIX_MIXED="$(cygpath -m "$PREFIX")"
+  X264_CFLAGS="//I${PREFIX_WIN}\\include"
+  X264_LIBS=""
+  if [ -f "$PREFIX/lib/pkgconfig/x264.pc" ]; then
+    sed -i "s|^prefix=.*|prefix=${PREFIX_MIXED}|" "$PREFIX/lib/pkgconfig/x264.pc"
+  fi
+  export MSYS_NO_PATHCONV=1
 fi
 
 echo "==> build ffmpeg $FFMPEG_TAG"
@@ -261,16 +298,23 @@ ff_cfg=(
   --extra-ldflags="-L$PREFIX/lib"
   --extra-libs="$X264_LIBS"
 )
-if [ "$TARGET_WIN" = 1 ]; then
+if [ "$MSVC" = 1 ]; then
+  PREFIX_WIN="$(cygpath -w "$PREFIX")"
+  ff_cfg+=(
+    --toolchain=msvc
+    --target-os=win64
+    --arch=x86_64
+    --enable-w32threads
+    --pkg-config=pkg-config
+    --extra-cflags="//I${PREFIX_WIN}\\include"
+    --extra-ldflags="//LIBPATH:${PREFIX_WIN}\\lib"
+  )
+elif [ "$MINGW_CROSS" = 1 ]; then
   ff_cfg+=(
     --target-os=mingw32
     --arch=x86_64
     --extra-ldflags="-L$PREFIX/lib -static -static-libgcc"
     --extra-libs="$X264_LIBS -lwinpthread"
-  )
-fi
-if [ "$MINGW_CROSS" = 1 ]; then
-  ff_cfg+=(
     --enable-cross-compile
     --cross-prefix=x86_64-w64-mingw32-
     --pkg-config=pkg-config
@@ -316,7 +360,7 @@ STRIP_BIN="strip"
 if [ "$MINGW_CROSS" = 1 ]; then
   STRIP_BIN="x86_64-w64-mingw32-strip"
 fi
-if command -v "$STRIP_BIN" >/dev/null 2>&1; then
+if [ "$MSVC" != 1 ] && command -v "$STRIP_BIN" >/dev/null 2>&1; then
   "$STRIP_BIN" -s "$BUILT" 2>/dev/null || "$STRIP_BIN" "$BUILT" || true
 fi
 
