@@ -98,6 +98,7 @@ jobs:
           key: ffmpeg-bin-${{ matrix.id }}-${{ hashFiles('scripts/build_ffmpeg.sh') }}
 
       - name: Stage asset
+        if: success()
         run: |
           set -euo pipefail
           mkdir -p dist

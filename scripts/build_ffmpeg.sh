@@ -126,6 +126,10 @@ fi
 PREFIX="$WORK_DIR/prefix"
 SRC="$WORK_DIR/src"
 mkdir -p "$OUT_DIR" "$PREFIX" "$SRC"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+WORK_DIR="$(cd "$WORK_DIR" && pwd)"
+PREFIX="$WORK_DIR/prefix"
+SRC="$WORK_DIR/src"
 
 OUT_BIN="$OUT_DIR/ffmpeg${EXE_SUFFIX}"
 
