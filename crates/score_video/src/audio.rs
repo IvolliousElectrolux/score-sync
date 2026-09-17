@@ -4,7 +4,8 @@
 //! 跳转 (播放/暂停/拖动播放头) 都重新创建 `Sink`, 定位到覆盖目标时刻的那条
 //! `AudioClip`. 1x 对 16-bit WAV (含 m4a 转出来的预览 WAV) 按采样点 `seek`,
 //! 不要用 `skip_duration` 从头解码 (长文件暂停再播会卡, 墙钟却继续走, 出声时
-//! 播放头已经往后漂). 倍速预览仍走 ffmpeg `atempo` (变速不变调).
+//! 播放头已经往后漂). 其它格式和倍速预览走 ffmpeg, 输出 `-f wav` 再喂 rodio
+//! (裁剪 sidecar 的 configure 名是 `pcm_s16le`, 旧的 `-f s16le` 编不进去).
 
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -362,7 +363,41 @@ pub(crate) fn atempo_filter(speed: f32) -> String {
 const ATEMPO_RATE: u32 = 44100;
 const ATEMPO_CH: u16 = 2;
 
-/// 按需启动 ffmpeg atempo, 把 PCM 喂给 rodio (变速不变调).
+/// ffmpeg 往非 seekable 管道写 WAV 时, RIFF/`data` 长度经常是 `0xFFFFFFFF`.
+/// hound 会因此报 "data chunk length is not a multiple of sample size".
+/// 这里只定位到 `data` 载荷, 实际采样读到 EOF.
+fn skip_to_wav_data<R: Read>(reader: &mut R) -> bool {
+    let mut riff = [0u8; 12];
+    if reader.read_exact(&mut riff).is_err() {
+        return false;
+    }
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return false;
+    }
+    loop {
+        let mut hdr = [0u8; 8];
+        if reader.read_exact(&mut hdr).is_err() {
+            return false;
+        }
+        let len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        if &hdr[0..4] == b"data" {
+            return true;
+        }
+        let skip = (len as u64) + u64::from(len % 2);
+        let mut buf = [0u8; 1024];
+        let mut left = skip;
+        while left > 0 {
+            let n = left.min(buf.len() as u64) as usize;
+            if reader.read_exact(&mut buf[..n]).is_err() {
+                return false;
+            }
+            left -= n as u64;
+        }
+    }
+}
+
+/// 按需启动 ffmpeg atempo, 把 WAV 管道喂给 rodio (变速不变调).
+/// 必须用 `-f wav`: 裁剪 sidecar 没有 `s16le` muxer (configure 名是 `pcm_s16le`).
 struct AtempoSource {
     path: PathBuf,
     start: f64,
@@ -377,14 +412,16 @@ fn open_atempo_source(path: &Path, start: f64, duration: f64, speed: f32) -> Opt
     if duration < 1e-3 {
         return None;
     }
-    Some(AtempoSource {
+    let mut src = AtempoSource {
         path: decode,
         start: start.max(0.0),
         duration,
         speed,
         child: None,
         stdout: None,
-    })
+    };
+    // 先拉起 ffmpeg 并越过 WAV 头, 失败就不要 append 空源 (否则播放头走、没声).
+    src.ensure_started().then_some(src)
 }
 
 impl AtempoSource {
@@ -402,12 +439,14 @@ impl AtempoSource {
             .arg(format!("{:.6}", self.duration))
             .arg("-i")
             .arg(&self.path)
-            .arg("-vn");
+            .arg("-vn")
+            .arg("-map")
+            .arg("0:a:0");
         if (self.speed - 1.0).abs() > 1e-3 {
             cmd.arg("-af").arg(atempo_filter(self.speed));
         }
         cmd.arg("-f")
-            .arg("s16le")
+            .arg("wav")
             .arg("-acodec")
             .arg("pcm_s16le")
             .arg("-ac")
@@ -428,13 +467,19 @@ impl AtempoSource {
             Ok(c) => c,
             Err(_) => return false,
         };
-        let stdout = match child.stdout.take() {
+        let mut stdout = match child.stdout.take() {
             Some(s) => BufReader::new(s),
             None => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return false;
             }
         };
+        if !skip_to_wav_data(&mut stdout) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
         self.child = Some(child);
         self.stdout = Some(stdout);
         true
@@ -882,8 +927,115 @@ mod tests {
     }
 
     #[test]
+    fn skip_to_wav_data_ignores_list_and_unknown_size() {
+        use std::io::Read;
+        // RIFF + fmt + LIST + data(0xFFFFFFFF) + 2 stereo frames.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&u32::MAX.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // pcm
+        wav.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        wav.extend_from_slice(&44100u32.to_le_bytes());
+        wav.extend_from_slice(&(44100u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"LIST");
+        wav.extend_from_slice(&26u32.to_le_bytes());
+        wav.extend_from_slice(b"INFOISFT");
+        wav.extend_from_slice(&14u32.to_le_bytes());
+        wav.extend_from_slice(b"Lavf61.7.100\0\0");
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&u32::MAX.to_le_bytes());
+        wav.extend_from_slice(&1i16.to_le_bytes());
+        wav.extend_from_slice(&2i16.to_le_bytes());
+        wav.extend_from_slice(&3i16.to_le_bytes());
+        wav.extend_from_slice(&4i16.to_le_bytes());
+        let mut cur = std::io::Cursor::new(wav);
+        assert!(super::skip_to_wav_data(&mut cur));
+        let mut buf = [0u8; 2];
+        cur.read_exact(&mut buf).unwrap();
+        assert_eq!(i16::from_le_bytes(buf), 1);
+    }
+
+    #[test]
     fn wav_slice_rejects_non_pcm16() {
         assert!(super::open_wav_slice(std::path::Path::new("nope.mp3"), 0.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn atempo_source_reads_ffmpeg_wav_pipe() {
+        use rodio::Source;
+        // 优先用仓库里的裁剪 sidecar, 避免 PATH 上的完整 ffmpeg 把 `-f wav` 路径测假.
+        let vendor = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor")
+            .join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX));
+        if vendor.is_file() {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    let _ = std::fs::copy(&vendor, dir.join(vendor.file_name().unwrap()));
+                }
+            }
+        }
+        let ffmpeg_ok = std::process::Command::new(crate::export::ffmpeg_path())
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ffmpeg_ok {
+            eprintln!("skip: ffmpeg missing");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sv_atp_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            for i in 0..8000 {
+                w.write_sample(((i % 64) * 200) as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mut src = super::open_atempo_source(&path, 0.0, 0.25, 1.0).expect("wav pipe");
+        assert_eq!(src.sample_rate(), 44100);
+        assert_eq!(src.channels(), 2);
+        let n = src.by_ref().take(2000).count();
+        assert!(n >= 1000, "got {n} samples from ffmpeg wav pipe");
+        let mut fast = super::open_atempo_source(&path, 0.0, 0.25, 1.25).expect("atempo wav pipe");
+        assert!(fast.by_ref().take(200).count() >= 50);
+
+        // 必须真的合成 mp3 再走预览管道; 编不出来就失败, 不要 silently skip.
+        let mp3 = dir.join("t.mp3");
+        let full_ffmpeg = [
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/ffmpeg.full.bak"),
+            std::path::PathBuf::from(r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"),
+        ];
+        let encoder = full_ffmpeg.iter().find(|ff| ff.is_file()).expect("need full ffmpeg to encode mp3");
+        let status = std::process::Command::new(encoder)
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&path)
+            .args(["-codec:a", "libmp3lame", "-q:a", "4"])
+            .arg(&mp3)
+            .status()
+            .expect("spawn full ffmpeg");
+        assert!(status.success(), "libmp3lame encode failed: {encoder:?}");
+        assert!(mp3.is_file(), "mp3 not written");
+        eprintln!("encoded mp3 {} bytes via {encoder:?}", mp3.metadata().unwrap().len());
+        let mut src = super::open_atempo_source(&mp3, 0.0, 0.8, 1.0).expect("mp3 pipe");
+        let n = src.by_ref().take(8000).count();
+        eprintln!("slim ffmpeg decoded {n} pcm samples from synthesized mp3");
+        assert!(n >= 2000, "slim ffmpeg must decode synthesized mp3, got {n} samples");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

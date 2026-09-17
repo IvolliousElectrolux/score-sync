@@ -280,7 +280,9 @@ DECODERS="$DECODERS,pcm_f32le,pcm_f32be,pcm_f64le,pcm_u8,pcm_alaw,pcm_mulaw"
 DECODERS="$DECODERS,pcm_s16le_planar,pcm_s24le_planar,pcm_s32le_planar"
 DECODERS="$DECODERS,adpcm_ima_wav,adpcm_ms,adpcm_ima_qt,rawvideo"
 DEMUXERS="rawvideo,lavfi,mov,mp3,aac,flac,ogg,wav,w64,aiff,matroska"
-MUXERS="mp4,mov,ipod,matroska,wav,s16le,flac,null,adts"
+# CLI 是 `-f s16le`, configure 组件名是 `pcm_s16le` (见 libavformat/Makefile).
+# 写成 s16le 会被 --disable-everything 静默丢掉, 预览管道就没有 raw PCM muxer.
+MUXERS="mp4,mov,ipod,matroska,wav,pcm_s16le,flac,null,adts"
 PARSERS="aac,aac_latm,mpegaudio,flac,vorbis,opus,h264,hevc"
 BSFS="aac_adtstoasc,extract_extradata"
 FILTERS="buffer,buffersink,abuffer,abuffersink,format,scale,aformat,aresample"

@@ -4,7 +4,7 @@
 
 从扫描谱或 PDF 出发, 在同一界面完成 **谱表分块 → 蒙版清理 → 加底色裁切 → 视频剪辑导出**, 支持工程保存/继续编辑, 一路做到可以直接发布的同步曲谱视频 (MP4/MKV).
 
-当前版本: **1.4.11**
+当前版本: **1.4.12**
 
 ## 功能
 
@@ -54,8 +54,8 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 |------|----------------|
 | 导出画面 | stdin `rawvideo` RGBA (`-i -`, 协议必须有 `fd`) → `-vf format=yuv420p` → `libx264` (yuv420p, CRF, preset=medium, tune=stillimage) |
 | 导出音频 | MP4: `aac`; MKV: `flac`. 多段: `filter_complex` 里 `atrim` / `asetpts` / `aformat` / `apad` / `concat`. 无音轨: `lavfi` `anullsrc` |
-| 预览解码 | m4a/aac/mp4/mov/wav/mp3/flac/ogg 等到 WAV `pcm_s16le` |
-| 预览倍速 | `-af atempo` (单级 0.5–2, 3x 拆成两级); 导出仍是 1x |
+| 预览解码 | m4a/aac/mp4/mov 转临时 WAV `pcm_s16le`; 其它非 16-bit WAV (mp3/flac/ogg 等) 走 ffmpeg 管道 `-f wav` |
+| 预览倍速 | `-af atempo` (单级 0.5–2, 3x 拆成两级) 后同样 `-f wav` 喂 rodio; 导出仍是 1x |
 | 最终封装 | 视频+音频 stream copy 进 mp4/mkv |
 
 **编进去了 (脚本里的列表, 摘常用项):**
@@ -63,7 +63,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 - 编码: `libx264`, `aac`, `flac`, `pcm_s16le`
 - 解码: `aac` / HE-AAC / `alac` / `mp3` / `flac` / `vorbis` / `opus` / `speex` / 多种 PCM 与 wav-ADPCM / `rawvideo`. **没有视频解码器** (含 h264)
 - 解复用: `rawvideo`, `lavfi`, `mov` (mp4/m4a/m4b), `mp3`, `aac`, `flac`, `ogg`, `wav`, `w64`, `aiff`, `matroska`
-- 复用: `mp4`, `mov`, `ipod`, `matroska`, `wav`, `s16le`, `flac`, `null`, `adts`
+- 复用: `mp4`, `mov`, `ipod`, `matroska`, `wav`, `pcm_s16le` (CLI `-f s16le`), `flac`, `null`, `adts`
 - 滤镜: `format`, `scale`, `aformat`, `aresample`, `atrim`, `setpts`, `asetpts`, `apad`, `concat`, `atempo`, `anull`, `anullsrc` 以及 buffer 类
 - 协议: `file`, `pipe`, `fd` (FFmpeg 7.1 把 `-i -` 当成 `fd`, 缺了 stdin 编码会 `Protocol not found`)
 - 设备: `lavfi` indev (静音轨)
@@ -147,6 +147,9 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
   `W` 刷入下一张 (切页并附 1 秒左→右转场), `I`/`O` 标记淡入/淡出, 轨道区 `Ctrl+滚轮` 缩放; 预览按素材自身比例装进 16:9, 不拉扁
 
 ## 版本摘要
+
+### 1.4.12
+- 视频: 导入 mp3/flac/ogg 后预览又能出声. 裁剪 sidecar 没有 `-f s16le` (configure 名是 `pcm_s16le`), 预览管道改走 `-f wav`
 
 ### 1.4.11
 - 导出: 随包 ffmpeg 换成 Actions 裁剪的 7.1.1 sidecar (Windows MSVC / macOS arm64+x64 / Linux x64+arm64), 替代原先约百兆的完整构建; 编码仍是 AVC/libx264 + AAC/FLAC, 导出耗时与完整版相当. 主程序 MIT, sidecar 因 libx264 为 GPL, 只当外部进程调用
