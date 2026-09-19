@@ -42,11 +42,9 @@ impl ScoreSyncApp {
         div()
             .id("header_file_bar")
             .flex_shrink_0()
-            .mr_2()
+            .h(px(28.))
             .flex()
             .flex_row()
-            .items_center()
-            .gap_1()
             .child(self.header_icon_btn(
                 "hdr-new",
                 HeaderGlyph::NewDoc,
@@ -92,16 +90,13 @@ impl ScoreSyncApp {
             .id(id)
             .relative()
             .flex_shrink_0()
-            .w(px(22.))
-            .h(px(22.))
-            .rounded_full()
-            .border_1()
-            .border_color(rgb(0x64748b))
+            .w(px(28.))
+            .h_full()
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xe2e8f0)).border_color(rgb(0x334155)))
+            .hover(|s| s.bg(rgb(0xd8e0ea)))
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -148,19 +143,15 @@ impl ScoreSyncApp {
             .id("hdr-help")
             .relative()
             .flex_shrink_0()
-            .ml_1()
-            .w(px(22.))
-            .h(px(22.))
-            .rounded_full()
-            .border_1()
-            .border_color(rgb(0x64748b))
+            .w(px(28.))
+            .h_full()
             .flex()
             .items_center()
             .justify_center()
             .text_xs()
             .text_color(rgb(0x334155))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xe2e8f0)).border_color(rgb(0x334155)))
+            .hover(|s| s.bg(rgb(0xd8e0ea)))
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -306,21 +297,29 @@ impl ScoreSyncApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active { rgb(0x2563eb) } else { rgb(0xf8fafc) };
-        let fg = if active { rgb(0xffffff) } else { rgb(0x334155) };
-        let hover = if active { rgb(0x1d4ed8) } else { rgb(0xe2e8f0) };
+        let fg = if active { rgb(0x0f172a) } else { rgb(0x334155) };
         div()
             .id(id.into())
             .flex_shrink_0()
+            .h_full()
             .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(bg)
+            .flex()
+            .items_center()
+            .when(active, |d| {
+                d.bg(rgb(0xd8e0ea))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| s.bg(hover))
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(rgb(0xd8e0ea))
+                }
+            })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -329,17 +328,13 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 分块菜单: 放在左栏顶上一行, 按钮尺寸对齐视频轨运输条.
+        // 分块菜单: 放在左栏顶上一行, 内嵌菜单项对齐视频轨运输条.
         div()
             .id("crop_toolbar")
             .flex_shrink_0()
             .flex()
             .flex_row()
-            .items_center()
-            .gap_1()
-            .pl_2()
-            .pr_1()
-            .py_1()
+            .h(px(28.))
             .w_full()
             .min_w(px(0.))
             .overflow_x_scroll()
@@ -435,10 +430,7 @@ impl ScoreSyncApp {
             .id("tool_switcher")
             .flex()
             .flex_row()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
+            .h(px(28.))
             .w_full()
             .bg(rgb(0xe2e8f0))
             .border_b_1()
@@ -457,31 +449,33 @@ impl ScoreSyncApp {
         tool: SideTool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active {
-            rgb(0x2563eb)
-        } else {
-            rgb(0xf8fafc)
-        };
         let fg = if active {
-            rgb(0xffffff)
+            rgb(0x0f172a)
         } else {
-            rgb(0x334155)
+            rgb(0x475569)
         };
         div()
             .id(id)
-            .px_3()
-            .py_1()
-            .rounded_md()
-            .bg(bg)
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(active, |d| {
+                d.bg(rgb(0xf8fafc))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
             .text_color(fg)
             .text_sm()
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .whitespace_nowrap()
+            .overflow_hidden()
             .cursor_pointer()
             .hover(move |s| {
                 if active {
                     s
                 } else {
-                    s.bg(rgb(0xf1f5f9))
+                    s.bg(rgb(0xd8e0ea))
                 }
             })
             .child(label)
@@ -571,9 +565,8 @@ impl ScoreSyncApp {
                     div()
                         .w_full()
                         .min_w(px(0.))
+                        .h(px(28.))
                         .flex_shrink_0()
-                        .px_2()
-                        .py_1()
                         .border_b_1()
                         .border_color(rgb(0xcbd5e1))
                         .bg(rgb(0xe2e8f0))

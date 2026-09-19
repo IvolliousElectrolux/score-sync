@@ -11,18 +11,22 @@ impl ScoreVideoApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if primary { rgb(0x2563eb) } else { rgb(0x334155) };
-        let hover = if primary { rgb(0x1d4ed8) } else { rgb(0x475569) };
+        let fg = if primary { rgb(0x93c5fd) } else { rgb(0xcbd5e1) };
         div()
             .id(id)
             .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(bg)
-            .text_color(rgb(0xffffff))
+            .h_full()
+            .flex()
+            .items_center()
+            .when(primary, |d| {
+                d.bg(rgb(0x334155))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
+            .text_color(fg)
             .text_xs()
+            .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| s.bg(hover))
+            .hover(move |s| s.bg(rgb(0x334155)))
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -42,11 +46,9 @@ impl ScoreVideoApp {
             .flex_shrink_0()
             .flex()
             .flex_row()
-            .items_center()
-            .gap_2()
-            .pl_2()
-            .pr_1()
-            .py_1()
+            .h(px(28.))
+            .min_w(px(0.))
+            .overflow_x_scroll()
             .bg(rgb(0x1e293b))
             .border_b_1()
             .border_color(rgb(0x0f172a))
@@ -109,18 +111,22 @@ impl ScoreVideoApp {
                 } else {
                     "分割音频".into()
                 };
-                let bg = if armed { rgb(0x2563eb) } else { rgb(0x334155) };
-                let hover = if armed { rgb(0x1d4ed8) } else { rgb(0x475569) };
+                let fg = if armed { rgb(0x93c5fd) } else { rgb(0xcbd5e1) };
                 div()
                     .id("sv_split_audio")
                     .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(bg)
-                    .text_color(rgb(0xffffff))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .when(armed, |d| {
+                        d.bg(rgb(0x334155))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                    })
+                    .text_color(fg)
                     .text_xs()
+                    .whitespace_nowrap()
                     .cursor_pointer()
-                    .hover(move |s| s.bg(hover))
+                    .hover(move |s| s.bg(rgb(0x334155)))
                     .child(label)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -134,8 +140,13 @@ impl ScoreVideoApp {
             .child(self.speed_button(cx))
             .child(
                 div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .px_2()
                     .text_xs()
                     .text_color(rgb(0x94a3b8))
+                    .whitespace_nowrap()
                     .child(time_label),
             )
     }
@@ -143,21 +154,25 @@ impl ScoreVideoApp {
     fn speed_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let label: SharedString = fmt_speed(self.audio.speed()).into();
         let open = self.speed_menu_open;
-        let bg = if open { rgb(0x2563eb) } else { rgb(0x334155) };
-        let hover = if open { rgb(0x1d4ed8) } else { rgb(0x475569) };
+        let fg = if open { rgb(0x93c5fd) } else { rgb(0xcbd5e1) };
         let entity = cx.entity().clone();
         // padding 放内层, 避免测量 canvas 与可视按钮差出左右内边距 (蒙版色块同款).
         div()
             .id("sv_speed")
             .relative()
             .flex_shrink_0()
-            .rounded_md()
-            .bg(bg)
-            .text_color(rgb(0xffffff))
+            .h_full()
+            .flex()
+            .items_center()
+            .when(open, |d| {
+                d.bg(rgb(0x334155))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
+            .text_color(fg)
             .text_xs()
             .cursor_pointer()
-            .hover(move |s| s.bg(hover))
-            .child(div().px_2().py_1().child(label))
+            .hover(move |s| s.bg(rgb(0x334155)))
+            .child(div().px_2().child(label))
             .child(
                 canvas(
                     move |bounds, _, cx| {

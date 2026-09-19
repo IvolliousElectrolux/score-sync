@@ -1,0 +1,12 @@
+This sidecar ffmpeg is GPL (libx264 + FFmpeg --enable-gpl).
+score_sync stays MIT and only execs this binary as a separate process.
+
+No upstream source was patched; components are selected by configure.
+Recipe: scripts/build_ffmpeg.sh  (GitHub Actions: .github/workflows/ffmpeg.yml)
+
+FFmpeg n7.1.1  https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.1.tar.gz
+x264 stable  https://github.com/mirror/x264/archive/refs/heads/stable.tar.gz
+x264 version: #define X264_VERSION ""
+
+Corresponding source is the public tarballs above plus this script.
+

@@ -7,35 +7,32 @@ impl MaskToolApp {
         div()
             .flex()
             .flex_row()
-            .items_center()
-            .gap_2()
-            .child(self.btn("export", "导出本块", false, false, Self::export_image, cx))
-            .child(self.btn(
+            .h_full()
+            .w_full()
+            .child(self.menu_item("export", "导出本块", false, Self::export_image, cx))
+            .child(self.menu_item(
                 "fit",
                 "适应",
-                false,
                 false,
                 |this, _, cx| this.fit_to_view(cx),
                 cx,
             ))
-            .child(self.btn(
+            .child(self.menu_item(
                 "del",
                 "删除",
-                false,
                 false,
                 |this, _, cx| this.delete_selected(cx),
                 cx,
             ))
-            .child(self.btn(
+            .child(self.menu_item(
                 "clear",
                 "清空本页蒙版",
-                false,
                 false,
                 |this, _, cx| this.clear_masks(cx),
                 cx,
             ))
             .when(self.has_block_pieces(), |d| {
-                d.child(self.btn_with_context(
+                d.child(self.menu_item_with_context(
                     "guides",
                     "辅助线",
                     self.guides_on(),
@@ -46,7 +43,7 @@ impl MaskToolApp {
                     cx,
                 ))
                 .when(self.guides_on(), |d2| {
-                    d2.child(self.btn_with_context(
+                    d2.child(self.menu_item_with_context(
                         "guide_align",
                         "对齐",
                         false,
@@ -65,11 +62,99 @@ impl MaskToolApp {
             .child(div().flex_1())
             .child(
                 div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .px_2()
                     .text_sm()
                     .text_color(rgb(0x64748b))
                     .child(self.status.clone()),
             )
     }
+    pub(super) fn menu_item(
+        &self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        active: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fg = if active { rgb(0x0f172a) } else { rgb(0x334155) };
+        div()
+            .id(id.into())
+            .flex_shrink_0()
+            .h_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .when(active, |d| {
+                d.bg(rgb(0xd8e0ea))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
+            .text_color(fg)
+            .text_xs()
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(rgb(0xd8e0ea))
+                }
+            })
+            .child(label.into())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+            )
+    }
+
+    pub(super) fn menu_item_with_context(
+        &self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        active: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        on_right: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fg = if active { rgb(0x0f172a) } else { rgb(0x334155) };
+        div()
+            .id(id.into())
+            .flex_shrink_0()
+            .h_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .when(active, |d| {
+                d.bg(rgb(0xd8e0ea))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
+            .text_color(fg)
+            .text_xs()
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(rgb(0xd8e0ea))
+                }
+            })
+            .child(label.into())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev, window, cx| {
+                    cx.stop_propagation();
+                    on_right(this, ev, window, cx);
+                }),
+            )
+    }
+
     pub(super) fn btn(
         &self,
         id: impl Into<SharedString>,
@@ -143,22 +228,21 @@ impl MaskToolApp {
         div()
             .flex()
             .flex_row()
-            .items_center()
-            .gap_2()
-            .child(self.btn("open", "打开", false, false, Self::open_file, cx))
-            .child(self.btn("export", "导出", false, false, Self::export_image, cx))
-            .child(self.btn(
+            .h(px(28.))
+            .w_full()
+            .bg(rgb(0xe2e8f0))
+            .child(self.menu_item("open", "打开", false, Self::open_file, cx))
+            .child(self.menu_item("export", "导出", false, Self::export_image, cx))
+            .child(self.menu_item(
                 "fit",
                 "适应窗口",
-                false,
                 false,
                 |this, _, cx| this.fit_to_view(cx),
                 cx,
             ))
-            .child(self.btn(
+            .child(self.menu_item(
                 "del",
                 "删除",
-                false,
                 false,
                 |this, _, cx| this.delete_selected(cx),
                 cx,
@@ -166,6 +250,10 @@ impl MaskToolApp {
             .child(div().flex_1())
             .child(
                 div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .px_2()
                     .text_sm()
                     .text_color(rgb(0x64748b))
                     .child(self.status.clone()),
