@@ -372,8 +372,7 @@ pub fn brace_anchor_y(
     sheet_x1: i32,
     ink_threshold: i32,
 ) -> i32 {
-    detect_brace_cusp_y(rgb, y0, y1, sheet_x0, sheet_x1, ink_threshold)
-        .unwrap_or((y0 + y1) / 2)
+    detect_brace_cusp_y(rgb, y0, y1, sheet_x0, sheet_x1, ink_threshold).unwrap_or((y0 + y1) / 2)
 }
 
 /// 大括号尖尖. 先试左包络中间凸点; 竖条/峰不清楚时退回墨迹中点.
@@ -381,7 +380,14 @@ pub fn brace_anchor_y(
 pub fn detect_brace_tip_y(rgb: &RgbImage, y0: i32, y1: i32, ink_threshold: i32) -> Option<i32> {
     let w = rgb.width() as i32;
     let (a, b) = detect_brace_extent(rgb, y0, y1, 0, w.saturating_sub(1), ink_threshold)?;
-    Some(brace_anchor_y(rgb, a, b, 0, w.saturating_sub(1), ink_threshold))
+    Some(brace_anchor_y(
+        rgb,
+        a,
+        b,
+        0,
+        w.saturating_sub(1),
+        ink_threshold,
+    ))
 }
 
 #[cfg(test)]
@@ -484,6 +490,9 @@ mod tests {
         let y = cusp.unwrap();
         let expect = 40 + ((200 - 40) as f32 * 0.38).round() as i32;
         assert!((y - expect).abs() <= 10, "cusp y={y}, want ~{expect}");
-        assert!((y - mid).abs() > 8, "should not fall back to midpoint {mid}");
+        assert!(
+            (y - mid).abs() > 8,
+            "should not fall back to midpoint {mid}"
+        );
     }
 }

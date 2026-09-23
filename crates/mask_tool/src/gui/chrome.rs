@@ -9,17 +9,17 @@ impl MaskToolApp {
             .flex_row()
             .h_full()
             .w_full()
-            .child(self.menu_item("export", "导出本块", false, Self::export_image, cx))
+            .child(self.menu_item("export", "导出本块 (E)", false, Self::export_image, cx))
             .child(self.menu_item(
                 "fit",
-                "适应",
+                "适应 (F)",
                 false,
                 |this, _, cx| this.fit_to_view(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "del",
-                "删除",
+                "删除 (Del)",
                 false,
                 |this, _, cx| this.delete_selected(cx),
                 cx,
@@ -38,7 +38,11 @@ impl MaskToolApp {
                     self.guides_on(),
                     |this, _, cx| this.guide_toggle(cx),
                     |this, ev, _, cx| {
-                        this.open_guide_menu(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                        this.open_guide_menu(
+                            f32::from(ev.position.x),
+                            f32::from(ev.position.y),
+                            cx,
+                        );
                     },
                     cx,
                 ))
@@ -88,20 +92,13 @@ impl MaskToolApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(rgb(0xd8e0ea))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(rgb(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| {
-                if active {
-                    s
-                } else {
-                    s.bg(rgb(0xd8e0ea))
-                }
-            })
+            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -127,20 +124,13 @@ impl MaskToolApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(rgb(0xd8e0ea))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(rgb(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| {
-                if active {
-                    s
-                } else {
-                    s.bg(rgb(0xd8e0ea))
-                }
-            })
+            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -187,6 +177,7 @@ impl MaskToolApp {
         )
     }
 
+    #[allow(dead_code)]
     pub(super) fn btn_with_context(
         &self,
         id: impl Into<SharedString>,
@@ -358,32 +349,27 @@ impl MaskToolApp {
                         }),
                     )
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(recent.into_iter().enumerate().map(|(i, color)| {
-                        let color_u32 = color_rgb_u32(color);
-                        div()
-                            .id(SharedString::from(format!("recent-{i}")))
-                            .size(px(22.))
-                            .rounded_sm()
-                            .bg(rgb(color_u32))
-                            .border_1()
-                            .border_color(rgb(0x64748b))
-                            .cursor_pointer()
-                            .hover(|s| s.border_color(rgb(0x94a3b8)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.pick_recent_color(color, cx);
-                                }),
-                            )
-                    })),
-            )
+            .child(div().flex().flex_row().flex_wrap().gap_1().children(
+                recent.into_iter().enumerate().map(|(i, color)| {
+                    let color_u32 = color_rgb_u32(color);
+                    div()
+                        .id(SharedString::from(format!("recent-{i}")))
+                        .size(px(22.))
+                        .rounded_sm()
+                        .bg(rgb(color_u32))
+                        .border_1()
+                        .border_color(rgb(0x64748b))
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(rgb(0x94a3b8)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.pick_recent_color(color, cx);
+                            }),
+                        )
+                }),
+            ))
             .child(
                 div()
                     .flex()
@@ -510,10 +496,7 @@ impl MaskToolApp {
                                             + px((picker_h / 360.0).clamp(0.0, 1.0)
                                                 * f32::from(bounds.size.height));
                                         let mark = Bounds {
-                                            origin: point(
-                                                bounds.origin.x,
-                                                hy - px(2.),
-                                            ),
+                                            origin: point(bounds.origin.x, hy - px(2.)),
                                             size: size(bounds.size.width, px(4.)),
                                         };
                                         window.paint_quad(quad(
@@ -569,12 +552,7 @@ impl MaskToolApp {
                             .items_center()
                             .gap_1()
                             .flex_shrink_0()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0xcbd5e1))
-                                    .child("RGB"),
-                            )
+                            .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("RGB"))
                             .child(
                                 div()
                                     .id("eyedropper_btn")
@@ -694,10 +672,7 @@ impl MaskToolApp {
         if embedded {
             panel = panel.w_full();
         } else {
-            panel = panel
-                .w(px(side_w))
-                .border_l_1()
-                .border_color(rgb(0xcbd5e1));
+            panel = panel.w(px(side_w)).border_l_1().border_color(rgb(0xcbd5e1));
         }
         panel
             .child(
@@ -740,311 +715,328 @@ impl MaskToolApp {
                                 "蒙版列表 (选中后 Delete 删除)".to_string()
                             }),
                     )
-            .child(
-                div()
-                    .id("mask_list")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .bg(rgb(0xffffff))
-                    .border_1()
-                    .border_color(rgb(0xcbd5e1))
-                    .rounded_md()
-                    .p_1()
-                    .children(list_items.into_iter().map(|(id, label, selected)| {
-                        let id_click = id.clone();
-                        let bg = if selected {
-                            rgb(0xdbeafe)
-                        } else {
-                            rgb(0xffffff)
-                        };
+                    .child(
                         div()
-                            .id(SharedString::from(format!("mask-{id}")))
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(bg)
-                            .text_sm()
-                            .text_color(rgb(0x0f172a))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xe2e8f0)))
-                            .child(label)
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
-                                    if apply_bg::is_primary_mod(&ev.modifiers) {
-                                        if this.selected.contains(&id_click) {
-                                            this.selected.remove(&id_click);
-                                        } else {
-                                            this.selected.insert(id_click.clone());
-                                        }
-                                    } else {
-                                        this.selected.clear();
-                                        this.selected.insert(id_click.clone());
-                                    }
-                                    cx.notify();
-                                }),
-                            )
-                    })),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child({
-                        let brush_on = self.mode == ToolMode::Brush;
-                        let eraser_on = self.mode == ToolMode::Eraser;
-                        let size_frac = brush_size_to_t(
-                            self.brush_size,
-                            BRUSH_SIZE_MIN,
-                            self.brush_size_max(),
-                        );
-                        let brush_px = self.brush_size.round() as i32;
-                        let brush_color_u32 = color_rgb_u32(self.brush_color);
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .w_full()
-                            .child(self.btn(
-                                "mode_brush",
-                                "画笔",
-                                brush_on,
-                                false,
-                                |this, _, cx| this.toggle_brush_mode(cx),
-                                cx,
-                            ))
-                            .child(
+                            .id("mask_list")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_y_scroll()
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0xcbd5e1))
+                            .rounded_md()
+                            .p_1()
+                            .children(list_items.into_iter().map(|(id, label, selected)| {
+                                let id_click = id.clone();
+                                let bg = if selected {
+                                    rgb(0xdbeafe)
+                                } else {
+                                    rgb(0xffffff)
+                                };
                                 div()
-                                    .id("brush_color_swatch")
-                                    .relative()
-                                    .size(px(28.))
-                                    .flex_shrink_0()
-                                    .rounded_full()
-                                    .bg(rgb(brush_color_u32))
-                                    .border_2()
-                                    .border_color(rgb(0x000000))
+                                    .id(SharedString::from(format!("mask-{id}")))
+                                    .w_full()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(bg)
+                                    .text_sm()
+                                    .text_color(rgb(0x0f172a))
                                     .cursor_pointer()
-                                    .hover(|s| s.border_color(rgb(0x334155)))
-                                    .child(
-                                        canvas(
-                                            {
-                                                let entity = cx.entity().clone();
-                                                move |bounds, _, cx| {
-                                                    entity.update(cx, |this, _| {
-                                                        this.brush_swatch_bounds = bounds;
-                                                    });
-                                                }
-                                            },
-                                            |_, _, _, _| {},
-                                        )
-                                        .absolute()
-                                        .size_full(),
-                                    )
-                                    .on_mouse_down(
+                                    .hover(|s| s.bg(rgb(0xe2e8f0)))
+                                    .child(label)
+                                    .on_mouse_up(
                                         MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.open_color_picker(ColorPickerTarget::Brush, cx);
-                                            if this.mode != ToolMode::Brush {
-                                                this.mode = ToolMode::Brush;
-                                                this.status = Self::mode_status(ToolMode::Brush);
+                                        cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
+                                            if apply_bg::is_primary_mod(&ev.modifiers) {
+                                                if this.selected.contains(&id_click) {
+                                                    this.selected.remove(&id_click);
+                                                } else {
+                                                    this.selected.insert(id_click.clone());
+                                                }
+                                            } else {
+                                                this.selected.clear();
+                                                this.selected.insert(id_click.clone());
                                             }
+                                            cx.notify();
                                         }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .h(px(28.))
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left(relative(size_frac))
-                                            .bottom(px(16.))
-                                            .ml(px(-14.))
-                                            .whitespace_nowrap()
-                                            .text_xs()
-                                            .text_color(rgb(0x64748b))
-                                            .child(format!("{brush_px}px")),
                                     )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child({
+                                let brush_on = self.mode == ToolMode::Brush;
+                                let eraser_on = self.mode == ToolMode::Eraser;
+                                let size_frac = brush_size_to_t(
+                                    self.brush_size,
+                                    BRUSH_SIZE_MIN,
+                                    self.brush_size_max(),
+                                );
+                                let brush_px = self.brush_size.round() as i32;
+                                let brush_color_u32 = color_rgb_u32(self.brush_color);
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .w_full()
+                                    .child(self.btn(
+                                        "mode_brush",
+                                        "画笔",
+                                        brush_on,
+                                        false,
+                                        |this, _, cx| this.toggle_brush_mode(cx),
+                                        cx,
+                                    ))
                                     .child(
                                         div()
-                                            .id("brush_size_track")
-                                            .absolute()
-                                            .left_0()
-                                            .right_0()
-                                            .bottom_0()
-                                            .h(px(14.))
+                                            .id("brush_color_swatch")
+                                            .relative()
+                                            .size(px(28.))
+                                            .flex_shrink_0()
                                             .rounded_full()
-                                            .bg(rgb(0xe2e8f0))
-                                            .border_1()
-                                            .border_color(rgb(0x94a3b8))
-                                            .overflow_hidden()
+                                            .bg(rgb(brush_color_u32))
+                                            .border_2()
+                                            .border_color(rgb(0x000000))
                                             .cursor_pointer()
+                                            .hover(|s| s.border_color(rgb(0x334155)))
                                             .child(
                                                 canvas(
                                                     {
                                                         let entity = cx.entity().clone();
                                                         move |bounds, _, cx| {
                                                             entity.update(cx, |this, _| {
-                                                                this.brush_size_track = bounds;
+                                                                this.brush_swatch_bounds = bounds;
                                                             });
                                                         }
                                                     },
                                                     |_, _, _, _| {},
                                                 )
-                                                .size_full()
-                                                .absolute(),
-                                            )
-                                            .child(
-                                                div()
-                                                    .h_full()
-                                                    .w(relative(size_frac))
-                                                    .bg(rgb(0x2563eb))
-                                                    .rounded_full(),
+                                                .absolute()
+                                                .size_full(),
                                             )
                                             .on_mouse_down(
                                                 MouseButton::Left,
-                                                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                                                    this.drag = Some(DragKind::BrushSize);
-                                                    this.set_brush_size_from_x(
-                                                        f32::from(ev.position.x),
+                                                cx.listener(|this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.open_color_picker(
+                                                        ColorPickerTarget::Brush,
                                                         cx,
                                                     );
-                                                }),
-                                            )
-                                            .on_mouse_move(cx.listener(Self::on_view_mouse_move))
-                                            .on_mouse_up(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    if matches!(this.drag, Some(DragKind::BrushSize))
-                                                    {
-                                                        this.drag = None;
-                                                        cx.notify();
+                                                    if this.mode != ToolMode::Brush {
+                                                        this.mode = ToolMode::Brush;
+                                                        this.status =
+                                                            Self::mode_status(ToolMode::Brush);
                                                     }
                                                 }),
                                             ),
-                                    ),
-                            )
-                            .child(self.btn(
-                                "mode_eraser",
-                                "橡皮",
-                                eraser_on,
-                                false,
-                                |this, _, cx| this.toggle_eraser_mode(cx),
-                                cx,
-                            ))
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .w_full()
-                            .child(self.btn(
-                                "mode_draw",
-                                "框选 (B)",
-                                self.mode == ToolMode::Draw,
-                                true,
-                                |this, _, cx| this.toggle_draw_mode(cx),
-                                cx,
-                            ))
-                            .child(self.btn(
-                                "mode_poly",
-                                "折线 (L)",
-                                self.mode == ToolMode::Poly,
-                                true,
-                                |this, _, cx| this.toggle_poly_mode(cx),
-                                cx,
-                            ))
+                                    )
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .h(px(28.))
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(relative(size_frac))
+                                                    .bottom(px(16.))
+                                                    .ml(px(-14.))
+                                                    .whitespace_nowrap()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x64748b))
+                                                    .child(format!("{brush_px}px")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("brush_size_track")
+                                                    .absolute()
+                                                    .left_0()
+                                                    .right_0()
+                                                    .bottom_0()
+                                                    .h(px(14.))
+                                                    .rounded_full()
+                                                    .bg(rgb(0xe2e8f0))
+                                                    .border_1()
+                                                    .border_color(rgb(0x94a3b8))
+                                                    .overflow_hidden()
+                                                    .cursor_pointer()
+                                                    .child(
+                                                        canvas(
+                                                            {
+                                                                let entity = cx.entity().clone();
+                                                                move |bounds, _, cx| {
+                                                                    entity.update(cx, |this, _| {
+                                                                        this.brush_size_track =
+                                                                            bounds;
+                                                                    });
+                                                                }
+                                                            },
+                                                            |_, _, _, _| {},
+                                                        )
+                                                        .size_full()
+                                                        .absolute(),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .w(relative(size_frac))
+                                                            .bg(rgb(0x2563eb))
+                                                            .rounded_full(),
+                                                    )
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(
+                                                            |this, ev: &MouseDownEvent, _, cx| {
+                                                                this.drag =
+                                                                    Some(DragKind::BrushSize);
+                                                                this.set_brush_size_from_x(
+                                                                    f32::from(ev.position.x),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ),
+                                                    )
+                                                    .on_mouse_move(
+                                                        cx.listener(Self::on_view_mouse_move),
+                                                    )
+                                                    .on_mouse_up(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _, cx| {
+                                                            if matches!(
+                                                                this.drag,
+                                                                Some(DragKind::BrushSize)
+                                                            ) {
+                                                                this.drag = None;
+                                                                cx.notify();
+                                                            }
+                                                        }),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(self.btn(
+                                        "mode_eraser",
+                                        "橡皮",
+                                        eraser_on,
+                                        false,
+                                        |this, _, cx| this.toggle_eraser_mode(cx),
+                                        cx,
+                                    ))
+                            })
                             .child(
                                 div()
-                                    .id("mask_color_swatch")
-                                    .relative()
-                                    .size(px(28.))
-                                    .flex_shrink_0()
-                                    .rounded_full()
-                                    .bg(rgb(mask_color_u32))
-                                    .border_2()
-                                    .border_color(rgb(0x000000))
-                                    .cursor_pointer()
-                                    .hover(|s| s.border_color(rgb(0x334155)))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .w_full()
+                                    .child(self.btn(
+                                        "mode_draw",
+                                        "框选 (B)",
+                                        self.mode == ToolMode::Draw,
+                                        true,
+                                        |this, _, cx| this.toggle_draw_mode(cx),
+                                        cx,
+                                    ))
+                                    .child(self.btn(
+                                        "mode_poly",
+                                        "套索 (L)",
+                                        self.mode == ToolMode::Poly,
+                                        true,
+                                        |this, _, cx| this.toggle_poly_mode(cx),
+                                        cx,
+                                    ))
                                     .child(
-                                        canvas(
-                                            {
-                                                let entity = cx.entity().clone();
-                                                move |bounds, _, cx| {
-                                                    entity.update(cx, |this, _| {
-                                                        this.mask_swatch_bounds = bounds;
-                                                    });
-                                                }
-                                            },
-                                            |_, _, _, _| {},
-                                        )
-                                        .absolute()
-                                        .size_full(),
+                                        div()
+                                            .id("mask_color_swatch")
+                                            .relative()
+                                            .size(px(28.))
+                                            .flex_shrink_0()
+                                            .rounded_full()
+                                            .bg(rgb(mask_color_u32))
+                                            .border_2()
+                                            .border_color(rgb(0x000000))
+                                            .cursor_pointer()
+                                            .hover(|s| s.border_color(rgb(0x334155)))
+                                            .child(
+                                                canvas(
+                                                    {
+                                                        let entity = cx.entity().clone();
+                                                        move |bounds, _, cx| {
+                                                            entity.update(cx, |this, _| {
+                                                                this.mask_swatch_bounds = bounds;
+                                                            });
+                                                        }
+                                                    },
+                                                    |_, _, _, _| {},
+                                                )
+                                                .absolute()
+                                                .size_full(),
+                                            )
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.open_color_picker(
+                                                        ColorPickerTarget::Mask,
+                                                        cx,
+                                                    );
+                                                }),
+                                            ),
                                     )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.open_color_picker(ColorPickerTarget::Mask, cx);
-                                        }),
-                                    ),
+                                    .child(self.btn(
+                                        "mode_pan",
+                                        "平移 (P)",
+                                        self.mode == ToolMode::Pan,
+                                        true,
+                                        |this, _, cx| this.toggle_pan_mode(cx),
+                                        cx,
+                                    )),
                             )
+                            .when(!embedded, |d| {
+                                d.child(self.btn(
+                                    "btn_del",
+                                    "删除选中蒙版",
+                                    false,
+                                    false,
+                                    |this, _, cx| this.delete_selected(cx),
+                                    cx,
+                                ))
+                                .child(self.btn(
+                                    "btn_clear",
+                                    "清空全部蒙版",
+                                    false,
+                                    false,
+                                    |this, _, cx| this.clear_masks(cx),
+                                    cx,
+                                ))
+                            })
                             .child(self.btn(
-                                "mode_pan",
-                                "平移 (P)",
-                                self.mode == ToolMode::Pan,
+                                "btn_export",
+                                if embedded {
+                                    if self.bg_applied {
+                                        "导出蒙版+底色后图片 (E)…"
+                                    } else {
+                                        "导出蒙版后图片 (E)…"
+                                    }
+                                } else {
+                                    "导出已遮盖图片 (E)…"
+                                },
+                                false,
                                 true,
-                                |this, _, cx| this.toggle_pan_mode(cx),
+                                Self::export_image,
                                 cx,
                             )),
-                    )
-                    .when(!embedded, |d| {
-                        d.child(self.btn(
-                            "btn_del",
-                            "删除选中蒙版",
-                            false,
-                            false,
-                            |this, _, cx| this.delete_selected(cx),
-                            cx,
-                        ))
-                        .child(self.btn(
-                            "btn_clear",
-                            "清空全部蒙版",
-                            false,
-                            false,
-                            |this, _, cx| this.clear_masks(cx),
-                            cx,
-                        ))
-                    })
-                    .child(self.btn(
-                        "btn_export",
-                        if embedded {
-                            if self.bg_applied {
-                                "导出蒙版+底色后图片 (E)…"
-                            } else {
-                                "导出蒙版后图片 (E)…"
-                            }
-                        } else {
-                            "导出已遮盖图片 (E)…"
-                        },
-                        false,
-                        true,
-                        Self::export_image,
-                        cx,
-                    )),
-            ) // tools column
+                    ), // tools column
             ) // mask_side_inner
-            .when(self.color_picker_open, |d| d.child(self.color_picker_floating(cx)))
+            .when(self.color_picker_open, |d| {
+                d.child(self.color_picker_floating(cx))
+            })
     }
 }

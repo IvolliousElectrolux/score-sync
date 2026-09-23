@@ -1,8 +1,8 @@
 //! 分块页签 / 蒙版组合页签.
 
 use super::lists::TabInfo;
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 impl ScoreSyncApp {
     /// 页签水平滚动条拖拽用的 handle: 蒙版面板用独立的 `mask_tab_scroll`,
@@ -127,11 +127,7 @@ impl ScoreSyncApp {
             if let Some(id) = pid {
                 self.crop_histories.remove(&id);
             }
-            self.status = format!(
-                "已关闭页面 ({}Z 可撤回).",
-                apply_bg::primary_mod()
-            )
-            .into();
+            self.status = format!("已关闭页面 ({}Z 可撤回).", apply_bg::primary_mod()).into();
             self.hint = self.status.clone();
             self.refresh_render(cx);
         } else {
@@ -142,12 +138,7 @@ impl ScoreSyncApp {
 
     pub(super) fn copy_page(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(at) = self.doc.copy_page_at(index) {
-            self.status = format!(
-                "已复制第 {} 页 → 新标签 {}",
-                index + 1,
-                at + 1
-            )
-            .into();
+            self.status = format!("已复制第 {} 页 → 新标签 {}", index + 1, at + 1).into();
             self.hint = self.status.clone();
             self.refresh_render(cx);
         }
@@ -181,8 +172,10 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn note_tab_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if matches!(self.drag, Some(DragKind::TabReorder { .. }) | Some(DragKind::TabHScroll { .. }))
-        {
+        if matches!(
+            self.drag,
+            Some(DragKind::TabReorder { .. }) | Some(DragKind::TabHScroll { .. })
+        ) {
             self.clear_tab_hover(cx);
             return;
         }
@@ -353,8 +346,7 @@ impl ScoreSyncApp {
         let add_w = 36.0;
         let max = (n as f32 * slot + add_w - view_w).max(0.0);
         let target = (ix as f32 * slot - view_w * 0.35).clamp(0.0, max);
-        self.tab_scroll
-            .set_offset(point(px(-target), px(0.)));
+        self.tab_scroll.set_offset(point(px(-target), px(0.)));
     }
     pub(super) fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.uses_mask_canvas() {
@@ -482,9 +474,7 @@ impl ScoreSyncApp {
                             let track_left = f32::from(b.origin.x);
                             let target = (x - track_left - thumb * 0.5).clamp(0.0, travel);
                             handle.set_offset(point(px(-(target / travel) * max), px(0.)));
-                            this.drag = Some(DragKind::TabHScroll {
-                                grab: thumb * 0.5,
-                            });
+                            this.drag = Some(DragKind::TabHScroll { grab: thumb * 0.5 });
                             cx.notify();
                         }),
                     )
@@ -569,12 +559,7 @@ impl ScoreSyncApp {
             }));
         let slot = self.tab_slot_px();
         if n > TAB_VIRTUAL_THRESHOLD && start > 0 {
-            row = row.child(
-                div()
-                    .w(px(start as f32 * slot))
-                    .h(px(1.))
-                    .flex_shrink_0(),
-            );
+            row = row.child(div().w(px(start as f32 * slot)).h(px(1.)).flex_shrink_0());
         }
         for tab in tabs {
             let idx = tab.index;
@@ -618,8 +603,7 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .when(!tab_reordering, |d| {
-                                d.hover(|s| s.bg(rgb(0x94a3b8)))
-                                    .block_mouse_except_scroll()
+                                d.hover(|s| s.bg(rgb(0x94a3b8))).block_mouse_except_scroll()
                             })
                             .child("×")
                             .on_mouse_down(
@@ -655,11 +639,7 @@ impl ScoreSyncApp {
                             this.switch_page(idx, cx);
                             let mx = f32::from(ev.position.x);
                             let my = f32::from(ev.position.y);
-                            let (ox, oy) = Self::item_origin(
-                                this.tab_bounds.get(&idx),
-                                mx,
-                                my,
-                            );
+                            let (ox, oy) = Self::item_origin(this.tab_bounds.get(&idx), mx, my);
                             this.tab_add_press = false;
                             this.tab_close_press = None;
                             this.drag = Some(DragKind::TabReorder {
@@ -825,9 +805,7 @@ impl ScoreSyncApp {
                             let track_left = f32::from(b.origin.x);
                             let target = (x - track_left - thumb * 0.5).clamp(0.0, travel);
                             handle.set_offset(point(px(-(target / travel) * max), px(0.)));
-                            this.drag = Some(DragKind::TabHScroll {
-                                grab: thumb * 0.5,
-                            });
+                            this.drag = Some(DragKind::TabHScroll { grab: thumb * 0.5 });
                             cx.notify();
                         }),
                     )
@@ -983,8 +961,7 @@ impl ScoreSyncApp {
                             };
                             let w = f32::from(bounds.size.width);
                             let h = f32::from(bounds.size.height);
-                            if (w - tip.measured_w).abs() > 0.5
-                                || (h - tip.measured_h).abs() > 0.5
+                            if (w - tip.measured_w).abs() > 0.5 || (h - tip.measured_h).abs() > 0.5
                             {
                                 tip.measured_w = w;
                                 tip.measured_h = h;
@@ -1204,7 +1181,11 @@ fn ch_cols(c: char) -> usize {
             | 0x1F900..=0x1F9FF
             | 0x20000..=0x3FFFD
     );
-    if wide { 2 } else { 1 }
+    if wide {
+        2
+    } else {
+        1
+    }
 }
 
 fn str_cols(s: &str) -> usize {
@@ -1361,8 +1342,7 @@ mod tests {
         assert!((x_mid - 822.0).abs() < 0.6);
         assert!((y_mid - (8.0 + 22.0 + 2.0)).abs() < 0.6);
         // 底部贴边时翻到锚点上方
-        let (x2, y2) =
-            hover_tooltip_pos(20.0, 780.0, 40.0, 22.0, text, tw, th, 1000.0, 800.0);
+        let (x2, y2) = hover_tooltip_pos(20.0, 780.0, 40.0, 22.0, text, tw, th, 1000.0, 800.0);
         assert!(x2 >= PAD);
         assert!(y2 + th <= 780.0 + 0.5);
         assert!(y2 >= PAD);

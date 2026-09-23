@@ -1,7 +1,7 @@
 //! 窗口外拖拽转发、分隔条.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 impl ScoreSyncApp {
     pub(super) fn apply_side_resize(&mut self, mouse_x: f32, cx: &mut Context<Self>) {
@@ -20,7 +20,12 @@ impl ScoreSyncApp {
     }
 
     /// 鼠标离开窗口后需由 window.on_mouse_event 转发到此.
-    pub(super) fn handle_outside_window_mouse_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+    pub(super) fn handle_outside_window_mouse_move(
+        &mut self,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
         if self.dialog.is_some() {
             if matches!(self.drag, Some(DragKind::Scrollbar { .. })) {
                 self.apply_scrollbar_drag(x, y, cx);
@@ -41,7 +46,12 @@ impl ScoreSyncApp {
         self.apply_host_drag_at(x, y, cx);
     }
 
-    pub(super) fn handle_outside_window_mouse_up(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+    pub(super) fn handle_outside_window_mouse_up(
+        &mut self,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
         if self.dialog.is_some() {
             if matches!(self.drag, Some(DragKind::Scrollbar { .. })) {
                 self.drag = None;

@@ -131,6 +131,195 @@ fn size_key(w: f32, h: f32) -> (i32, i32) {
     ((w * 2.0).round() as i32, (h * 2.0).round() as i32)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PdfBox {
+    left: f32,
+    bottom: f32,
+    right: f32,
+    top: f32,
+}
+
+impl PdfBox {
+    fn from_rect(r: &PdfRect) -> Self {
+        Self {
+            left: r.left().value,
+            bottom: r.bottom().value,
+            right: r.right().value,
+            top: r.top().value,
+        }
+    }
+
+    fn from_quad(q: &PdfQuadPoints) -> Self {
+        Self {
+            left: q.left().value,
+            bottom: q.bottom().value,
+            right: q.right().value,
+            top: q.top().value,
+        }
+    }
+
+    fn width(self) -> f32 {
+        (self.right - self.left).max(0.0)
+    }
+
+    fn height(self) -> f32 {
+        (self.top - self.bottom).max(0.0)
+    }
+
+    fn area(self) -> f32 {
+        self.width() * self.height()
+    }
+
+    fn intersect(self, o: Self) -> Self {
+        Self {
+            left: self.left.max(o.left),
+            bottom: self.bottom.max(o.bottom),
+            right: self.right.min(o.right),
+            top: self.top.min(o.top),
+        }
+    }
+}
+
+fn display_box(page: &PdfPage<'_>) -> PdfBox {
+    PdfBox {
+        left: 0.0,
+        bottom: 0.0,
+        right: page.width().value.max(1.0),
+        top: page.height().value.max(1.0),
+    }
+}
+
+fn abs_box_origin(page: &PdfPage<'_>) -> (f32, f32) {
+    if let Ok(c) = page.boundaries().crop() {
+        let b = c.bounds;
+        if b.width().value > 1.0 && b.height().value > 1.0 {
+            return (b.left().value, b.bottom().value);
+        }
+    }
+    if let Ok(m) = page.boundaries().media() {
+        let b = m.bounds;
+        if b.width().value > 1.0 && b.height().value > 1.0 {
+            return (b.left().value, b.bottom().value);
+        }
+    }
+    (0.0, 0.0)
+}
+
+fn to_display(page: &PdfPage<'_>, abs: PdfBox) -> PdfBox {
+    let (ox, oy) = abs_box_origin(page);
+    display_box(page).intersect(PdfBox {
+        left: abs.left - ox,
+        bottom: abs.bottom - oy,
+        right: abs.right - ox,
+        top: abs.top - oy,
+    })
+}
+
+fn view_box_abs(page: &PdfPage<'_>) -> PdfBox {
+    if let Ok(c) = page.boundaries().crop() {
+        let b = PdfBox::from_rect(&c.bounds);
+        if b.width() > 1.0 && b.height() > 1.0 {
+            return b;
+        }
+    }
+    if let Ok(m) = page.boundaries().media() {
+        let b = PdfBox::from_rect(&m.bounds);
+        if b.width() > 1.0 && b.height() > 1.0 {
+            return b;
+        }
+    }
+    let d = display_box(page);
+    let (ox, oy) = abs_box_origin(page);
+    PdfBox {
+        left: d.left + ox,
+        bottom: d.bottom + oy,
+        right: d.right + ox,
+        top: d.top + oy,
+    }
+}
+
+fn largest_image_box(page: &PdfPage<'_>) -> Option<PdfBox> {
+    let mut best: Option<PdfBox> = None;
+    let mut best_area = 0.0f32;
+    for obj in page.objects().iter() {
+        if obj.as_image_object().is_none() {
+            continue;
+        }
+        let Ok(q) = obj.bounds() else {
+            continue;
+        };
+        let b = PdfBox::from_quad(&q);
+        let a = b.area();
+        if a > best_area {
+            best_area = a;
+            best = Some(b);
+        }
+    }
+    best
+}
+
+fn content_box(page: &PdfPage<'_>) -> PdfBox {
+    let display = display_box(page);
+    let mut vis = to_display(page, view_box_abs(page));
+    if vis.width() < 1.0 || vis.height() < 1.0 {
+        vis = display;
+    }
+    if let Some(img) = largest_image_box(page) {
+        let mapped = to_display(page, img);
+        let cover = mapped.area() / vis.area().max(1.0);
+        if cover >= 0.40
+            && (mapped.height() < vis.height() * 0.98 || mapped.width() < vis.width() * 0.98)
+        {
+            vis = mapped;
+        }
+    }
+    if vis.width() < 1.0 || vis.height() < 1.0 {
+        display
+    } else {
+        vis
+    }
+}
+
+fn content_size(page: &PdfPage<'_>) -> (f32, f32) {
+    let b = content_box(page);
+    (b.width().max(1.0), b.height().max(1.0))
+}
+
+fn crop_px(img_w: u32, img_h: u32, src: PdfBox, vis: PdfBox) -> (u32, u32, u32, u32) {
+    let vis = vis.intersect(src);
+    let sw = src.width().max(1e-3);
+    let sh = src.height().max(1e-3);
+    let mut x0 = ((vis.left - src.left) / sw * img_w as f32).round() as i32;
+    let mut x1 = ((vis.right - src.left) / sw * img_w as f32).round() as i32;
+    let mut y0 = ((src.top - vis.top) / sh * img_h as f32).round() as i32;
+    let mut y1 = ((src.top - vis.bottom) / sh * img_h as f32).round() as i32;
+    let iw = img_w as i32;
+    let ih = img_h as i32;
+    x0 = x0.clamp(0, (iw - 1).max(0));
+    y0 = y0.clamp(0, (ih - 1).max(0));
+    x1 = x1.clamp(x0 + 1, iw.max(1));
+    y1 = y1.clamp(y0 + 1, ih.max(1));
+    (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
+}
+
+fn crop_rgb_display(rgb: image::RgbImage, page: &PdfPage<'_>) -> image::RgbImage {
+    let vis = content_box(page);
+    let src = display_box(page);
+    let (x, y, w, h) = crop_px(rgb.width(), rgb.height(), src, vis);
+    if x == 0 && y == 0 && w == rgb.width() && h == rgb.height() {
+        return rgb;
+    }
+    image::imageops::crop_imm(&rgb, x, y, w, h).to_image()
+}
+
+fn render_visible(page: &PdfPage<'_>, sx: f32, sy: f32) -> Result<image::RgbImage, PdfiumError> {
+    let cfg = PdfRenderConfig::new()
+        .scale_page_width_by_factor(sx.max(PDF_MIN_SCALE))
+        .scale_page_height_by_factor(sy.max(PDF_MIN_SCALE));
+    let rgb = page.render_with_config(&cfg)?.as_image().into_rgb8();
+    Ok(crop_rgb_display(rgb, page))
+}
+
 #[cfg(test)]
 fn format_page_ranges(pages: &[u32]) -> String {
     if pages.is_empty() {
@@ -209,26 +398,34 @@ pub fn parse_page_selection(input: &str, total: usize) -> Vec<u32> {
 }
 
 fn probe_page_image_px(page: &PdfPage<'_>) -> Option<(u32, u32)> {
-    let mut best: Option<(u32, u32)> = None;
+    let vis = view_box_abs(page);
+    let mut best: Option<(u32, u32, Option<PdfBox>)> = None;
     for obj in page.objects().iter() {
         let Some(img) = obj.as_image_object() else {
             continue;
         };
-        let Ok(bmp) = img.get_raw_bitmap() else {
-            continue;
+        let (w, h) = match (img.width(), img.height()) {
+            (Ok(w), Ok(h)) => (w.max(0) as u32, h.max(0) as u32),
+            _ => continue,
         };
-        let w = bmp.width().max(0) as u32;
-        let h = bmp.height().max(0) as u32;
         if w < 32 || h < 32 {
             continue;
         }
         let area = w.saturating_mul(h);
-        let better = best.map(|(bw, bh)| area > bw.saturating_mul(bh)).unwrap_or(true);
+        let better = best
+            .as_ref()
+            .map(|(bw, bh, _)| area > bw.saturating_mul(*bh))
+            .unwrap_or(true);
         if better {
-            best = Some((w, h));
+            let ib = obj.bounds().ok().map(|q| PdfBox::from_quad(&q));
+            best = Some((w, h, ib));
         }
     }
-    best
+    best.map(|(w, h, ib)| {
+        let src = ib.unwrap_or(vis);
+        let (_, _, cw, ch) = crop_px(w, h, src, vis);
+        (cw.max(1), ch.max(1))
+    })
 }
 
 /// 只读页尺寸 (不渲染). 同尺寸页并成一组, 并抽样探测页内图像像素.
@@ -276,6 +473,9 @@ pub fn inspect_pdf(pdf_path: &Path) -> Result<PdfInspect, crate::error::Error> {
         let idx = (first - 1) as u16;
         if let Ok(page) = document.pages().get(idx) {
             g.image_px = probe_page_image_px(&page);
+            let (w, h) = content_size(&page);
+            g.w_pt = w;
+            g.h_pt = h;
         }
     }
     buckets.sort_by(|a, b| b.1.page_count().cmp(&a.1.page_count()));
@@ -313,19 +513,11 @@ pub fn render_pdf_page_preview(
         .pages()
         .get((page_1based - 1) as u16)
         .map_err(|e| crate::error::Error::msg(format!("读取第 {page_1based} 页失败: {e}")))?;
-    let w_pt = page.width().value.max(1.0);
-    let h_pt = page.height().value.max(1.0);
+    let (w_pt, h_pt) = content_size(&page);
     let cap = max_side.max(64) as f32;
     let scale = (cap / w_pt).min(cap / h_pt).clamp(0.05, PDF_MAX_SCALE);
-    let cfg = PdfRenderConfig::new()
-        .scale_page_width_by_factor(scale)
-        .scale_page_height_by_factor(scale);
-    let image = page
-        .render_with_config(&cfg)
-        .map_err(|e| crate::error::Error::msg(format!("渲染第 {page_1based} 页失败: {e}")))?
-        .as_image()
-        .into_rgb8();
-    Ok(image)
+    render_visible(&page, scale, scale)
+        .map_err(|e| crate::error::Error::msg(format!("渲染第 {page_1based} 页失败: {e}")))
 }
 
 pub fn clamp_pdf_scale(scale: f32) -> f32 {
@@ -406,10 +598,8 @@ pub fn pdf_pages_to_tmp_images_streaming(
         .map_err(|e| crate::error::Error::PdfOpen(e.to_string()))?;
     crate::trace::log("pdf: 文档已打开");
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "crop_sheet_pdf_{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("crop_sheet_pdf_{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|e| crate::error::Error::msg(format!("创建 PDF 临时目录失败: {e}")))?;
     if let Ok(mut dirs) = PDF_TMP_DIRS.lock() {
@@ -451,20 +641,18 @@ pub fn pdf_pages_to_tmp_images_streaming(
             ));
             return Ok(done);
         }
-        crate::trace::log(&format!("pdf: 渲染 {}/{total} (原第 {} 页) …", done + 1, i + 1));
+        crate::trace::log(&format!(
+            "pdf: 渲染 {}/{total} (原第 {} 页) …",
+            done + 1,
+            i + 1
+        ));
         let page = document
             .pages()
             .get(i as u16)
             .map_err(|e| crate::error::Error::msg(format!("读取第 {} 页失败: {e}", i + 1)))?;
         let (sx, sy) = scale_for_page(scales, i);
-        let cfg = PdfRenderConfig::new()
-            .scale_page_width_by_factor(sx)
-            .scale_page_height_by_factor(sy);
-        let image = page
-            .render_with_config(&cfg)
-            .map_err(|e| crate::error::Error::msg(format!("渲染第 {} 页失败: {e}", i + 1)))?
-            .as_image()
-            .into_rgb8();
+        let image = render_visible(&page, sx, sy)
+            .map_err(|e| crate::error::Error::msg(format!("渲染第 {} 页失败: {e}", i + 1)))?;
         crate::trace::log(&format!(
             "pdf: 渲染 {}/{total} 完成 {}×{}, 写 PNG …",
             done + 1,
@@ -559,5 +747,26 @@ mod tests {
     #[test]
     fn parse_page_selection_reversed_range() {
         assert_eq!(parse_page_selection("7-3", 10), vec![3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn crop_px_drops_mediabox_bottom_margin() {
+        let src = PdfBox {
+            left: 0.0,
+            bottom: 0.0,
+            right: 595.276,
+            top: 841.89,
+        };
+        let vis = PdfBox {
+            left: 0.0,
+            bottom: 42.52,
+            right: 595.276,
+            top: 802.205,
+        };
+        let (x, y, w, h) = crop_px(3516, 4975, src, vis);
+        assert_eq!(x, 0);
+        assert_eq!(w, 3516);
+        assert!(y > 180 && y < 280, "top crop {y}");
+        assert!(h > 4300 && h < 4600, "visible height {h}");
     }
 }

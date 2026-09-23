@@ -1,7 +1,7 @@
 //! 页图窗口、蒙版/视频同步、面板切换.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 /// `sync_video_pool` 每个分片在主线程收集好、交给后台线程处理的一条素材.
 /// `job` 为 `None` 表示该组合当前没有可用成员片段
@@ -77,6 +77,7 @@ struct MaskPreviewMemberSnap {
     height: u32,
     image: Option<Arc<image::RgbImage>>,
     disk_path: PathBuf,
+    override_path: Option<PathBuf>,
 }
 
 struct MaskPreviewBuilt {
@@ -108,6 +109,11 @@ fn collect_mask_preview_members(
             if y1 < y0 {
                 return None;
             }
+            let override_path = if doc.has_region_edit(rid) {
+                Some(crate::model::DocState::region_edit_dir(rid).join("flat.png"))
+            } else {
+                None
+            };
             Some(MaskPreviewMemberSnap {
                 rid: rid.clone(),
                 page_idx: pi,
@@ -117,6 +123,7 @@ fn collect_mask_preview_members(
                 height: y1 - y0 + 1,
                 image: page.image.clone(),
                 disk_path: page.disk_path.clone(),
+                override_path,
             })
         })
         .collect()
@@ -141,9 +148,29 @@ fn build_mask_preview(
     display_max_side: u32,
 ) -> Result<MaskPreviewBuilt, String> {
     let mut loaded_pages = Vec::new();
-    let mut pieces = Vec::new();
+    let mut pieces: Vec<(String, image::RgbImage, Option<mask_tool::gui::PieceDisk>)> = Vec::new();
     let mut orig_sizes: Vec<(u32, u32)> = Vec::new();
     for m in members {
+        if let Some(path) = m.override_path.as_ref().filter(|p| p.is_file()) {
+            let rgb = crate::page_cache::load_rgb(path)?;
+            let (w, h) = rgb.dimensions();
+            let w = w.max(1);
+            let h = h.max(1);
+            orig_sizes.push((w, h));
+            pieces.push((
+                m.rid,
+                rgb,
+                Some(mask_tool::gui::PieceDisk {
+                    path: path.clone(),
+                    flat: true,
+                    page_w: w,
+                    page_h: h,
+                    band_y: 0,
+                    band_h: h,
+                }),
+            ));
+            continue;
+        }
         orig_sizes.push((m.img_w, m.height));
         let img = if let Some(existing) = m.image {
             existing
@@ -161,13 +188,24 @@ fn build_mask_preview(
             img.height().max(1),
         );
         let piece = crate::model::crop_band_fast(&img, py0, ph);
-        pieces.push((m.rid, piece));
+        pieces.push((
+            m.rid,
+            piece,
+            Some(mask_tool::gui::PieceDisk {
+                path: m.disk_path.clone(),
+                flat: false,
+                page_w: m.img_w.max(1),
+                page_h: m.img_h.max(1),
+                band_y: m.y0,
+                band_h: m.height.max(1),
+            }),
+        ));
     }
     if pieces.is_empty() {
         return Err("无法拼合该组合".into());
     }
     let mut stats = HashMap::new();
-    for (rid, img) in &pieces {
+    for (rid, img, _) in &pieces {
         stats.insert(
             rid.clone(),
             mask_tool::layout::compute_piece_stats(img, ink_threshold),
@@ -176,13 +214,9 @@ fn build_mask_preview(
     let heights: Vec<(String, u32)> = pieces
         .iter()
         .zip(orig_sizes.iter())
-        .map(|((rid, _), &(_, orig_h))| (rid.clone(), orig_h))
+        .map(|((rid, _, _), &(_, orig_h))| (rid.clone(), orig_h))
         .collect();
-    let sheet_w = orig_sizes
-        .iter()
-        .map(|(w, _)| *w)
-        .max()
-        .unwrap_or(1);
+    let sheet_w = orig_sizes.iter().map(|(w, _)| *w).max().unwrap_or(1);
     let sheet_h = mask_tool::layout::sheet_height(&heights, &layout);
     let (canvas_w, canvas_h, hoff, voff) = if bg_enabled && bg_src_w > 0 && bg_src_h > 0 {
         let frame = apply_bg::process::preview_frame(
@@ -201,7 +235,7 @@ fn build_mask_preview(
     let piece_ys: HashMap<String, Option<i32>> = pieces
         .iter()
         .zip(orig_sizes.iter())
-        .map(|((rid, img), &(_, orig_h))| {
+        .map(|((rid, img, _), &(_, orig_h))| {
             let y1 = img.height().saturating_sub(1) as i32;
             let a = mask_tool::staff::band_staff_anchor(img, 0, y1, ink_threshold);
             let a = a.map(|v| {
@@ -218,9 +252,16 @@ fn build_mask_preview(
     let tiles: Vec<mask_tool::gui::BlockTile> = pieces
         .iter()
         .zip(orig_sizes.iter())
-        .map(|((rid, img), &(orig_w, orig_h))| {
+        .map(|((rid, img, source), &(orig_w, orig_h))| {
             let st = stats.get(rid).copied().unwrap_or_default();
-            mask_tool::gui::BlockTile::from_piece_sized(rid.clone(), img, orig_w, orig_h, st)
+            mask_tool::gui::BlockTile::from_piece_sized(
+                rid.clone(),
+                img,
+                orig_w,
+                orig_h,
+                st,
+                source.clone(),
+            )
         })
         .collect();
     let bg_tile = if compute_bg_tile {
@@ -244,7 +285,7 @@ fn build_mask_preview(
     let piece_sizes: Vec<(String, u32, u32)> = pieces
         .iter()
         .zip(orig_sizes.iter())
-        .map(|((rid, _), &(orig_w, orig_h))| (rid.clone(), orig_w, orig_h))
+        .map(|((rid, _, _), &(orig_w, orig_h))| (rid.clone(), orig_w, orig_h))
         .collect();
     drop(pieces);
     Ok(MaskPreviewBuilt {
@@ -413,6 +454,10 @@ impl ScoreSyncApp {
         }
         let extra = self.mask_tool.update(cx, |m, _| m.take_gpu_drops());
         for img in extra {
+            let _ = window.drop_image(img);
+        }
+        let photo = self.photo_edit.update(cx, |p, _| p.take_gpu_drops());
+        for img in photo {
             let _ = window.drop_image(img);
         }
     }
@@ -652,7 +697,12 @@ impl ScoreSyncApp {
         }
         if jobs.is_empty() {
             // 当前页已在内存则刷新贴图
-            if self.doc.pages.get(center).and_then(|p| p.image.as_ref()).is_some()
+            if self
+                .doc
+                .pages
+                .get(center)
+                .and_then(|p| p.image.as_ref())
+                .is_some()
             {
                 if self.pending_redetect {
                     self.flush_pending_redetect(cx);
@@ -677,9 +727,9 @@ impl ScoreSyncApp {
                 if need_detect {
                     let r = crate::page_cache::load_rgb(&path);
                     let detect = match &r {
-                        Ok(img) => Some(crate::detect_cache::load_or_detect(
-                            img, &path, ink, margin,
-                        )),
+                        Ok(img) => {
+                            Some(crate::detect_cache::load_or_detect(img, &path, ink, margin))
+                        }
                         Err(_) => crate::detect_cache::load(&path),
                     };
                     let display = r.map(|full| {
@@ -860,9 +910,7 @@ impl ScoreSyncApp {
             for (idx, path) in jobs {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
-                        let file = crate::detect_cache::detect_and_save(
-                            &img, &path, ink, margin,
-                        );
+                        let file = crate::detect_cache::detect_and_save(&img, &path, ink, margin);
                         let _ = tx.send_blocking((idx, file));
                     }
                     Err(e) => {
@@ -1218,7 +1266,11 @@ impl ScoreSyncApp {
     /// - 撤销/重做直接回滚 `voff_target` (随 `UndoSnapshot` 一起, 不额外
     ///   处理), 这里对同一个 `voff_target` 结合*当时*的布局重新精确反算
     ///   出的 `group_voff_shift` 与原来完全一致, 不会残留误差.
-    fn resolve_group_voff_shift(&self, layout: &[mask_tool::layout::BlockAdjust], voff_target: i64) -> i64 {
+    fn resolve_group_voff_shift(
+        &self,
+        layout: &[mask_tool::layout::BlockAdjust],
+        voff_target: i64,
+    ) -> i64 {
         if !self.doc.bg_enabled {
             return 0;
         }
@@ -1233,7 +1285,12 @@ impl ScoreSyncApp {
             .iter()
             .map(|(rid, _, h)| (rid.clone(), *h))
             .collect();
-        let sw = self.block_piece_sizes.iter().map(|(_, w, _)| *w).max().unwrap_or(1);
+        let sw = self
+            .block_piece_sizes
+            .iter()
+            .map(|(_, w, _)| *w)
+            .max()
+            .unwrap_or(1);
         let sh = mask_tool::layout::sheet_height(&heights, layout);
         let natural = apply_bg::process::natural_voff(
             sw,
@@ -1351,15 +1408,16 @@ impl ScoreSyncApp {
         let Some(gid) = self.mask_target.clone() else {
             return;
         };
-        let (masks, prefs, block_layout, voff_target, guides) = self.mask_tool.update(cx, |m, _| {
-            (
-                m.masks_clone(),
-                m.color_prefs(),
-                m.block_layout_clone(),
-                m.voff_target(),
-                m.guides_clone(),
-            )
-        });
+        let (masks, prefs, block_layout, voff_target, guides) =
+            self.mask_tool.update(cx, |m, _| {
+                (
+                    m.masks_clone(),
+                    m.color_prefs(),
+                    m.block_layout_clone(),
+                    m.voff_target(),
+                    m.guides_clone(),
+                )
+            });
         let (hoff, voff) = (self.mask_preview_hoff, self.mask_preview_voff);
         let masks: Vec<MaskRect> = masks
             .into_iter()
@@ -1443,11 +1501,9 @@ impl ScoreSyncApp {
                 return;
             };
             this.update(cx, |view, cx| {
-                view.mask_tool.update(cx, |m, cx| {
-                    match result {
-                        Ok(p) => m.set_status_text(format!("已保存: {}", p.display()), cx),
-                        Err(e) => m.set_status_text(e, cx),
-                    }
+                view.mask_tool.update(cx, |m, cx| match result {
+                    Ok(p) => m.set_status_text(format!("已保存: {}", p.display()), cx),
+                    Err(e) => m.set_status_text(e, cx),
                 });
             })
             .ok();
@@ -1456,7 +1512,12 @@ impl ScoreSyncApp {
     }
 
     /// `scroll_other`: 点顶部页签时滚侧栏列表定位; 点侧栏自身则两边都不滚.
-    pub(super) fn set_mask_target(&mut self, group_id: String, scroll_other: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_mask_target(
+        &mut self,
+        group_id: String,
+        scroll_other: bool,
+        cx: &mut Context<Self>,
+    ) {
         let ix = self.doc.groups.iter().position(|g| g.id == group_id);
         if self.mask_target.as_ref() != Some(&group_id) {
             self.flush_mask_to_doc(cx);
@@ -1474,7 +1535,21 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
-    pub(super) fn set_side_tool(&mut self, tool: SideTool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_side_tool(
+        &mut self,
+        tool: SideTool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.photo_open() {
+            let next = if tool == SideTool::Mask {
+                None
+            } else {
+                Some(tool)
+            };
+            self.request_leave_photo(next, window, cx);
+            return;
+        }
         if self.side_tool == tool {
             return;
         }
@@ -1508,7 +1583,8 @@ impl ScoreSyncApp {
             self.drop_bg_full_pixels();
         }
         if leaving_video {
-            self.score_video.update(cx, |v, _| v.drop_preview_textures());
+            self.score_video
+                .update(cx, |v, _| v.drop_preview_textures());
         }
         match tool {
             SideTool::Crop => {
@@ -1531,12 +1607,11 @@ impl ScoreSyncApp {
                 self.scroll_mask_lists_to_active();
                 self.mask_tool.read(cx).focus_handle_ref().focus(window);
                 self.status = "蒙版工具".into();
-                self.hint =
-                    format!(
-                        "蒙版编辑当前组合的拼合图. 标签切换组合; {}A 全选蒙版.",
-                        apply_bg::primary_mod()
-                    )
-                    .into();
+                self.hint = format!(
+                    "蒙版编辑当前组合的拼合图. 标签切换组合; {}A 全选蒙版.",
+                    apply_bg::primary_mod()
+                )
+                .into();
             }
             SideTool::Project => {
                 self.mask_tool.update(cx, |m, _| m.set_preview_only(true));
@@ -1546,8 +1621,7 @@ impl ScoreSyncApp {
                 self.scroll_mask_lists_to_active();
                 self.focus_handle.focus(window);
                 self.status = "底色".into();
-                self.hint =
-                    "左侧预览组合 (滚轮切换). 右侧选择底色图或纯色, 再应用/取消.".into();
+                self.hint = "左侧预览组合 (滚轮切换). 右侧选择底色图或纯色, 再应用/取消.".into();
             }
             SideTool::Video => {
                 self.score_video
@@ -1578,9 +1652,10 @@ impl ScoreSyncApp {
         let gen = self.video_sync_gen;
         let group_ids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
         let (aw, ah) = (self.doc.bg_aspect_w, self.doc.bg_aspect_h);
-        let fade_bg = self.doc.bg_solid.unwrap_or_else(|| {
-            sample_paper_rgb(self.doc.bg_image.as_deref())
-        });
+        let fade_bg = self
+            .doc
+            .bg_solid
+            .unwrap_or_else(|| sample_paper_rgb(self.doc.bg_image.as_deref()));
         self.score_video.update(cx, |v, _| {
             v.set_aspect(aw, ah);
             v.set_fade_bg_rgb(fade_bg);
@@ -1594,10 +1669,7 @@ impl ScoreSyncApp {
         }
         let cache_root = self.pool_cache_dir().join("pool");
         let _ = std::fs::create_dir_all(&cache_root);
-        crate::page_cache::prune_pool_cache(
-            &cache_root,
-            &group_ids.iter().cloned().collect(),
-        );
+        crate::page_cache::prune_pool_cache(&cache_root, &group_ids.iter().cloned().collect());
         let all_dirty = self.video_pool_all_dirty;
         let dirty_set = self.video_pool_dirty.clone();
 
@@ -1656,18 +1728,9 @@ impl ScoreSyncApp {
                 .first()
                 .map(|p| p.estimated_full_bytes())
                 .unwrap_or(64 * 1024 * 1024);
-            let max_sw = self
-                .doc
-                .pages
-                .iter()
-                .map(|p| p.width())
-                .max()
-                .unwrap_or(1);
-            let (pw, ph) = apply_bg::process::page_size(
-                max_sw,
-                self.doc.bg_aspect_w,
-                self.doc.bg_aspect_h,
-            );
+            let max_sw = self.doc.pages.iter().map(|p| p.width()).max().unwrap_or(1);
+            let (pw, ph) =
+                apply_bg::process::page_size(max_sw, self.doc.bg_aspect_w, self.doc.bg_aspect_h);
             let bg_page = pw as u64 * ph as u64 * 3;
             page.saturating_mul(2).saturating_add(bg_page)
         };
@@ -1736,7 +1799,8 @@ impl ScoreSyncApp {
                                     if crate::page_cache::save_rgb_png_fast(&rgb, &cache_path)
                                         .is_ok()
                                     {
-                                        let prev = crate::page_cache::pool_preview_jpeg(&cache_path);
+                                        let prev =
+                                            crate::page_cache::pool_preview_jpeg(&cache_path);
                                         let _ = crate::page_cache::save_rgb_preview_jpeg(
                                             &rgb, &prev, 2048,
                                         );
@@ -1765,9 +1829,7 @@ impl ScoreSyncApp {
                                 }
                             }
                         } else {
-                            crate::trace::log(&format!(
-                                "video_pool: {gid} 无成员片段, 跳过渲染"
-                            ));
+                            crate::trace::log(&format!("video_pool: {gid} 无成员片段, 跳过渲染"));
                         }
                         if item.is_none() {
                             if let Ok((w, h)) = image::image_dimensions(&cache_path) {
@@ -1942,7 +2004,10 @@ mod layout_diff_tests {
     fn live_layout_differs_from_empty() {
         assert!(block_layout_effectively_differs(&[adj("a", 4)], &[]));
         assert!(block_layout_effectively_differs(&[], &[adj("a", 4)]));
-        assert!(block_layout_effectively_differs(&[adj("a", 4)], &[adj("a", 5)]));
+        assert!(block_layout_effectively_differs(
+            &[adj("a", 4)],
+            &[adj("a", 5)]
+        ));
     }
 }
 
@@ -1970,7 +2035,9 @@ mod mask_preview_wait_probe {
 
     fn zip_bytes(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Vec<u8> {
         let alt = name.replace('/', "\\");
-        let idx = archive.index_for_name(name).or_else(|| archive.index_for_name(&alt));
+        let idx = archive
+            .index_for_name(name)
+            .or_else(|| archive.index_for_name(&alt));
         let idx = idx.unwrap_or_else(|| panic!("zip 里没有 {name}"));
         let mut zf = archive.by_index(idx).expect("zip by_index");
         let mut buf = Vec::new();
@@ -2084,10 +2151,7 @@ mod mask_preview_wait_probe {
         let page_png = zip_bytes(&mut zip, &page_entry.replace('\\', "/"));
         let bg_png = zip_bytes(&mut zip, "bg.png");
         drop(zip);
-        eprintln!(
-            "[probe] 打开 zip + 读 json/png 字节: {:.1} ms",
-            ms(t_open)
-        );
+        eprintln!("[probe] 打开 zip + 读 json/png 字节: {:.1} ms", ms(t_open));
         eprintln!(
             "[probe] 组合 {gid} 成员 {rid}  {page_entry}  y0={y0} h={height}  bg={bg_on}  {aspect_w}x{aspect_h}  voff_shift={voff_shift}"
         );
@@ -2096,13 +2160,19 @@ mod mask_preview_wait_probe {
         let page = decode_rgb(&page_png);
         step("PNG 解码页图", t0);
         let (pw, ph) = page.dimensions();
-        eprintln!("         页图 {pw}x{ph}  ({:.1} MB RGB)", (pw as u64 * ph as u64 * 3) as f64 / 1e6);
+        eprintln!(
+            "         页图 {pw}x{ph}  ({:.1} MB RGB)",
+            (pw as u64 * ph as u64 * 3) as f64 / 1e6
+        );
 
         let t0 = Instant::now();
         let bg = decode_rgb(&bg_png);
         step("PNG 解码底色", t0);
         let (bw, bh) = bg.dimensions();
-        eprintln!("         底色 {bw}x{bh}  ({:.1} MB RGB)", (bw as u64 * bh as u64 * 3) as f64 / 1e6);
+        eprintln!(
+            "         底色 {bw}x{bh}  ({:.1} MB RGB)",
+            (bw as u64 * bh as u64 * 3) as f64 / 1e6
+        );
 
         let t0 = Instant::now();
         let piece = crate::model::crop_band_fast(&page, y0, height);
@@ -2117,8 +2187,7 @@ mod mask_preview_wait_probe {
 
         let t0 = Instant::now();
         let mut pieces = vec![(rid.to_string(), piece)];
-        let sheet = crate::model::compose_parts_impl(&pieces, &[], ink, None)
-            .expect("compose");
+        let sheet = crate::model::compose_parts_impl(&pieces, &[], ink, None).expect("compose");
         step("compose_parts_impl (单块 clone)", t0);
 
         let frame = apply_bg::process::preview_frame(
@@ -2136,16 +2205,9 @@ mod mask_preview_wait_probe {
         );
 
         let t0 = Instant::now();
-        let (canvas, hoff, voff) = apply_bg::process::composite_preview(
-            &sheet,
-            &bg,
-            aspect_w,
-            aspect_h,
-            voff_shift,
-            0,
-            0,
-        )
-        .expect("composite");
+        let (canvas, hoff, voff) =
+            apply_bg::process::composite_preview(&sheet, &bg, aspect_w, aspect_h, voff_shift, 0, 0)
+                .expect("composite");
         step("composite_preview (含 content_scale 缩放)", t0);
         eprintln!(
             "         画布 {}x{}  hoff={hoff} voff={voff}",
@@ -2172,12 +2234,17 @@ mod mask_preview_wait_probe {
         eprintln!("         裁切 {}x{}", crop.width(), crop.height());
 
         let t0 = Instant::now();
-        let bg_tile = mask_tool::gui::BlockBgTile::from_full(&bg, aspect_w, aspect_h, sw)
-            .expect("from_full");
+        let bg_tile =
+            mask_tool::gui::BlockBgTile::from_full(&bg, aspect_w, aspect_h, sw).expect("from_full");
         black_box(&bg_tile);
         step("BlockBgTile::from_full (目标页裁切贴图)", t0);
         assert_eq!(
-            (bg_tile.width, bg_tile.height, bg_tile.src_width, bg_tile.src_height),
+            (
+                bg_tile.width,
+                bg_tile.height,
+                bg_tile.src_width,
+                bg_tile.src_height
+            ),
             (crop.width(), crop.height(), bw, bh)
         );
         let (btw, bth) = scaled_dims(bg_tile.width, bg_tile.height);
@@ -2228,6 +2295,7 @@ mod mask_preview_wait_probe {
             height,
             image: Some(Arc::new(page)),
             disk_path: PathBuf::from("unused"),
+            override_path: None,
         }];
         let bg_arc = Arc::new(bg);
         let t0 = Instant::now();
@@ -2299,9 +2367,5 @@ fn sample_paper_rgb(img: Option<&image::RgbImage>) -> [u8; 3] {
             n += 1;
         }
     }
-    [
-        (rs / n) as u8,
-        (gs / n) as u8,
-        (bs / n) as u8,
-    ]
+    [(rs / n) as u8, (gs / n) as u8, (bs / n) as u8]
 }

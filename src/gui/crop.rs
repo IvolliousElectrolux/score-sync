@@ -1,7 +1,7 @@
 //! 识别、加块、合并、删除、参数编辑.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 impl ScoreSyncApp {
     pub(super) fn fit_to_view(&mut self, cx: &mut Context<Self>) {
@@ -17,11 +17,7 @@ impl ScoreSyncApp {
 
     pub(super) fn run_detect(&mut self, cx: &mut Context<Self>) {
         if self.doc.current_page().is_none() {
-            self.show_error(
-                "提示",
-                crate::error::Error::msg("请先打开图片."),
-                cx,
-            );
+            self.show_error("提示", crate::error::Error::msg("请先打开图片."), cx);
             return;
         }
         if !self.current_page_pixels_ready() {
@@ -68,11 +64,7 @@ impl ScoreSyncApp {
 
     pub(super) fn run_detect_all(&mut self, cx: &mut Context<Self>) {
         if self.doc.pages.is_empty() {
-            self.show_error(
-                "提示",
-                crate::error::Error::msg("请先打开图片."),
-                cx,
-            );
+            self.show_error("提示", crate::error::Error::msg("请先打开图片."), cx);
             return;
         }
         self.push_crop_undo_all_pages();
@@ -95,10 +87,7 @@ impl ScoreSyncApp {
             for (idx, path) in jobs {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
-                        let file =
-                            crate::detect_cache::detect_and_save(
-                                &img, &path, ink, margin,
-                            );
+                        let file = crate::detect_cache::detect_and_save(&img, &path, ink, margin);
                         let _ = tx.send_blocking((idx, file));
                     }
                     Err(e) => {
@@ -172,7 +161,11 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
-    pub(super) fn add_block_preview_ys(anchor_y: i32, role: Option<AddAnchorRole>, cur_y: i32) -> (i32, i32) {
+    pub(super) fn add_block_preview_ys(
+        anchor_y: i32,
+        role: Option<AddAnchorRole>,
+        cur_y: i32,
+    ) -> (i32, i32) {
         match role {
             None => (anchor_y, anchor_y),
             Some(AddAnchorRole::Top) => (anchor_y, cur_y.max(anchor_y)),
@@ -231,8 +224,7 @@ impl ScoreSyncApp {
                 cx.notify();
             }
             Ok(n) => {
-                self.status =
-                    format!("已共享加入 {n} 块到当前组 (仍保留在其他组中).").into();
+                self.status = format!("已共享加入 {n} 块到当前组 (仍保留在其他组中).").into();
                 self.hint = self.status.clone();
                 self.after_doc_change(cx);
             }
@@ -294,7 +286,12 @@ impl ScoreSyncApp {
         self.hint = self.status.clone();
         self.after_doc_change(cx);
     }
-    pub(super) fn begin_edit_y(&mut self, rid: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn begin_edit_y(
+        &mut self,
+        rid: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.doc.find_region(&rid).is_none() {
             return;
         }

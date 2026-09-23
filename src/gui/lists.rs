@@ -19,8 +19,8 @@ pub struct TabInfo {
     pub active: bool,
 }
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 use crate::model::Group;
 
 impl ScoreSyncApp {
@@ -31,17 +31,15 @@ impl ScoreSyncApp {
     ) -> impl IntoElement {
         canvas(
             move |bounds, _, cx| {
-                entity.update(cx, |this, _| {
-                    match kind {
-                        "tab" => {
-                            this.tab_bounds.insert(key, bounds);
-                        }
-                        "group" => {
-                            this.group_bounds.insert(key, bounds);
-                        }
-                        _ => {
-                            this.member_bounds.insert(key, bounds);
-                        }
+                entity.update(cx, |this, _| match kind {
+                    "tab" => {
+                        this.tab_bounds.insert(key, bounds);
+                    }
+                    "group" => {
+                        this.group_bounds.insert(key, bounds);
+                    }
+                    _ => {
+                        this.member_bounds.insert(key, bounds);
                     }
                 });
             },
@@ -52,7 +50,11 @@ impl ScoreSyncApp {
         .size_full()
     }
 
-    pub(super) fn item_origin(bounds: Option<&Bounds<Pixels>>, mouse_x: f32, mouse_y: f32) -> (f32, f32) {
+    pub(super) fn item_origin(
+        bounds: Option<&Bounds<Pixels>>,
+        mouse_x: f32,
+        mouse_y: f32,
+    ) -> (f32, f32) {
         bounds
             .map(|b| (f32::from(b.origin.x), f32::from(b.origin.y)))
             .unwrap_or((mouse_x, mouse_y))
@@ -190,7 +192,12 @@ impl ScoreSyncApp {
         };
         let gid = g.id.clone();
         let spans = self.doc.group_member_spans(&gid);
-        let span_of = |rid: &str| spans.iter().find(|(id, ..)| id == rid).map(|(_, y0, y1)| (*y0, *y1));
+        let span_of = |rid: &str| {
+            spans
+                .iter()
+                .find(|(id, ..)| id == rid)
+                .map(|(_, y0, y1)| (*y0, *y1))
+        };
         g.region_ids
             .iter()
             .enumerate()
@@ -198,8 +205,18 @@ impl ScoreSyncApp {
                 let (pi, r) = self.doc.find_region(rid)?;
                 let h = (r.y1 - r.y0 + 1).max(0);
                 let (comp_y0, comp_y1) = span_of(rid).unwrap_or((0, 0));
+                let h = self
+                    .doc
+                    .region_edit_size(rid)
+                    .map(|(_, eh)| eh as i32)
+                    .unwrap_or(h);
+                let edited = if self.doc.has_region_edit(rid) {
+                    " 修"
+                } else {
+                    ""
+                };
                 let label = format!(
-                    "{}. P{} {}  h={h}  拼合 y={comp_y0}-{comp_y1}",
+                    "{}. P{} {}  h={h}{edited}  拼合 y={comp_y0}-{comp_y1}",
                     i + 1,
                     pi + 1,
                     r.kind,
@@ -335,11 +352,8 @@ impl ScoreSyncApp {
                         .map(|x| x + 1)
                         .unwrap_or(1);
                     let page_no = if top.0 == usize::MAX { 0 } else { top.0 + 1 };
-                    let text = format!(
-                        "{cross}{}. p{page_no}c{c} | [{}]",
-                        i + 1,
-                        labels.join(", ")
-                    );
+                    let text =
+                        format!("{cross}{}. p{page_no}c{c} | [{}]", i + 1, labels.join(", "));
                     Some(ListRow {
                         id: g.id.clone(),
                         label: text.into(),
@@ -501,7 +515,12 @@ impl ScoreSyncApp {
         }
     }
 
-    pub(super) fn apply_scrollbar_drag(&mut self, mouse_x: f32, mouse_y: f32, cx: &mut Context<Self>) {
+    pub(super) fn apply_scrollbar_drag(
+        &mut self,
+        mouse_x: f32,
+        mouse_y: f32,
+        cx: &mut Context<Self>,
+    ) {
         let Some(DragKind::Scrollbar {
             which,
             grab,
@@ -870,7 +889,8 @@ impl ScoreSyncApp {
                                         if this.region_y_edit.is_some() {
                                             this.apply_edit_y(window, cx);
                                         }
-                                        this.doc.click_region(&rid_sel, is_primary_mod(&ev.modifiers));
+                                        this.doc
+                                            .click_region(&rid_sel, is_primary_mod(&ev.modifiers));
                                         this.scroll_group_list_to_active();
                                         this.after_doc_change(cx);
                                     }),
@@ -939,14 +959,13 @@ impl ScoreSyncApp {
             );
         }
 
-        panel = panel
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("输出组合 (全部; 排序号全局; 拖拽调序)"),
-            );
+        panel = panel.child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("输出组合 (全部; 排序号全局; 拖拽调序)"),
+        );
 
         let mut glist = div()
             .id("group_list")
@@ -1019,8 +1038,7 @@ impl ScoreSyncApp {
                         cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                             let mx = f32::from(ev.position.x);
                             let my = f32::from(ev.position.y);
-                            let (ox, oy) =
-                                Self::item_origin(this.group_bounds.get(&idx), mx, my);
+                            let (ox, oy) = Self::item_origin(this.group_bounds.get(&idx), mx, my);
                             this.drag = Some(DragKind::GroupReorder {
                                 from: idx,
                                 line_at: None,
@@ -1106,12 +1124,12 @@ impl ScoreSyncApp {
                 .min_h(px(0.)),
             )
             .child(
-            div()
-                .flex_shrink_0()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("当前组合内成员 (拖拽调序; 可含多页)"),
-        );
+                div()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("当前组合内成员 (拖拽调序; 可含多页)"),
+            );
 
         let mut mlist = div()
             .id("member_list")
@@ -1170,8 +1188,7 @@ impl ScoreSyncApp {
                         cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                             let mx = f32::from(ev.position.x);
                             let my = f32::from(ev.position.y);
-                            let (ox, oy) =
-                                Self::item_origin(this.member_bounds.get(&idx), mx, my);
+                            let (ox, oy) = Self::item_origin(this.member_bounds.get(&idx), mx, my);
                             this.drag = Some(DragKind::MemberReorder {
                                 from: idx,
                                 to: idx,
@@ -1252,158 +1269,153 @@ impl ScoreSyncApp {
         let editing_margin = self.param_edit == Some(ParamEdit::Margin);
         let editing_thr = self.param_edit == Some(ParamEdit::Threshold);
         panel = panel.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .flex_shrink_0()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .child("边距px")
-                .child(
-                    div()
-                        .id("margin_dec")
-                        .px_2()
-                        .bg(rgb(0xe2e8f0))
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .child("-")
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                if this.param_edit.is_some() {
-                                    this.apply_param_edit(window, cx);
-                                }
-                                this.doc.margin = (this.doc.margin - 1).max(0);
-                                cx.notify();
-                            }),
-                        ),
-                )
-                .child(if editing_margin {
-                    div()
-                        .id("margin_edit")
-                        .w(px(56.))
-                        .h(px(24.))
-                        .flex_shrink_0()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, _, _, cx| {
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .child(param_input.clone())
-                        .into_any_element()
-                } else {
-                    div()
-                        .id("margin_val")
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .px_1()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
-                        .child(format!("{margin}"))
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.begin_param_edit(ParamEdit::Margin, window, cx);
-                            }),
-                        )
-                        .into_any_element()
-                })
-                .child(
-                    div()
-                        .id("margin_inc")
-                        .px_2()
-                        .bg(rgb(0xe2e8f0))
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .child("+")
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                if this.param_edit.is_some() {
-                                    this.apply_param_edit(window, cx);
-                                }
-                                this.doc.margin = (this.doc.margin + 1).min(80);
-                                cx.notify();
-                            }),
-                        ),
-                )
-                .child("墨迹阈值")
-                .child(
-                    div()
-                        .id("thr_dec")
-                        .px_2()
-                        .bg(rgb(0xe2e8f0))
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .child("-")
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                if this.param_edit.is_some() {
-                                    this.apply_param_edit(window, cx);
-                                }
-                                this.doc.ink_threshold = (this.doc.ink_threshold - 1).max(1);
-                                cx.notify();
-                            }),
-                        ),
-                )
-                .child(if editing_thr {
-                    div()
-                        .id("thr_edit")
-                        .w(px(56.))
-                        .h(px(24.))
-                        .flex_shrink_0()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, _, _, cx| {
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .child(param_input)
-                        .into_any_element()
-                } else {
-                    div()
-                        .id("thr_val")
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .px_1()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
-                        .child(format!("{thr}"))
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.begin_param_edit(ParamEdit::Threshold, window, cx);
-                            }),
-                        )
-                        .into_any_element()
-                })
-                .child(
-                    div()
-                        .id("thr_inc")
-                        .px_2()
-                        .bg(rgb(0xe2e8f0))
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .child("+")
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                if this.param_edit.is_some() {
-                                    this.apply_param_edit(window, cx);
-                                }
-                                this.doc.ink_threshold = (this.doc.ink_threshold + 1).min(254);
-                                cx.notify();
-                            }),
-                        ),
-                ),
+            div().flex().flex_col().gap_1().flex_shrink_0().child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .child("边距px")
+                    .child(
+                        div()
+                            .id("margin_dec")
+                            .px_2()
+                            .bg(rgb(0xe2e8f0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .child("-")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    if this.param_edit.is_some() {
+                                        this.apply_param_edit(window, cx);
+                                    }
+                                    this.doc.margin = (this.doc.margin - 1).max(0);
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(if editing_margin {
+                        div()
+                            .id("margin_edit")
+                            .w(px(56.))
+                            .h(px(24.))
+                            .flex_shrink_0()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(param_input.clone())
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id("margin_val")
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .px_1()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                            .child(format!("{margin}"))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.begin_param_edit(ParamEdit::Margin, window, cx);
+                                }),
+                            )
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .id("margin_inc")
+                            .px_2()
+                            .bg(rgb(0xe2e8f0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .child("+")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    if this.param_edit.is_some() {
+                                        this.apply_param_edit(window, cx);
+                                    }
+                                    this.doc.margin = (this.doc.margin + 1).min(80);
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child("墨迹阈值")
+                    .child(
+                        div()
+                            .id("thr_dec")
+                            .px_2()
+                            .bg(rgb(0xe2e8f0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .child("-")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    if this.param_edit.is_some() {
+                                        this.apply_param_edit(window, cx);
+                                    }
+                                    this.doc.ink_threshold = (this.doc.ink_threshold - 1).max(1);
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(if editing_thr {
+                        div()
+                            .id("thr_edit")
+                            .w(px(56.))
+                            .h(px(24.))
+                            .flex_shrink_0()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(param_input)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id("thr_val")
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .px_1()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                            .child(format!("{thr}"))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.begin_param_edit(ParamEdit::Threshold, window, cx);
+                                }),
+                            )
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .id("thr_inc")
+                            .px_2()
+                            .bg(rgb(0xe2e8f0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .child("+")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    if this.param_edit.is_some() {
+                                        this.apply_param_edit(window, cx);
+                                    }
+                                    this.doc.ink_threshold = (this.doc.ink_threshold + 1).min(254);
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
             ),
         );
         panel

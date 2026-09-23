@@ -9,18 +9,24 @@
 //! - `chrome` 工具栏与侧栏
 
 mod blocks;
+mod brush_sprite;
 mod canvas;
 mod chrome;
 mod guides;
 mod io;
+mod lod;
 mod picker;
 mod tools;
 mod types;
 
 pub(crate) use blocks::BlockHitZone;
-pub(crate) use types::*;
-pub use blocks::{rgb_to_render_image, rgb_to_render_image_capped, BlockBgTile, BlockTile};
+pub use blocks::{
+    rgb_to_render_image, rgb_to_render_image_capped, BlockBgTile, BlockTile, PieceDisk,
+};
+pub(crate) use brush_sprite::OverlayPaint;
 pub use guides::GuideHostCmd;
+pub(crate) use lod::PieceDetail;
+pub(crate) use types::*;
 
 fn gpu_tex_bytes(img: &RenderImage) -> u64 {
     let sz = img.size(0);
@@ -73,12 +79,12 @@ pub(crate) use smallvec::smallvec;
 pub(crate) use crate::color_prefs::{
     hsv_to_rgb, rgb_to_hsv, MaskColorPrefs, DEFAULT_BRUSH_OPACITY, RECENT_COLORS_MAX,
 };
+pub use crate::guide::GuideState;
 pub(crate) use crate::layout::BlockAdjust;
 pub(crate) use crate::mask::{
     default_export_path, export_masked, first_image_in_paths, is_image_path, new_id, MaskRect,
     DEFAULT_MASK_OPACITY,
 };
-pub use crate::guide::GuideState;
 
 actions!(
     mask_tool,
@@ -165,6 +171,8 @@ pub struct MaskToolApp {
     poly_cursor: Option<(f32, f32)>,
     /// 画笔圆形光标中心 (图像坐标); 仅 Brush 模式跟踪.
     brush_cursor: Option<(f32, f32)>,
+    /// 画笔显示缓存. 不进撤销栈; 点列仍是导出和命中的来源.
+    brush_sprites: HashMap<String, brush_sprite::BrushSprite>,
     /// 透明度拖动时是否已为「改选中项」压过撤销栈.
     opacity_undid: bool,
     drag: Option<DragKind>,
@@ -196,6 +204,12 @@ pub struct MaskToolApp {
     /// 不再每帧把整张预览图重新上传图集).
     pub(crate) block_tiles: Vec<BlockTile>,
     pub(crate) block_bg: Option<BlockBgTile>,
+    /// 放大超过缩略图密度后, 视口内的原图裁块.
+    view_detail: Vec<PieceDetail>,
+    detail_gen: u64,
+    detail_pending: Option<Vec<lod::LodNeed>>,
+    lod_cache: HashMap<PathBuf, Arc<image::RgbImage>>,
+    lod_cache_order: Vec<PathBuf>,
     /// 各块在原始页图条带上预计算的谱表锚点 (相对条带顶, `None` = 非谱表).
     /// 当前页对齐用这个, 不在缩放后的预览画布上重检.
     pub(crate) piece_staff_ys: HashMap<String, Option<i32>>,
@@ -263,7 +277,6 @@ pub struct MaskToolApp {
     pub(crate) pending_export_path: Option<PathBuf>,
 }
 
-
 impl MaskToolApp {
     pub fn new(cx: &mut Context<Self>, initial: Option<PathBuf>) -> Self {
         let rgb_r_input =
@@ -327,11 +340,12 @@ impl MaskToolApp {
             poly_draft: None,
             poly_cursor: None,
             brush_cursor: None,
+            brush_sprites: HashMap::new(),
             opacity_undid: false,
             drag: None,
             status: "就绪".into(),
             hint: format!(
-                "框选/折线与画笔各有独立颜色与透明度 (点色块打开选色盘).\n橡皮单击擦顶层, 拖动擦光. {}Z/Y 撤重.",
+                "框选/套索与画笔各有独立颜色与透明度 (点色块打开选色盘).\n橡皮单击擦顶层, 拖动擦光. {}Z/Y 撤重.",
                 apply_bg::primary_mod()
             )
             .into(),
@@ -347,6 +361,11 @@ impl MaskToolApp {
             block_shows_bg: false,
             content_scale: 1.0,
             block_tiles: Vec::new(),
+            view_detail: Vec::new(),
+            detail_gen: 0,
+            detail_pending: None,
+            lod_cache: HashMap::new(),
+            lod_cache_order: Vec::new(),
             block_bg: None,
             piece_staff_ys: HashMap::new(),
             voff_target: 0,
@@ -388,6 +407,15 @@ impl MaskToolApp {
         &self.focus_handle
     }
 
+    /// Shift 决定分块是左右拖还是上下拖. 修饰键事件不带鼠标移动, 这里直接换光标.
+    pub fn note_shift(&mut self, shift: bool, cx: &mut Context<Self>) {
+        if self.last_shift == shift {
+            return;
+        }
+        self.last_shift = shift;
+        cx.notify();
+    }
+
     pub(crate) fn retire_gpu_image(&mut self, img: Option<Arc<RenderImage>>) {
         if let Some(img) = img {
             self.gpu_drop.push(img);
@@ -417,6 +445,15 @@ impl MaskToolApp {
             let (w, h) = t.thumb.dimensions();
             mem.tiles_rgb += w as u64 * h as u64 * 3;
             mem.tiles_gpu += w as u64 * h as u64 * 4;
+        }
+        for d in &self.view_detail {
+            mem.tiles_gpu += gpu_tex_bytes(&d.tex);
+        }
+        for sprite in self.brush_sprites.values() {
+            mem.tiles_gpu += sprite.gpu_bytes();
+        }
+        for img in self.lod_cache.values() {
+            mem.tiles_rgb += img.width() as u64 * img.height() as u64 * 3;
         }
         if let Some(bg) = self.block_bg.as_ref() {
             let (w, h) = bg.thumb.dimensions();
@@ -488,6 +525,10 @@ impl MaskToolApp {
 
     pub fn take_export_path(&mut self) -> Option<PathBuf> {
         self.pending_export_path.take()
+    }
+
+    pub fn selected_masks_empty(&self) -> bool {
+        self.selected.is_empty()
     }
 
     pub fn set_status_text(&mut self, s: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -568,9 +609,7 @@ impl Render for MaskToolApp {
         let title: SharedString = match &self.image_path {
             Some(p) => format!(
                 "蒙版遮盖 — {}",
-                p.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("image")
+                p.file_name().and_then(|s| s.to_str()).unwrap_or("image")
             )
             .into(),
             None => "蒙版遮盖 / Mask Overlay".into(),
@@ -581,28 +620,18 @@ impl Render for MaskToolApp {
             .key_context("MaskTool")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
-            .on_action(cx.listener(|this, _: &ExportImage, window, cx| {
-                this.export_image(window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &ExportImage, window, cx| this.export_image(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &FitView, _, cx| this.fit_to_view(cx)))
-            .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
-                this.delete_selected(cx)
-            }))
+            .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| this.delete_selected(cx)))
             .on_action(cx.listener(|this, _: &ClearMasks, _, cx| this.clear_masks(cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all_masks(cx)))
-            .on_action(cx.listener(|this, _: &ToggleDrawMode, _, cx| {
-                this.toggle_draw_mode(cx)
-            }))
+            .on_action(cx.listener(|this, _: &ToggleDrawMode, _, cx| this.toggle_draw_mode(cx)))
             .on_action(cx.listener(|this, _: &TogglePanMode, _, cx| this.toggle_pan_mode(cx)))
-            .on_action(cx.listener(|this, _: &ToggleBrushMode, _, cx| {
-                this.toggle_brush_mode(cx)
-            }))
-            .on_action(cx.listener(|this, _: &TogglePolyMode, _, cx| {
-                this.toggle_poly_mode(cx)
-            }))
-            .on_action(cx.listener(|this, _: &CancelPolyDraft, _, cx| {
-                this.cancel_poly_draft(cx)
-            }))
+            .on_action(cx.listener(|this, _: &ToggleBrushMode, _, cx| this.toggle_brush_mode(cx)))
+            .on_action(cx.listener(|this, _: &TogglePolyMode, _, cx| this.toggle_poly_mode(cx)))
+            .on_action(cx.listener(|this, _: &CancelPolyDraft, _, cx| this.cancel_poly_draft(cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -610,6 +639,11 @@ impl Render for MaskToolApp {
                     this.load_image(p, cx);
                 }
             }))
+            .on_modifiers_changed(
+                cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _, cx| {
+                    this.note_shift(ev.modifiers.shift, cx);
+                }),
+            )
             .relative()
             .flex()
             .flex_col()

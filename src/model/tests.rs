@@ -87,19 +87,12 @@ fn add_manual_block_stays_on_its_page_between_neighbors() {
     doc.add_manual_block(55, 60);
     assert_eq!(
         group_y0s(&doc),
-        vec![
-            (0, 10),
-            (0, 40),
-            (0, 55),
-            (0, 70),
-            (1, 10),
-            (1, 40)
-        ]
+        vec![(0, 10), (0, 40), (0, 55), (0, 70), (1, 10), (1, 40)]
     );
 }
 
 fn group_rids(doc: &DocState) -> Vec<Vec<String>> {
-    let mut gs: Vec<( (usize, i32, i32), Vec<String> )> = doc
+    let mut gs: Vec<((usize, i32, i32), Vec<String>)> = doc
         .groups
         .iter()
         .map(|g| {
@@ -156,7 +149,11 @@ fn pair_ungrouped_pairs_current_page_and_spills_odd_to_next() {
     );
 }
 
-fn replace_page_regions(doc: &mut DocState, page_idx: usize, bands: &[(i32, i32)]) -> HashSet<String> {
+fn replace_page_regions(
+    doc: &mut DocState,
+    page_idx: usize,
+    bands: &[(i32, i32)],
+) -> HashSet<String> {
     let old_ids: HashSet<String> = doc.pages[page_idx].regions.keys().cloned().collect();
     let page_id = doc.pages[page_idx].id.clone();
     doc.pages[page_idx].regions.clear();
@@ -185,10 +182,17 @@ fn upsert_page_groups_drops_stale_rids_from_redetect() {
     seed_bands(&mut doc, 0, &[(10, 20), (40, 50), (70, 80)]);
     let old_ids = replace_page_regions(&mut doc, 0, &[(12, 22), (42, 52)]);
     doc.upsert_page_groups(0, &old_ids);
-    let rids: Vec<String> = doc.groups.iter().flat_map(|g| g.region_ids.clone()).collect();
+    let rids: Vec<String> = doc
+        .groups
+        .iter()
+        .flat_map(|g| g.region_ids.clone())
+        .collect();
     assert_eq!(doc.groups.len(), 2);
     assert!(rids.iter().all(|id| id.starts_with("n0-")));
-    assert!(doc.groups.iter().all(|g| doc.group_top_key(g).0 != usize::MAX));
+    assert!(doc
+        .groups
+        .iter()
+        .all(|g| doc.group_top_key(g).0 != usize::MAX));
 }
 
 #[test]
@@ -198,9 +202,8 @@ fn upsert_page_groups_keeps_other_page_and_strips_cross_page_old_rids() {
     doc.pages.push(stub_page(400));
     seed_bands(&mut doc, 0, &[(10, 20), (40, 50)]);
     seed_bands(&mut doc, 1, &[(10, 20), (40, 50)]);
-    doc.groups.retain(|g| {
-        g.region_ids != ["r0-1".to_string()] && g.region_ids != ["r1-0".to_string()]
-    });
+    doc.groups
+        .retain(|g| g.region_ids != ["r0-1".to_string()] && g.region_ids != ["r1-0".to_string()]);
     doc.groups.push(Group {
         id: "cross".into(),
         region_ids: vec!["r0-1".into(), "r1-0".into()],
@@ -208,13 +211,18 @@ fn upsert_page_groups_keeps_other_page_and_strips_cross_page_old_rids() {
     });
     let old_ids = replace_page_regions(&mut doc, 0, &[(12, 22), (42, 52)]);
     doc.upsert_page_groups(0, &old_ids);
-    assert!(
-        doc.groups
-            .iter()
-            .all(|g| g.region_ids.iter().all(|id| doc.find_region(id).is_some()))
-    );
-    assert!(doc.groups.iter().any(|g| g.region_ids == ["r1-0".to_string()]));
-    assert!(doc.groups.iter().any(|g| g.region_ids == ["r1-1".to_string()]));
+    assert!(doc
+        .groups
+        .iter()
+        .all(|g| g.region_ids.iter().all(|id| doc.find_region(id).is_some())));
+    assert!(doc
+        .groups
+        .iter()
+        .any(|g| g.region_ids == ["r1-0".to_string()]));
+    assert!(doc
+        .groups
+        .iter()
+        .any(|g| g.region_ids == ["r1-1".to_string()]));
     assert_eq!(
         doc.groups
             .iter()
@@ -452,7 +460,10 @@ fn move_pages_block_inserts_after_anchor() {
     doc.current_page_index = 2;
     let cur_id = doc.pages[2].id.clone();
     doc.move_pages_block(&[1, 2, 3], 5, true);
-    assert_eq!(page_names(&doc), vec!["0.png", "4.png", "5.png", "1.png", "2.png", "3.png"]);
+    assert_eq!(
+        page_names(&doc),
+        vec!["0.png", "4.png", "5.png", "1.png", "2.png", "3.png"]
+    );
     assert_eq!(doc.pages.iter().position(|p| p.id == cur_id), Some(4));
 }
 
@@ -463,7 +474,10 @@ fn move_pages_block_inserts_before_anchor() {
         doc.pages.push(named_stub(&format!("{i}.png")));
     }
     doc.move_pages_block(&[3, 4], 0, false);
-    assert_eq!(page_names(&doc), vec!["3.png", "4.png", "0.png", "1.png", "2.png"]);
+    assert_eq!(
+        page_names(&doc),
+        vec!["3.png", "4.png", "0.png", "1.png", "2.png"]
+    );
     assert_eq!(doc.current_page_index, 2);
 }
 
@@ -479,14 +493,20 @@ fn close_pages_at_prefers_next_then_prev() {
     let dead = doc.close_pages_at(&[2, 3]);
     assert_eq!(dead.len(), 2);
     assert_eq!(page_names(&doc), vec!["0.png", "1.png", "4.png", "5.png"]);
-    assert_eq!(doc.pages[doc.current_page_index].path.file_name().unwrap(), "4.png");
+    assert_eq!(
+        doc.pages[doc.current_page_index].path.file_name().unwrap(),
+        "4.png"
+    );
     assert_eq!(doc.groups.len(), 1);
 
     doc.current_page_index = 3;
     let dead = doc.close_pages_at(&[3]);
     assert_eq!(dead.len(), 1);
     assert_eq!(page_names(&doc), vec!["0.png", "1.png", "4.png"]);
-    assert_eq!(doc.pages[doc.current_page_index].path.file_name().unwrap(), "4.png");
+    assert_eq!(
+        doc.pages[doc.current_page_index].path.file_name().unwrap(),
+        "4.png"
+    );
 }
 
 #[test]
@@ -515,7 +535,12 @@ fn global_guides_switch_uses_precomputed_defaults_and_can_turn_off() {
     assert_eq!(g.lines.len(), 1);
     let h = doc.group_preview_frame(&gid).unwrap().canvas_h as i32;
     let mid = h / 2;
-    assert!(g.lines[0] > mid, "单根应略低于画布中线: y={} mid={}", g.lines[0], mid);
+    assert!(
+        g.lines[0] > mid,
+        "单根应略低于画布中线: y={} mid={}",
+        g.lines[0],
+        mid
+    );
     doc.apply_guides_global_off();
     assert!(!doc.guides_global);
     assert!(doc.get_group_guides(&gid).lines.is_empty());
@@ -559,7 +584,11 @@ fn render_final_mask_stays_on_scaled_stain() {
         name: String::new(),
     });
     doc.bg_enabled = true;
-    doc.bg_image = Some(Arc::new(image::RgbImage::from_pixel(800, 800, image::Rgb([10, 20, 30]))));
+    doc.bg_image = Some(Arc::new(image::RgbImage::from_pixel(
+        800,
+        800,
+        image::Rgb([10, 20, 30]),
+    )));
 
     let frame = doc.group_preview_frame("g1").unwrap();
     assert!(frame.content_scale < 1.0);
@@ -601,4 +630,132 @@ fn render_final_mask_stays_on_scaled_stain() {
             "旧偏移位置不该被蒙上, 得到 {ghost:?} at ({ghost_x},{ghost_y})"
         );
     }
+}
+
+#[test]
+fn remap_masks_shifts_only_below_block() {
+    let mut masks = vec![
+        MaskRect {
+            id: "a".into(),
+            x0: 0,
+            y0: 10,
+            x1: 4,
+            y1: 20,
+            brush_points: vec![],
+            brush_radius: 0,
+            color: [255, 255, 255],
+            poly_points: vec![],
+            opacity: 1.0,
+            bound_block: None,
+        },
+        MaskRect {
+            id: "b".into(),
+            x0: 0,
+            y0: 80,
+            x1: 4,
+            y1: 90,
+            brush_points: vec![],
+            brush_radius: 0,
+            color: [255, 255, 255],
+            poly_points: vec![],
+            opacity: 1.0,
+            bound_block: None,
+        },
+    ];
+    super::remap_masks_after_height_change(&mut masks, 0, 50, 20);
+    assert_eq!(masks[0].y0, 10);
+    assert_eq!(masks[1].y0, 50);
+}
+
+#[test]
+fn group_heights_use_region_edit() {
+    let mut doc = DocState::new();
+    let mut page = stub_page(100);
+    page.regions.insert(
+        "r0".into(),
+        Region {
+            id: "r0".into(),
+            page_id: page.id.clone(),
+            y0: 0,
+            y1: 79,
+            kind: "gap".into(),
+            color: "#e74c3c".into(),
+        },
+    );
+    doc.pages.push(page);
+    doc.groups.push(Group {
+        id: "g0".into(),
+        region_ids: vec!["r0".into()],
+        name: String::new(),
+    });
+    doc.rebuild_rid_index();
+    assert_eq!(doc.group_member_heights("g0")[0].1, 80);
+    doc.region_edits.insert(
+        "r0".into(),
+        RegionEditMeta {
+            canvas_w: 40,
+            canvas_h: 22,
+            paper_rgb: [250, 250, 250],
+            source: None,
+        },
+    );
+    assert_eq!(doc.group_member_heights("g0")[0].1, 22);
+    assert_eq!(doc.group_sheet_width("g0"), 80);
+}
+
+#[test]
+fn shared_footnote_edit_height_applies_to_all_groups() {
+    let mut doc = DocState::new();
+    let mut page = stub_page(100);
+    page.regions.insert(
+        "note".into(),
+        Region {
+            id: "note".into(),
+            page_id: page.id.clone(),
+            y0: 0,
+            y1: 59,
+            kind: "gap".into(),
+            color: "#e74c3c".into(),
+        },
+    );
+    page.regions.insert(
+        "staff".into(),
+        Region {
+            id: "staff".into(),
+            page_id: page.id.clone(),
+            y0: 60,
+            y1: 79,
+            kind: "staff".into(),
+            color: "#3498db".into(),
+        },
+    );
+    doc.pages.push(page);
+    doc.groups.push(Group {
+        id: "g1".into(),
+        region_ids: vec!["staff".into(), "note".into()],
+        name: String::new(),
+    });
+    doc.groups.push(Group {
+        id: "g2".into(),
+        region_ids: vec!["note".into()],
+        name: String::new(),
+    });
+    doc.rebuild_rid_index();
+    doc.region_edits.insert(
+        "note".into(),
+        RegionEditMeta {
+            canvas_w: 80,
+            canvas_h: 18,
+            paper_rgb: [250, 250, 250],
+            source: None,
+        },
+    );
+    assert_eq!(
+        doc.group_member_heights("g1")
+            .into_iter()
+            .find(|(id, _)| id == "note")
+            .map(|(_, h)| h),
+        Some(18)
+    );
+    assert_eq!(doc.group_member_heights("g2")[0].1, 18);
 }

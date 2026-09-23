@@ -1,7 +1,7 @@
 //! 「组织页面」弹窗: Adobe 风格缩略图网格, 多选拖动排序.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 use image::{Frame, ImageBuffer, RgbaImage};
 use smallvec::smallvec;
 use std::sync::atomic::AtomicUsize;
@@ -93,7 +93,9 @@ impl ScoreSyncApp {
         }
         if matches!(
             self.dialog,
-            Some(DialogKind::UnsavedExit | DialogKind::UnsavedNew)
+            Some(
+                DialogKind::UnsavedExit | DialogKind::UnsavedNew | DialogKind::UnsavedPhoto { .. }
+            )
         ) {
             return;
         }
@@ -133,7 +135,13 @@ impl ScoreSyncApp {
     pub(super) fn close_page_organize(&mut self, cx: &mut Context<Self>) {
         self.page_organize = None;
         self.clear_org_thumbs();
-        if matches!(self.drag, Some(DragKind::Scrollbar { which: ScrollList::PageOrganize, .. })) {
+        if matches!(
+            self.drag,
+            Some(DragKind::Scrollbar {
+                which: ScrollList::PageOrganize,
+                ..
+            })
+        ) {
             self.drag = None;
         }
         self.try_show_update_dialog(cx);
@@ -186,11 +194,7 @@ impl ScoreSyncApp {
                 st.selected.remove(id);
             }
         }
-        self.status = format!(
-            "已删除 {n} 页 ({}Z 可撤回).",
-            apply_bg::primary_mod()
-        )
-        .into();
+        self.status = format!("已删除 {n} 页 ({}Z 可撤回).", apply_bg::primary_mod()).into();
         self.hint = self.status.clone();
         self.sync_organize_after_doc(cx);
         self.refresh_render(cx);
@@ -251,9 +255,19 @@ impl ScoreSyncApp {
 
     pub(super) fn request_organize_thumbs(&mut self, cx: &mut Context<Self>) {
         enum OrgThumbJob {
-            Jpeg { id: String, jpeg: PathBuf },
-            Mem { id: String, rgb: Arc<image::RgbImage>, disk: PathBuf },
-            Png { id: String, png: PathBuf },
+            Jpeg {
+                id: String,
+                jpeg: PathBuf,
+            },
+            Mem {
+                id: String,
+                rgb: Arc<image::RgbImage>,
+                disk: PathBuf,
+            },
+            Png {
+                id: String,
+                png: PathBuf,
+            },
         }
         let jobs: Vec<OrgThumbJob> = self
             .doc
@@ -306,36 +320,30 @@ impl ScoreSyncApp {
             let jobs = jobs.clone();
             let next = next.clone();
             let tx = tx.clone();
-            std::thread::spawn(move || {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= jobs.len() {
-                        break;
+            std::thread::spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= jobs.len() {
+                    break;
+                }
+                let rendered = match &jobs[i] {
+                    OrgThumbJob::Jpeg { id, jpeg } => crate::page_cache::load_rgb(jpeg)
+                        .ok()
+                        .map(|rgb| (id.clone(), rgb_to_render_image(&rgb))),
+                    OrgThumbJob::Mem { id, rgb, disk } => {
+                        let thumb = crate::page_cache::shrink_rgb_max(rgb, ORG_THUMB_MAX_SIDE);
+                        let _ = crate::page_cache::save_org_thumb(&thumb, disk);
+                        Some((id.clone(), rgb_to_render_image(&thumb)))
                     }
-                    let rendered = match &jobs[i] {
-                        OrgThumbJob::Jpeg { id, jpeg } => crate::page_cache::load_rgb(jpeg)
-                            .ok()
-                            .map(|rgb| (id.clone(), rgb_to_render_image(&rgb))),
-                        OrgThumbJob::Mem { id, rgb, disk } => {
-                            let thumb =
-                                crate::page_cache::shrink_rgb_max(rgb, ORG_THUMB_MAX_SIDE);
-                            let _ = crate::page_cache::save_org_thumb(&thumb, disk);
-                            Some((id.clone(), rgb_to_render_image(&thumb)))
-                        }
-                        OrgThumbJob::Png { id, png } => crate::page_cache::load_rgb(png)
-                            .ok()
-                            .map(|rgb| {
-                                let thumb = crate::page_cache::shrink_rgb_max(
-                                    &rgb,
-                                    ORG_THUMB_MAX_SIDE,
-                                );
-                                let _ = crate::page_cache::save_org_thumb(&thumb, png);
-                                (id.clone(), rgb_to_render_image(&thumb))
-                            }),
-                    };
-                    if let Some(item) = rendered {
-                        let _ = tx.send_blocking(item);
+                    OrgThumbJob::Png { id, png } => {
+                        crate::page_cache::load_rgb(png).ok().map(|rgb| {
+                            let thumb = crate::page_cache::shrink_rgb_max(&rgb, ORG_THUMB_MAX_SIDE);
+                            let _ = crate::page_cache::save_org_thumb(&thumb, png);
+                            (id.clone(), rgb_to_render_image(&thumb))
+                        })
                     }
+                };
+                if let Some(item) = rendered {
+                    let _ = tx.send_blocking(item);
                 }
             });
         }
@@ -448,12 +456,7 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
-    fn resolve_organize_drop(
-        &self,
-        from: usize,
-        x: f32,
-        y: f32,
-    ) -> (Option<usize>, bool) {
+    fn resolve_organize_drop(&self, from: usize, x: f32, y: f32) -> (Option<usize>, bool) {
         let Some(st) = self.page_organize.as_ref() else {
             return (None, false);
         };
@@ -513,8 +516,7 @@ impl ScoreSyncApp {
             return;
         }
         self.push_crop_undo_page_structure();
-        self.doc
-            .move_pages_block(&moving, anchor, drag.line_after);
+        self.doc.move_pages_block(&moving, anchor, drag.line_after);
         self.status = "已调整页面顺序.".into();
         self.hint = self.status.clone();
         self.after_doc_change(cx);
@@ -576,7 +578,14 @@ impl ScoreSyncApp {
             0.0
         };
         let entity = cx.entity();
-        let cells: Vec<(usize, String, SharedString, bool, bool, Option<Arc<RenderImage>>)> = self
+        let cells: Vec<(
+            usize,
+            String,
+            SharedString,
+            bool,
+            bool,
+            Option<Arc<RenderImage>>,
+        )> = self
             .doc
             .pages
             .iter()
@@ -629,7 +638,11 @@ impl ScoreSyncApp {
             } else {
                 rgb(0xcbd5e1)
             };
-            let bg = if selected { rgb(0xeff6ff) } else { rgb(0xffffff) };
+            let bg = if selected {
+                rgb(0xeff6ff)
+            } else {
+                rgb(0xffffff)
+            };
             let paint = thumb.clone();
             tiles = tiles.child(
                 div()
@@ -654,13 +667,7 @@ impl ScoreSyncApp {
                     .when(show_line && line_after, |d| {
                         d.border_r_4().border_color(rgb(0xf59e0b))
                     })
-                    .hover(|s| {
-                        if selected {
-                            s
-                        } else {
-                            s.bg(rgb(0xf8fafc))
-                        }
-                    })
+                    .hover(|s| if selected { s } else { s.bg(rgb(0xf8fafc)) })
                     .child(Self::measure_org_cell(entity.clone(), idx))
                     .child(
                         div()
@@ -769,9 +776,7 @@ impl ScoreSyncApp {
                                 return;
                             };
                             let id = this.doc.pages.get(idx).map(|p| p.id.clone());
-                            let already = id
-                                .as_ref()
-                                .is_some_and(|id| st.selected.contains(id));
+                            let already = id.as_ref().is_some_and(|id| st.selected.contains(id));
                             let ctrl = is_primary_mod(&ev.modifiers);
                             let shift = ev.modifiers.shift;
                             if !(already && !ctrl && !shift) {
@@ -868,114 +873,109 @@ impl ScoreSyncApp {
                     .inset_0()
                     .p(px(ORG_SLOT_PAD))
                     .child(
-                        div()
-                            .relative()
-                            .size_full()
-                            .child(
-                                div()
-                                    .size_full()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .id("org_pages_card")
-                                            .when(card_w > 1.0, |d| {
-                                                d.w(px(card_w)).flex_shrink_0()
-                                            })
-                                            .when(card_w <= 1.0, |d| d.w_full())
-                                            .h_full()
-                                            .min_w(px(0.))
-                                            .min_h(px(0.))
-                                            .px(px(ORG_CARD_PAD_X))
-                                            .py(px(ORG_CARD_PAD_X))
-                                            .rounded_lg()
-                                            .bg(rgb(0xffffff))
-                                            .border_1()
-                                            .border_color(rgb(0x94a3b8))
-                                            .flex()
-                                            .flex_col()
-                                            .gap_3()
-                                            .overflow_hidden()
-                                            .on_mouse_move(cx.listener(
-                                                |this, ev: &MouseMoveEvent, _, cx| {
-                                                    let x = f32::from(ev.position.x);
-                                                    let y = f32::from(ev.position.y);
-                                                    if matches!(
-                                                        this.drag,
-                                                        Some(DragKind::Scrollbar { .. })
-                                                    ) {
-                                                        this.apply_scrollbar_drag(x, y, cx);
-                                                    } else {
-                                                        this.organize_drag_move(x, y, cx);
-                                                    }
-                                                },
-                                            ))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_lg()
-                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                    .child(header),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("org_pages_body")
+                        div().relative().size_full().child(
+                            div()
+                                .size_full()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id("org_pages_card")
+                                        .when(card_w > 1.0, |d| d.w(px(card_w)).flex_shrink_0())
+                                        .when(card_w <= 1.0, |d| d.w_full())
+                                        .h_full()
+                                        .min_w(px(0.))
+                                        .min_h(px(0.))
+                                        .px(px(ORG_CARD_PAD_X))
+                                        .py(px(ORG_CARD_PAD_X))
+                                        .rounded_lg()
+                                        .bg(rgb(0xffffff))
+                                        .border_1()
+                                        .border_color(rgb(0x94a3b8))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
+                                        .overflow_hidden()
+                                        .on_mouse_move(cx.listener(
+                                            |this, ev: &MouseMoveEvent, _, cx| {
+                                                let x = f32::from(ev.position.x);
+                                                let y = f32::from(ev.position.y);
+                                                if matches!(
+                                                    this.drag,
+                                                    Some(DragKind::Scrollbar { .. })
+                                                ) {
+                                                    this.apply_scrollbar_drag(x, y, cx);
+                                                } else {
+                                                    this.organize_drag_move(x, y, cx);
+                                                }
+                                            },
+                                        ))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_lg()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child(header),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("org_pages_body")
+                                                .flex_1()
+                                                .w_full()
+                                                .min_h(px(0.))
+                                                .min_w(px(0.))
+                                                .flex()
+                                                .flex_col()
+                                                .overflow_hidden()
+                                                .bg(rgb(0xf8fafc))
+                                                .rounded_md()
+                                                .child(
+                                                    self.attach_scrollbars(
+                                                        "org_pages_scroll".into(),
+                                                        ScrollList::PageOrganize,
+                                                        &self.page_organize_scroll,
+                                                        tiles,
+                                                        cx,
+                                                    )
                                                     .flex_1()
-                                                    .w_full()
                                                     .min_h(px(0.))
                                                     .min_w(px(0.))
-                                                    .flex()
-                                                    .flex_col()
-                                                    .overflow_hidden()
-                                                    .bg(rgb(0xf8fafc))
-                                                    .rounded_md()
-                                                    .child(
-                                                        self.attach_scrollbars(
-                                                            "org_pages_scroll".into(),
-                                                            ScrollList::PageOrganize,
-                                                            &self.page_organize_scroll,
-                                                            tiles,
-                                                            cx,
-                                                        )
+                                                    .w_full(),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
                                                         .flex_1()
-                                                        .min_h(px(0.))
                                                         .min_w(px(0.))
-                                                        .w_full(),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w(px(0.))
-                                                            .text_xs()
-                                                            .text_color(rgb(0x64748b))
-                                                            .child(hint),
-                                                    )
-                                                    .child(self.btn(
-                                                        "org_pages_done",
-                                                        "完成",
-                                                        true,
-                                                        |this, _, cx| {
-                                                            this.close_page_organize(cx);
-                                                        },
-                                                        cx,
-                                                    )),
-                                            ),
-                                    ),
-                            ),
+                                                        .text_xs()
+                                                        .text_color(rgb(0x64748b))
+                                                        .child(hint),
+                                                )
+                                                .child(self.btn(
+                                                    "org_pages_done",
+                                                    "完成",
+                                                    true,
+                                                    |this, _, cx| {
+                                                        this.close_page_organize(cx);
+                                                    },
+                                                    cx,
+                                                )),
+                                        ),
+                                ),
+                        ),
                     ),
             )
             .when(drag_armed, |d| d.child(ghost))

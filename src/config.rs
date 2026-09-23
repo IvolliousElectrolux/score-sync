@@ -127,6 +127,15 @@ pub fn remember_last_project(path: &std::path::Path) {
     save(&cfg);
 }
 
+pub fn forget_last_project() {
+    let mut cfg = load();
+    if cfg.last_project.is_empty() {
+        return;
+    }
+    cfg.last_project.clear();
+    save(&cfg);
+}
+
 /// 记住本次 PDF 导入倍率与是否锁定宽高比.
 pub fn remember_pdf_import(scale: f32, lock_aspect: bool) {
     let mut cfg = load();

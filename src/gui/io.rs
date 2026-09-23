@@ -1,7 +1,7 @@
 //! 打开 / 保存 / 导出 / 更新检查.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 impl ScoreSyncApp {
     pub(super) fn start_update_check(&mut self, cx: &mut Context<Self>) {
@@ -73,11 +73,15 @@ impl ScoreSyncApp {
         }
         self.dismiss_error_overlays(cx);
         match self.dialog {
-            Some(DialogKind::UnsavedExit | DialogKind::UnsavedNew) => {
+            Some(
+                DialogKind::UnsavedExit | DialogKind::UnsavedNew | DialogKind::UnsavedPhoto { .. },
+            ) => {
                 self.dialog = None;
                 cx.notify();
             }
-            Some(DialogKind::Info { .. } | DialogKind::Help | DialogKind::UpdateAvailable { .. }) => {
+            Some(
+                DialogKind::Info { .. } | DialogKind::Help | DialogKind::UpdateAvailable { .. },
+            ) => {
                 self.dismiss_dialog(cx);
             }
             None => {}
@@ -87,14 +91,25 @@ impl ScoreSyncApp {
         let mut projects = Vec::new();
         let mut openables = Vec::new();
         for path in paths {
+            if !path.is_file() {
+                self.show_error(
+                    "无法打开",
+                    crate::error::Error::msg(format!("找不到文件:\n{}", path.display())),
+                    cx,
+                );
+                continue;
+            }
             if is_project_path(&path) {
                 projects.push(path);
             } else if is_pdf_path(&path) || is_image_path(&path) {
                 openables.push(path);
             } else {
                 self.show_error(
-                    "不支持",
-                    crate::error::Error::msg(format!("无法打开: {}", path.display())),
+                    "无法打开",
+                    crate::error::Error::msg(format!(
+                        "不是 Score Sync 能打开的文件 (要 .staffcrop 工程, 或图片/PDF):\n{}",
+                        path.display()
+                    )),
                     cx,
                 );
             }
@@ -115,7 +130,11 @@ impl ScoreSyncApp {
     }
 
     #[allow(dead_code)]
-    pub(super) fn add_image_files(&mut self, images: Vec<PathBuf>, cx: &mut Context<Self>) -> usize {
+    pub(super) fn add_image_files(
+        &mut self,
+        images: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> usize {
         let mut added = 0usize;
         for path in images {
             match image::open(&path) {
@@ -137,11 +156,7 @@ impl ScoreSyncApp {
                     }
                 }
                 Err(e) => {
-                    self.show_error(
-                        "打开失败",
-                        crate::error::Error::image_open(&path, e),
-                        cx,
-                    );
+                    self.show_error("打开失败", crate::error::Error::image_open(&path, e), cx);
                 }
             }
         }
@@ -274,10 +289,8 @@ impl ScoreSyncApp {
                             pdf_name,
                         } => {
                             let was_empty = view.doc.pages.is_empty();
-                            let display = PathBuf::from(format!(
-                                "{pdf_name}_p{:03}.png",
-                                index + 1
-                            ));
+                            let display =
+                                PathBuf::from(format!("{pdf_name}_p{:03}.png", index + 1));
                             crate::trace::log(&format!(
                                 "ui: 登记 PDF 页 {done}/{total} (原第 {}, run_detect=false)",
                                 index + 1
@@ -317,8 +330,7 @@ impl ScoreSyncApp {
                             view.import_one_image(path, target, cx);
                         }
                         PdfLoadMsg::Done { pdf_name, pages } => {
-                            view.status =
-                                format!("PDF {pdf_name} 完成: {pages} 页已载入.").into();
+                            view.status = format!("PDF {pdf_name} 完成: {pages} 页已载入.").into();
                             view.hint = view.status.clone();
                             cx.notify();
                         }
@@ -398,11 +410,7 @@ impl ScoreSyncApp {
                 }
             }
             Err(e) => {
-                self.show_error(
-                    "打开失败",
-                    crate::error::Error::image_open(&path, e),
-                    cx,
-                );
+                self.show_error("打开失败", crate::error::Error::image_open(&path, e), cx);
             }
         }
     }
@@ -460,6 +468,9 @@ impl ScoreSyncApp {
         }
         if self.page_organize.is_some() {
             self.close_page_organize(cx);
+        }
+        if self.photo_open() {
+            self.close_photo_session(cx);
         }
         self.abandon_pdf_import();
         let name = path
@@ -536,7 +547,17 @@ impl ScoreSyncApp {
                         view.try_show_update_dialog(cx);
                     }
                     Ok(Err(e)) => {
-                        view.show_error("打开工程失败", crate::error::Error::project(e), cx);
+                        if config::load().last_project == path.display().to_string() {
+                            config::forget_last_project();
+                        }
+                        view.show_error(
+                            "无法打开工程",
+                            crate::error::Error::project(format!(
+                                "{e}\n\n文件: {}",
+                                path.display()
+                            )),
+                            cx,
+                        );
                     }
                     Err(_) => {
                         view.show_error(
@@ -587,6 +608,9 @@ impl ScoreSyncApp {
         }
         if self.page_organize.is_some() {
             self.close_page_organize(cx);
+        }
+        if self.photo_open() {
+            self.close_photo_session(cx);
         }
         let mask_prefs = self.doc.mask_prefs.clone();
         self.flush_mask_to_doc(cx);
@@ -752,8 +776,7 @@ impl ScoreSyncApp {
                         view.project_path = Some(saved.clone());
                         view.dirty = false;
                         // 保存成功后对齐视频快照基准, 避免关窗误判仍脏
-                        view.doc.video_state =
-                            view.score_video.read(cx).timeline_snapshot();
+                        view.doc.video_state = view.score_video.read(cx).timeline_snapshot();
                         config::remember_last_project(&saved);
                         view.status = format!("工程已保存: {}", saved.display()).into();
                         view.hint = view.status.clone();
@@ -788,11 +811,7 @@ impl ScoreSyncApp {
             self.flush_mask_to_doc(cx);
         }
         if self.doc.groups.is_empty() {
-            self.show_error(
-                "提示",
-                crate::error::Error::export("没有可导出的内容."),
-                cx,
-            );
+            self.show_error("提示", crate::error::Error::export("没有可导出的内容."), cx);
             return;
         }
         Self::spawn_native_dialog(

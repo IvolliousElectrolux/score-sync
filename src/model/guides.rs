@@ -74,7 +74,10 @@ impl DocState {
         self.seed_guide_defaults_for(&gids);
     }
 
-    pub fn ingest_region_staff_anchors(&mut self, items: impl IntoIterator<Item = (String, Option<i32>)>) {
+    pub fn ingest_region_staff_anchors(
+        &mut self,
+        items: impl IntoIterator<Item = (String, Option<i32>)>,
+    ) {
         for (id, y) in items {
             self.region_staff_anchors.insert(id, y);
         }

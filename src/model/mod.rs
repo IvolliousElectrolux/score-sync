@@ -12,6 +12,7 @@
 mod bg;
 mod compose;
 mod detect;
+mod edits;
 mod groups;
 mod guides;
 mod pages;
@@ -20,16 +21,17 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use compose::compose_parts_impl;
+pub use compose::GroupRenderJob;
+pub use edits::{groups_using_region, remap_masks_after_height_change, RegionEditMeta};
 pub use mask_tool::guide::GuideState;
 pub use mask_tool::layout::BlockAdjust;
-pub use compose::GroupRenderJob;
+pub(crate) use types::crop_band_fast;
 pub use types::{
     is_image_path, is_open_path, is_pdf_path, new_id, parse_color_hex, Group, Page, Region, COLORS,
     DEFAULT_INK_THRESHOLD, DEFAULT_MARGIN,
 };
-#[cfg(test)]
-pub(crate) use compose::compose_parts_impl;
-pub(crate) use types::crop_band_fast;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -102,8 +104,9 @@ pub struct DocState {
     pub(crate) rid_page: HashMap<String, usize>,
     /// 交互预览图最长边 (像素). `0` 表示用 [`crate::page_cache::DEFAULT_DISPLAY_MAX_SIDE`].
     pub display_max_side: u32,
+    /// 分块 P 图覆盖 (像素在会话 `edits/{region_id}/`).
+    pub region_edits: HashMap<String, RegionEditMeta>,
 }
-
 
 impl DocState {
     pub fn new() -> Self {
@@ -161,6 +164,7 @@ impl DocState {
             video_state: self.video_state.clone(),
             rid_page: HashMap::new(),
             display_max_side: self.display_max_side,
+            region_edits: self.region_edits.clone(),
         }
     }
 
@@ -291,12 +295,8 @@ impl DocState {
 
     pub fn rebuild_rid_index(&mut self) {
         self.rid_page.clear();
-        self.rid_page.reserve(
-            self.pages
-                .iter()
-                .map(|p| p.regions.len())
-                .sum::<usize>(),
-        );
+        self.rid_page
+            .reserve(self.pages.iter().map(|p| p.regions.len()).sum::<usize>());
         for (i, page) in self.pages.iter().enumerate() {
             for rid in page.regions.keys() {
                 self.rid_page.insert(rid.clone(), i);

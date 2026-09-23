@@ -1,7 +1,7 @@
 //! PDF 导入弹窗: 拖入/点选后选择渲染像素.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 use crate::pdf::{
     clamp_pdf_scale, inspect_pdf, parse_page_selection, px_from_pt, render_pdf_page_preview,
     scale_from_target, PdfInspect, PdfSizeGroup, DEFAULT_PDF_SCALE, PDF_MAX_SIDE_PX,
@@ -20,7 +20,10 @@ pub(super) enum ImportItem {
         name: String,
         page_input: Entity<TextInput>,
     },
-    Image { path: PathBuf, name: String },
+    Image {
+        path: PathBuf,
+        name: String,
+    },
 }
 
 impl ImportItem {
@@ -436,11 +439,17 @@ impl ScoreSyncApp {
         let gen = st.preview_gen.wrapping_add(1);
         st.preview_gen = gen;
         st.preview_loading = true;
-        if st.preview_shown.as_ref().map(|(p, _)| p != &path).unwrap_or(true) {
+        if st
+            .preview_shown
+            .as_ref()
+            .map(|(p, _)| p != &path)
+            .unwrap_or(true)
+        {
             st.preview_image = None;
         }
         cx.notify();
-        let (tx, rx) = async_channel::bounded::<Result<(PathBuf, u32, Arc<RenderImage>), String>>(1);
+        let (tx, rx) =
+            async_channel::bounded::<Result<(PathBuf, u32, Arc<RenderImage>), String>>(1);
         std::thread::spawn(move || {
             let rgb = if is_pdf {
                 render_pdf_page_preview(&path, page, PREVIEW_MAX_SIDE).map_err(|e| e.to_string())
@@ -517,20 +526,26 @@ impl ScoreSyncApp {
         };
         let mut tw = px_from_pt(mode.w_pt, scale);
         let mut th = px_from_pt(mode.h_pt, scale);
-        let mut img_scale = 0.0f32;
-        for f in st.pdfs() {
-            for g in &f.groups {
-                if let Some((iw, ih)) = g.image_px {
-                    let sx = iw as f32 / g.w_pt.max(1.0);
-                    let sy = ih as f32 / g.h_pt.max(1.0);
-                    img_scale = img_scale.max(sx.max(sy));
+        if let Some((iw, ih)) = mode.image_px {
+            scale = clamp_pdf_scale(iw as f32 / mode.w_pt.max(1.0));
+            tw = iw.clamp(1, PDF_MAX_SIDE_PX);
+            th = ih.clamp(1, PDF_MAX_SIDE_PX);
+        } else {
+            let mut img_scale = 0.0f32;
+            for f in st.pdfs() {
+                for g in &f.groups {
+                    if let Some((iw, ih)) = g.image_px {
+                        let sx = iw as f32 / g.w_pt.max(1.0);
+                        let sy = ih as f32 / g.h_pt.max(1.0);
+                        img_scale = img_scale.max(sx.max(sy));
+                    }
                 }
             }
-        }
-        if img_scale > scale {
-            scale = clamp_pdf_scale(img_scale);
-            tw = px_from_pt(mode.w_pt, scale);
-            th = px_from_pt(mode.h_pt, scale);
+            if img_scale > scale {
+                scale = clamp_pdf_scale(img_scale);
+                tw = px_from_pt(mode.w_pt, scale);
+                th = px_from_pt(mode.h_pt, scale);
+            }
         }
         st.scale = scale;
         st.target_w = tw;
@@ -556,9 +571,8 @@ impl ScoreSyncApp {
             }
             if is_pdf_path(&p) {
                 let name = item_file_name(&p);
-                let page_input = cx.new(|cx| {
-                    TextInput::new(cx, "", "如 1, 3-7").with_compact(true)
-                });
+                let page_input =
+                    cx.new(|cx| TextInput::new(cx, "", "如 1, 3-7").with_compact(true));
                 st.items.push(ImportItem::PdfPending {
                     path: p.clone(),
                     name,
@@ -665,7 +679,10 @@ impl ScoreSyncApp {
                         &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "pdf"],
                     )
                     .add_filter("PDF", &["pdf"])
-                    .add_filter("图片", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"])
+                    .add_filter(
+                        "图片",
+                        &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"],
+                    )
                     .pick_files()
             },
             |this, files, cx| {
@@ -680,7 +697,10 @@ impl ScoreSyncApp {
         if self.pdf_w_input.focus_handle(cx).is_focused(window)
             || self.pdf_h_input.focus_handle(cx).is_focused(window)
             || self.pdf_scale_input.focus_handle(cx).is_focused(window)
-            || self.pdf_preview_page_input.focus_handle(cx).is_focused(window)
+            || self
+                .pdf_preview_page_input
+                .focus_handle(cx)
+                .is_focused(window)
         {
             return true;
         }
@@ -956,9 +976,7 @@ impl ScoreSyncApp {
         if self.pdf_import.is_some() {
             let w_blur = self.pdf_w_input.update(cx, |i, _| i.take_blur_commit());
             let h_blur = self.pdf_h_input.update(cx, |i, _| i.take_blur_commit());
-            let s_blur = self
-                .pdf_scale_input
-                .update(cx, |i, _| i.take_blur_commit());
+            let s_blur = self.pdf_scale_input.update(cx, |i, _| i.take_blur_commit());
             let p_blur = self
                 .pdf_preview_page_input
                 .update(cx, |i, _| i.take_blur_commit());
@@ -976,15 +994,13 @@ impl ScoreSyncApp {
                         st.items
                             .iter()
                             .enumerate()
-                            .filter_map(|(i, item)| {
-                                item.page_input().cloned().map(|e| (i, e))
-                            })
+                            .filter_map(|(i, item)| item.page_input().cloned().map(|e| (i, e)))
                             .collect()
                     })
                     .unwrap_or_default();
-                inputs.into_iter().find_map(|(i, e)| {
-                    e.update(cx, |t, _| t.take_focus_commit()).then_some(i)
-                })
+                inputs
+                    .into_iter()
+                    .find_map(|(i, e)| e.update(cx, |t, _| t.take_focus_commit()).then_some(i))
             };
             if let Some(idx) = focus_idx {
                 self.activate_import_item(idx, cx);
@@ -1005,7 +1021,10 @@ impl ScoreSyncApp {
         let mode = st.mode().cloned();
         let target_w = st.target_w;
         let target_h = st.target_h;
-        let drag_from = st.list_drag.as_ref().and_then(|d| d.armed.then_some(d.from));
+        let drag_from = st
+            .list_drag
+            .as_ref()
+            .and_then(|d| d.armed.then_some(d.from));
         let (line_at, line_after) = match &st.list_drag {
             Some(d) if d.armed => (d.line_at, d.line_after),
             _ => (None, false),
@@ -1080,7 +1099,11 @@ impl ScoreSyncApp {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(if is_active { rgb(0xeff6ff) } else { rgb(0xffffff) })
+                    .bg(if is_active {
+                        rgb(0xeff6ff)
+                    } else {
+                        rgb(0xffffff)
+                    })
                     .border_1()
                     .border_color(if is_active {
                         rgb(0x3b82f6)
@@ -1443,13 +1466,8 @@ impl ScoreSyncApp {
                     origin: point(ox, oy),
                     size: size(px(dw), px(dh)),
                 };
-                let _ = window.paint_image(
-                    img_bounds,
-                    gpui::Corners::default(),
-                    img.clone(),
-                    0,
-                    false,
-                );
+                let _ =
+                    window.paint_image(img_bounds, gpui::Corners::default(), img.clone(), 0, false);
             },
         )
         .size_full();
@@ -1476,12 +1494,7 @@ impl ScoreSyncApp {
                     .border_color(rgb(0xe2e8f0))
                     .overflow_hidden()
                     .relative()
-                    .child(
-                        preview_canvas
-                            .absolute()
-                            .inset_0()
-                            .size_full(),
-                    )
+                    .child(preview_canvas.absolute().inset_0().size_full())
                     .when(show_preview_hint, |d| {
                         d.child(
                             div()

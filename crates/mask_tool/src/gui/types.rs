@@ -39,6 +39,8 @@ pub(crate) fn brush_size_to_t(size: f32, min: f32, max: f32) -> f32 {
 }
 /// 折线闭环: 距首点多少屏幕像素内吸附.
 pub(crate) const POLY_SNAP_SCREEN_PX: f32 = 12.0;
+/// 自由拖动贴起点的屏幕半径, 比点击闭环更小.
+pub(crate) const POLY_DRAG_SNAP_SCREEN_PX: f32 = 6.0;
 /// 橡皮: 超过此图像像素位移才视为拖擦 (否则为单击擦顶层).
 pub(crate) const ERASE_DRAG_SLOP_IMG: f32 = 3.0;
 /// 拖动「组合分块」时, 命中块四条边界线的容差 (屏幕像素).
@@ -56,15 +58,19 @@ pub(crate) fn color_rgb_u32(c: [u8; 3]) -> u32 {
     ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32)
 }
 
+pub(crate) fn luma(c: [u8; 3]) -> f32 {
+    0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32
+}
+
 /// 画笔光标边框: 取 RGB 反色; 反色太接近时改用黑/白, 保证白笔也能看清.
+#[allow(dead_code)]
 pub(crate) fn opposite_rgb(c: [u8; 3]) -> [u8; 3] {
     let inv = [255 - c[0], 255 - c[1], 255 - c[2]];
     let dist = (inv[0] as i16 - c[0] as i16).unsigned_abs()
         + (inv[1] as i16 - c[1] as i16).unsigned_abs()
         + (inv[2] as i16 - c[2] as i16).unsigned_abs();
     if dist < 180 {
-        let y = 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
-        if y >= 128.0 {
+        if luma(c) >= 128.0 {
             [0, 0, 0]
         } else {
             [255, 255, 255]
@@ -74,122 +80,129 @@ pub(crate) fn opposite_rgb(c: [u8; 3]) -> [u8; 3] {
     }
 }
 
-/// 滴管 / 取色图标 (约 14×14 视口内绘制).
-pub(crate) fn eyedropper_icon(active: bool) -> impl IntoElement {
-    let stroke = if active {
-        rgb(0xf8fafc)
-    } else {
-        rgb(0xe2e8f0)
-    };
-    div()
-        .size(px(14.))
-        .flex_shrink_0()
-        .child(
-            canvas(|_, _, _| {}, {
-                move |bounds, _, window, _| {
-                    let ox = f32::from(bounds.origin.x);
-                    let oy = f32::from(bounds.origin.y);
-                    let s = f32::from(bounds.size.width)
-                        .min(f32::from(bounds.size.height))
-                        .max(1.0);
-                    let p = |x: f32, y: f32| {
-                        point(px(ox + x / 16.0 * s), px(oy + y / 16.0 * s))
-                    };
-                    let thick = px((1.4_f32 * s / 14.0).max(1.0));
-                    // 笔杆
-                    let mut shaft = PathBuilder::stroke(thick);
-                    shaft.move_to(p(3.2, 12.8));
-                    shaft.line_to(p(10.2, 5.8));
-                    if let Ok(path) = shaft.build() {
-                        window.paint_path(path, stroke);
-                    }
-                    // 笔尖 V
-                    let mut tip = PathBuilder::stroke(thick);
-                    tip.move_to(p(2.0, 11.2));
-                    tip.line_to(p(3.2, 12.8));
-                    tip.line_to(p(4.8, 11.4));
-                    if let Ok(path) = tip.build() {
-                        window.paint_path(path, stroke);
-                    }
-                    // 顶部笔头 / 储液
-                    let mut bulb = PathBuilder::stroke(thick);
-                    bulb.move_to(p(9.0, 4.6));
-                    bulb.line_to(p(11.0, 2.6));
-                    bulb.line_to(p(13.2, 4.8));
-                    bulb.line_to(p(11.2, 6.8));
-                    bulb.close();
-                    if let Ok(path) = bulb.build() {
-                        window.paint_path(path, stroke);
-                    }
-                    // 一小滴
-                    let drop = Bounds {
-                        origin: p(2.4, 13.0),
-                        size: size(px(2.2 / 16.0 * s), px(2.2 / 16.0 * s)),
-                    };
-                    window.paint_quad(quad(
-                        drop,
-                        px(1.2 / 16.0 * s),
-                        stroke,
-                        px(0.),
-                        stroke,
-                        Default::default(),
-                    ));
-                }
-            })
-            .size_full(),
-        )
+/// 外圈描边: `ring` 为主色; `halo` 为反色内外描边 (背景混杂或对比不够时).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RingStyle {
+    pub ring: [u8; 3],
+    pub halo: Option<[u8; 3]>,
 }
 
-/// 预览用画笔: 沿折线叠圆形章 (与导出 `stamp_polyline` 同模型).
-/// 避免 PathBuilder::stroke 在折返/自交时因 miter 尖角撕出畸形大块.
-pub(crate) fn paint_brush_stamps(
-    window: &mut Window,
-    points: &[(i32, i32)],
-    radius_img: f32,
-    scale: f32,
-    origin_x: f32,
-    origin_y: f32,
-    view_origin: Point<Pixels>,
-    diam_screen: f32,
-    fill: gpui::Rgba,
-) {
-    if points.is_empty() || diam_screen < 0.5 {
-        return;
-    }
-    let to_screen = |ix: f32, iy: f32| -> (f32, f32) {
-        (
-            f32::from(view_origin.x) + origin_x + ix * scale,
-            f32::from(view_origin.y) + origin_y + iy * scale,
-        )
-    };
-    let paint_disk = |window: &mut Window, cx: f32, cy: f32| {
-        let b = Bounds {
-            origin: point(px(cx - diam_screen * 0.5), px(cy - diam_screen * 0.5)),
-            size: size(px(diam_screen), px(diam_screen)),
+/// 按外圈下方采样决定描边. `fill` 是圆内填充色 (没有则忽略).
+pub(crate) fn ring_style_from_under(samples: &[[u8; 3]], fill: Option<[u8; 3]>) -> RingStyle {
+    const MIN_CONTRAST: f32 = 48.0;
+    const MIXED_STD: f32 = 38.0;
+    if samples.is_empty() {
+        return RingStyle {
+            ring: [255, 255, 255],
+            halo: Some([0, 0, 0]),
         };
-        window.paint_quad(quad(
-            b,
-            px(diam_screen * 0.5),
-            fill,
-            px(0.),
-            fill,
-            Default::default(),
-        ));
-    };
-    let step_img = (radius_img * 0.5).max(1.0);
-    let (sx, sy) = to_screen(points[0].0 as f32, points[0].1 as f32);
-    paint_disk(window, sx, sy);
-    for w in points.windows(2) {
-        let (x0, y0) = (w[0].0 as f32, w[0].1 as f32);
-        let (x1, y1) = (w[1].0 as f32, w[1].1 as f32);
-        let dist = (x1 - x0).hypot(y1 - y0).max(0.001);
-        let n = (dist / step_img).ceil() as i32;
-        for i in 1..=n {
-            let t = i as f32 / n as f32;
-            let (sx, sy) = to_screen(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
-            paint_disk(window, sx, sy);
-        }
     }
+    let n = samples.len() as f32;
+    let mean_y = samples.iter().map(|s| luma(*s)).sum::<f32>() / n;
+    let var = samples
+        .iter()
+        .map(|s| {
+            let d = luma(*s) - mean_y;
+            d * d
+        })
+        .sum::<f32>()
+        / n;
+    let std = var.sqrt();
+    let ring = if mean_y >= 128.0 {
+        [0, 0, 0]
+    } else {
+        [255, 255, 255]
+    };
+    let min_vs = samples
+        .iter()
+        .map(|s| (luma(ring) - luma(*s)).abs())
+        .fold(f32::MAX, f32::min);
+    let fill_close = fill
+        .map(|f| (luma(ring) - luma(f)).abs() < MIN_CONTRAST)
+        .unwrap_or(false);
+    let need_halo = std > MIXED_STD || min_vs < MIN_CONTRAST || fill_close;
+    let halo = if need_halo {
+        Some(if luma(ring) >= 128.0 {
+            [0, 0, 0]
+        } else {
+            [255, 255, 255]
+        })
+    } else {
+        None
+    };
+    RingStyle { ring, halo }
+}
+
+pub(crate) fn sample_ring_points(cx: f32, cy: f32, r: f32) -> impl Iterator<Item = (f32, f32)> {
+    let r = r.max(0.5);
+    let n = if r < 4.0 {
+        8
+    } else if r < 16.0 {
+        12
+    } else {
+        16
+    };
+    (0..n).map(move |i| {
+        let a = (i as f32) * std::f32::consts::TAU / n as f32;
+        (cx + r * a.cos(), cy + r * a.sin())
+    })
+}
+
+/// 滴管 / 取色图标 (约 14×14 视口内绘制).
+pub(crate) fn eyedropper_icon(active: bool) -> impl IntoElement {
+    let stroke = if active { rgb(0xf8fafc) } else { rgb(0xe2e8f0) };
+    div().size(px(14.)).flex_shrink_0().child(
+        canvas(|_, _, _| {}, {
+            move |bounds, _, window, _| {
+                let ox = f32::from(bounds.origin.x);
+                let oy = f32::from(bounds.origin.y);
+                let s = f32::from(bounds.size.width)
+                    .min(f32::from(bounds.size.height))
+                    .max(1.0);
+                let p = |x: f32, y: f32| point(px(ox + x / 16.0 * s), px(oy + y / 16.0 * s));
+                let thick = px((1.4_f32 * s / 14.0).max(1.0));
+                // 笔杆
+                let mut shaft = PathBuilder::stroke(thick);
+                shaft.move_to(p(3.2, 12.8));
+                shaft.line_to(p(10.2, 5.8));
+                if let Ok(path) = shaft.build() {
+                    window.paint_path(path, stroke);
+                }
+                // 笔尖 V
+                let mut tip = PathBuilder::stroke(thick);
+                tip.move_to(p(2.0, 11.2));
+                tip.line_to(p(3.2, 12.8));
+                tip.line_to(p(4.8, 11.4));
+                if let Ok(path) = tip.build() {
+                    window.paint_path(path, stroke);
+                }
+                // 顶部笔头 / 储液
+                let mut bulb = PathBuilder::stroke(thick);
+                bulb.move_to(p(9.0, 4.6));
+                bulb.line_to(p(11.0, 2.6));
+                bulb.line_to(p(13.2, 4.8));
+                bulb.line_to(p(11.2, 6.8));
+                bulb.close();
+                if let Ok(path) = bulb.build() {
+                    window.paint_path(path, stroke);
+                }
+                // 一小滴
+                let drop = Bounds {
+                    origin: p(2.4, 13.0),
+                    size: size(px(2.2 / 16.0 * s), px(2.2 / 16.0 * s)),
+                };
+                window.paint_quad(quad(
+                    drop,
+                    px(1.2 / 16.0 * s),
+                    stroke,
+                    px(0.),
+                    stroke,
+                    Default::default(),
+                ));
+            }
+        })
+        .size_full(),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -238,7 +251,10 @@ impl ViewXform {
     }
 
     pub(crate) fn screen_to_image(&self, sx: f32, sy: f32) -> (f32, f32) {
-        ((sx - self.origin_x) / self.scale, (sy - self.origin_y) / self.scale)
+        (
+            (sx - self.origin_x) / self.scale,
+            (sy - self.origin_y) / self.scale,
+        )
     }
 
     pub(crate) fn image_to_screen(&self, ix: f32, iy: f32) -> (f32, f32) {
@@ -252,7 +268,13 @@ impl ViewXform {
         (BLOCK_EDGE_HIT_PX / self.scale).max(1.0)
     }
 
-    pub(crate) fn image_rect_to_screen(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> Bounds<Pixels> {
+    pub(crate) fn image_rect_to_screen(
+        &self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+    ) -> Bounds<Pixels> {
         let left = self.origin_x + x0 as f32 * self.scale;
         let top = self.origin_y + y0 as f32 * self.scale;
         let right = self.origin_x + (x1 as f32 + 1.0) * self.scale;
@@ -270,6 +292,12 @@ pub(crate) enum DragKind {
         y0: f32,
         x1: f32,
         y1: f32,
+    },
+    /// 套索: 按下后若拖过 slop 则进入自由轨迹, 否则仍是折线加点.
+    PolyStroke {
+        start_x: f32,
+        start_y: f32,
+        freehand: bool,
     },
     /// 画笔描边: 正在编辑的蒙版 id; `undid` 表示本笔是否已压入撤销栈.
     /// `start_iy`: 落笔起点的画布纵坐标, 松开时与终点一起判定绑定哪个
@@ -388,7 +416,7 @@ pub(crate) enum ToolMode {
     Select,
     /// 框选新蒙版
     Draw,
-    /// 折线多边形: 逐点连直线, 吸附首点闭环 (类似 PS 钢笔勾形)
+    /// 套索多边形: 单击逐点; 按住拖动为连续轨迹, 松手闭环.
     Poly,
     /// 画笔描边 (自由绘制, 可调颜色/粗细)
     Brush,
@@ -457,5 +485,29 @@ mod brush_size_tests {
         assert_eq!(brush_size_max_for_image(0), BRUSH_SIZE_FALLBACK_MAX);
         assert_eq!(brush_size_max_for_image(2000), 200.0);
         assert_eq!(brush_size_max_for_image(4000), 400.0);
+    }
+
+    #[test]
+    fn ring_uses_under_not_center_invert() {
+        let white = [250u8, 250, 250];
+        let black = [12u8, 12, 12];
+        let samples = [white; 8];
+        let style = ring_style_from_under(&samples, Some(black));
+        assert_eq!(
+            style.ring,
+            [0, 0, 0],
+            "外圈下是白纸, 描边该是黑而不是反色成白"
+        );
+        let halo = style.halo.expect("黑填充贴近黑圈时加反色内外描边");
+        assert_eq!(halo, [255, 255, 255]);
+    }
+
+    #[test]
+    fn ring_uniform_paper_no_extra_halo() {
+        let white = [250u8, 250, 250];
+        let samples = [white; 8];
+        let style = ring_style_from_under(&samples, None);
+        assert_eq!(style.ring, [0, 0, 0]);
+        assert_eq!(style.halo, None);
     }
 }

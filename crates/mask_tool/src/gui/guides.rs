@@ -346,7 +346,8 @@ impl MaskToolApp {
             cx.notify();
             return;
         };
-        let aligned_n = crate::staff::assignments_for_guides(&input.anchors, &input.guide_lines).len();
+        let aligned_n =
+            crate::staff::assignments_for_guides(&input.anchors, &input.guide_lines).len();
         let Some((new_layout, voff_shift_delta)) = crate::staff::align_group(&input) else {
             self.status = "没有可对齐到辅助线的块.".into();
             cx.notify();

@@ -83,11 +83,8 @@ impl DocState {
         self.ingest_region_staff_anchors(anchors);
         self.save_detect_sidecar(page_idx);
         if reset_groups {
-            let page_regions: Vec<Region> = self.pages[page_idx]
-                .regions
-                .values()
-                .cloned()
-                .collect();
+            let page_regions: Vec<Region> =
+                self.pages[page_idx].regions.values().cloned().collect();
             let mut new_groups: Vec<Group> = Vec::new();
             for g in &self.groups {
                 let remain: Vec<String> = g
@@ -196,9 +193,10 @@ impl DocState {
                     y0: r.y0,
                     y1: r.y1,
                     kind: r.kind,
-                    staff_anchor: self.region_staff_anchors.get(&r.id).map(|y| {
-                        crate::detect_cache::CachedStaffAnchor { y: *y }
-                    }),
+                    staff_anchor: self
+                        .region_staff_anchors
+                        .get(&r.id)
+                        .map(|y| crate::detect_cache::CachedStaffAnchor { y: *y }),
                 })
                 .collect(),
         };
@@ -322,11 +320,7 @@ impl DocState {
                 }
             })
             .collect();
-        let mut ordered: Vec<Region> = self.pages[page_idx]
-            .regions
-            .values()
-            .cloned()
-            .collect();
+        let mut ordered: Vec<Region> = self.pages[page_idx].regions.values().cloned().collect();
         ordered.sort_by_key(|r| (r.y0, r.y1));
         let new_groups: Vec<Group> = ordered
             .iter()

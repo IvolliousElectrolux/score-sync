@@ -1,7 +1,7 @@
 //! 工具栏、工作区、工程面板、对话框.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 impl ScoreSyncApp {
     pub(super) fn show_help(&mut self, cx: &mut Context<Self>) {
@@ -183,12 +183,7 @@ impl ScoreSyncApp {
             )
     }
 
-    fn note_header_hover(
-        &mut self,
-        id: &'static str,
-        text: SharedString,
-        cx: &mut Context<Self>,
-    ) {
+    fn note_header_hover(&mut self, id: &'static str, text: SharedString, cx: &mut Context<Self>) {
         if self.header_hover_id == Some(id) {
             return;
         }
@@ -306,20 +301,13 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(rgb(0xd8e0ea))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(rgb(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| {
-                if active {
-                    s
-                } else {
-                    s.bg(rgb(0xd8e0ea))
-                }
-            })
+            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -341,7 +329,13 @@ impl ScoreSyncApp {
             .bg(rgb(0xe2e8f0))
             .border_b_1()
             .border_color(rgb(0xcbd5e1))
-            .child(self.menu_item("open", apply_bg::with_mod("打开", "O"), false, Self::open_file, cx))
+            .child(self.menu_item(
+                "open",
+                apply_bg::with_mod("打开", "O"),
+                false,
+                Self::open_file,
+                cx,
+            ))
             .child(self.menu_item(
                 "detect",
                 "识别本页 (D)",
@@ -398,13 +392,7 @@ impl ScoreSyncApp {
                 |this, _, cx| this.delete_selected(cx),
                 cx,
             ))
-            .child(self.menu_item(
-                "export",
-                "导出组合 (E)",
-                false,
-                Self::export_groups_ui,
-                cx,
-            ))
+            .child(self.menu_item("export", "导出组合 (E)", false, Self::export_groups_ui, cx))
             .child(self.menu_item(
                 "reset",
                 "重置本页分组 (R)",
@@ -419,6 +407,29 @@ impl ScoreSyncApp {
                 |this, window, cx| this.toggle_page_organize(window, cx),
                 cx,
             ))
+    }
+
+    fn mask_photo_menu_btn(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("mask_photo_btn")
+            .flex_shrink_0()
+            .h(px(22.))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .text_color(rgb(0x334155))
+            .text_xs()
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(0xd8e0ea)))
+            .child("修图 (T)")
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.try_open_photo_edit(window, cx);
+                }),
+            )
     }
 
     pub(super) fn tool_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -449,11 +460,7 @@ impl ScoreSyncApp {
         tool: SideTool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active {
-            rgb(0x0f172a)
-        } else {
-            rgb(0x475569)
-        };
+        let fg = if active { rgb(0x0f172a) } else { rgb(0x475569) };
         div()
             .id(id)
             .flex_1()
@@ -463,21 +470,14 @@ impl ScoreSyncApp {
             .items_center()
             .justify_center()
             .when(active, |d| {
-                d.bg(rgb(0xf8fafc))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(rgb(0xf8fafc)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_sm()
             .whitespace_nowrap()
             .overflow_hidden()
             .cursor_pointer()
-            .hover(move |s| {
-                if active {
-                    s
-                } else {
-                    s.bg(rgb(0xd8e0ea))
-                }
-            })
+            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
             .child(label)
             .on_mouse_up(
                 MouseButton::Left,
@@ -488,6 +488,40 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn left_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.photo_open() {
+            let tb = self
+                .photo_edit
+                .update(cx, |p, cx| p.toolbar_embedded(cx).into_any_element());
+            return div()
+                .id("left_workspace")
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .h(px(28.))
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .border_b_1()
+                        .border_color(rgb(0xcbd5e1))
+                        .bg(rgb(0xe2e8f0))
+                        .child(tb),
+                )
+                .child(
+                    div()
+                        .id("photo_canvas_host")
+                        .flex_1()
+                        .min_h(px(0.))
+                        .min_w(px(0.))
+                        .child(self.photo_edit.clone()),
+                )
+                .into_any_element();
+        }
         if self.side_tool == SideTool::Video {
             // 视频栏不用页签, 而是预览窗 + 轨道, 占满整个左侧工作区.
             let canvas = self
@@ -528,13 +562,7 @@ impl ScoreSyncApp {
                         .bg(rgb(0xf8fafc))
                         .child(self.tab_bar(cx)),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .min_w(px(0.))
-                        .child(canvas),
-                )
+                .child(div().flex_1().min_h(px(0.)).min_w(px(0.)).child(canvas))
                 .into_any_element();
         }
         let canvas = match self.side_tool {
@@ -567,10 +595,12 @@ impl ScoreSyncApp {
                         .min_w(px(0.))
                         .h(px(28.))
                         .flex_shrink_0()
+                        .flex()
+                        .flex_row()
                         .border_b_1()
                         .border_color(rgb(0xcbd5e1))
                         .bg(rgb(0xe2e8f0))
-                        .child(tb),
+                        .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(tb)),
                 )
             })
             .child(
@@ -583,13 +613,7 @@ impl ScoreSyncApp {
                     .bg(rgb(0xf8fafc))
                     .child(self.tab_bar(cx)),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .min_w(px(0.))
-                    .child(canvas),
-            )
+            .child(div().flex_1().min_h(px(0.)).min_w(px(0.)).child(canvas))
             .into_any_element()
     }
 
@@ -622,16 +646,8 @@ impl ScoreSyncApp {
         for row in &rows {
             let rid = row.id.clone();
             let active = row.selected;
-            let bg = if active {
-                rgb(0x2563eb)
-            } else {
-                rgb(0xe2e8f0)
-            };
-            let fg = if active {
-                rgb(0xffffff)
-            } else {
-                rgb(0x0f172a)
-            };
+            let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
+            let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
             list = list.child(
                 div()
                     .id(SharedString::from(format!("mask-blk-{rid}")))
@@ -672,12 +688,21 @@ impl ScoreSyncApp {
             .min_h(px(0.))
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x334155))
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .mb_1()
                     .flex_shrink_0()
-                    .child("组合分块 (自上而下)"),
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(0x334155))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child("组合分块 (自上而下)"),
+                    )
+                    .child(self.mask_photo_menu_btn(cx)),
             )
             .child(
                 self.attach_scrollbars(
@@ -693,40 +718,45 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn right_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = match self.side_tool {
-            SideTool::Crop => self.side_panel(cx).into_any_element(),
-            SideTool::Mask => {
-                let picker = self.mask_block_panel(cx).into_any_element();
-                let side_w = self.side_width;
-                let mask_body = self.mask_tool.update(cx, |m, cx| {
-                    m.set_embed_side_width(side_w);
+        let body = if self.photo_open() {
+            self.photo_edit
+                .update(cx, |p, cx| p.side_panel(cx).into_any_element())
+        } else {
+            match self.side_tool {
+                SideTool::Crop => self.side_panel(cx).into_any_element(),
+                SideTool::Mask => {
+                    let picker = self.mask_block_panel(cx).into_any_element();
+                    let side_w = self.side_width;
+                    let mask_body = self.mask_tool.update(cx, |m, cx| {
+                        m.set_embed_side_width(side_w);
+                        div()
+                            .id("mask_right_body")
+                            .w_full()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .child(m.side_panel(cx))
+                            .into_any_element()
+                    });
                     div()
-                        .id("mask_right_body")
+                        .id("mask_right")
                         .w_full()
-                        .flex_1()
-                        .min_h(px(0.))
+                        .h_full()
                         .flex()
                         .flex_col()
-                        .overflow_hidden()
-                        .child(m.side_panel(cx))
+                        .min_h(px(0.))
+                        .child(picker)
+                        .child(mask_body)
                         .into_any_element()
-                });
-                div()
-                    .id("mask_right")
-                    .w_full()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .min_h(px(0.))
-                    .child(picker)
-                    .child(mask_body)
-                    .into_any_element()
+                }
+                SideTool::Project => self.bg_side_panel(cx).into_any_element(),
+                SideTool::Video => self
+                    .score_video
+                    .update(cx, |v, cx| v.right_panel(cx))
+                    .into_any_element(),
             }
-            SideTool::Project => self.bg_side_panel(cx).into_any_element(),
-            SideTool::Video => self
-                .score_video
-                .update(cx, |v, cx| v.right_panel(cx))
-                .into_any_element(),
         };
         div()
             .id("right_workspace")
@@ -737,18 +767,8 @@ impl ScoreSyncApp {
             .flex_col()
             .min_h(px(0.))
             .bg(rgb(0xf1f5f9))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .child(self.tool_switcher(cx)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_hidden()
-                    .child(body),
-            )
+            .child(div().flex_shrink_0().child(self.tool_switcher(cx)))
+            .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(body))
     }
 
     pub(super) fn clear_project_bg(&mut self, cx: &mut Context<Self>) {
@@ -791,6 +811,9 @@ impl ScoreSyncApp {
         if matches!(self.dialog, Some(DialogKind::UnsavedNew)) {
             return self.unsaved_new_dialog(cx).into_any_element();
         }
+        if matches!(self.dialog, Some(DialogKind::UnsavedPhoto { .. })) {
+            return self.unsaved_photo_dialog(cx).into_any_element();
+        }
         if self.bg.pick_open {
             return self.bg_pick_overlay(cx).into_any_element();
         }
@@ -829,6 +852,7 @@ impl ScoreSyncApp {
             DialogKind::Info { title, body } => (title.clone(), body.clone()),
             DialogKind::UnsavedExit
             | DialogKind::UnsavedNew
+            | DialogKind::UnsavedPhoto { .. }
             | DialogKind::UpdateAvailable { .. } => unreachable!(),
         };
         let body_el = div()
@@ -865,7 +889,11 @@ impl ScoreSyncApp {
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
-                    this.apply_scrollbar_drag(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                    this.apply_scrollbar_drag(
+                        f32::from(ev.position.x),
+                        f32::from(ev.position.y),
+                        cx,
+                    );
                 }
                 cx.stop_propagation();
             }))
@@ -885,12 +913,12 @@ impl ScoreSyncApp {
                     cx.stop_propagation();
                 }),
             )
-                    .child(
-                        div()
-                            .id("dialog_card")
-                            .w(px(520.))
-                            .max_h(px(520.))
-                            .p_4()
+            .child(
+                div()
+                    .id("dialog_card")
+                    .w(px(520.))
+                    .max_h(px(520.))
+                    .p_4()
                     .rounded_lg()
                     .bg(rgb(0xffffff))
                     .border_1()
@@ -920,19 +948,15 @@ impl ScoreSyncApp {
                         .flex_1()
                         .min_h(px(0.)),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .child(self.btn(
-                                "dlg_ok",
-                                "确定",
-                                true,
-                                |this, _, cx| {
-                                    this.dismiss_dialog(cx);
-                                },
-                                cx,
-                            )),
-                    ),
+                    .child(div().flex_shrink_0().child(self.btn(
+                        "dlg_ok",
+                        "确定",
+                        true,
+                        |this, _, cx| {
+                            this.dismiss_dialog(cx);
+                        },
+                        cx,
+                    ))),
             )
             .into_any_element()
     }
@@ -1101,6 +1125,75 @@ impl ScoreSyncApp {
             )
     }
 
+    pub(super) fn unsaved_photo_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("dialog_backdrop_unsaved_photo")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000080))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .id("dialog_card_unsaved_photo")
+                    .w(px(420.))
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("未应用的修图"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x334155))
+                            .child("离开前要应用这次修图吗?"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .justify_end()
+                            .child(self.btn(
+                                "photo_apply",
+                                "应用并离开",
+                                true,
+                                |this, window, cx| this.apply_photo_and_leave(window, cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "photo_discard",
+                                "放弃",
+                                false,
+                                |this, window, cx| this.discard_photo_and_leave(window, cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "photo_stay",
+                                "取消",
+                                false,
+                                |this, _, cx| this.dismiss_dialog(cx),
+                                cx,
+                            )),
+                    ),
+            )
+    }
+
     pub(super) fn update_available_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (current, latest, url, changes) = match &self.dialog {
             Some(DialogKind::UpdateAvailable {
@@ -1135,18 +1228,10 @@ impl ScoreSyncApp {
                         .child(ver.clone()),
                 );
                 if bullets.is_empty() {
-                    block = block.child(
-                        div()
-                            .text_color(rgb(0x64748b))
-                            .child("见发布页说明."),
-                    );
+                    block = block.child(div().text_color(rgb(0x64748b)).child("见发布页说明."));
                 } else {
                     for b in bullets {
-                        block = block.child(
-                            div()
-                                .whitespace_normal()
-                                .child(format!("· {b}")),
-                        );
+                        block = block.child(div().whitespace_normal().child(format!("· {b}")));
                     }
                 }
                 notes = notes.child(block);
@@ -1178,7 +1263,11 @@ impl ScoreSyncApp {
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
-                    this.apply_scrollbar_drag(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                    this.apply_scrollbar_drag(
+                        f32::from(ev.position.x),
+                        f32::from(ev.position.y),
+                        cx,
+                    );
                 }
                 cx.stop_propagation();
             }))
@@ -1228,9 +1317,7 @@ impl ScoreSyncApp {
                             .flex_shrink_0()
                             .text_sm()
                             .text_color(rgb(0x334155))
-                            .child(format!(
-                                "当前 {current}, GitHub 最新 {latest}."
-                            )),
+                            .child(format!("当前 {current}, GitHub 最新 {latest}.")),
                     )
                     .child(
                         self.attach_scrollbars(

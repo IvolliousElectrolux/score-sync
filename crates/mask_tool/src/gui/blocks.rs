@@ -18,6 +18,7 @@ pub(crate) enum BlockHitZone {
 
 /// 单个分块的 GPU 贴图 (原始裁切, 未应用 layout), 拖动时只改绘制位置.
 /// `thumb` 与 GPU 贴图同尺寸, 供滴管在三层预览上取样, 不必持有整图 RGB.
+/// `source` 是磁盘上的原分辨率, 放大超过缩略图密度时按视口再裁一块.
 #[derive(Clone)]
 pub struct BlockTile {
     pub region_id: String,
@@ -27,12 +28,29 @@ pub struct BlockTile {
     pub height: u32,
     pub top_fill: [u8; 3],
     pub bottom_fill: [u8; 3],
+    pub source: Option<PieceDisk>,
+}
+
+/// 分块原图像素在磁盘上的位置. `flat` 时文件本身就是这块;
+/// 否则是整页, 条带为 `[band_y, band_y+band_h)`.
+#[derive(Clone)]
+pub struct PieceDisk {
+    pub path: std::path::PathBuf,
+    pub flat: bool,
+    pub page_w: u32,
+    pub page_h: u32,
+    pub band_y: u32,
+    pub band_h: u32,
 }
 
 impl BlockTile {
-    pub fn from_piece(region_id: String, img: &image::RgbImage, stats: crate::layout::PieceStats) -> Self {
+    pub fn from_piece(
+        region_id: String,
+        img: &image::RgbImage,
+        stats: crate::layout::PieceStats,
+    ) -> Self {
         let (width, height) = img.dimensions();
-        Self::from_piece_sized(region_id, img, width, height, stats)
+        Self::from_piece_sized(region_id, img, width, height, stats, None)
     }
 
     /// `logical_w`/`logical_h` 是原图像素尺寸 (布局/命中); GPU/thumb 可能更小.
@@ -42,6 +60,7 @@ impl BlockTile {
         logical_w: u32,
         logical_h: u32,
         stats: crate::layout::PieceStats,
+        source: Option<PieceDisk>,
     ) -> Self {
         let (thumb, image) = rgb_to_thumb_and_render(img);
         Self {
@@ -52,6 +71,7 @@ impl BlockTile {
             height: logical_h.max(1),
             top_fill: mean_to_u8(stats.top.0),
             bottom_fill: mean_to_u8(stats.bottom.0),
+            source,
         }
     }
 }
@@ -84,9 +104,21 @@ impl BlockBgTile {
         aspect_h: u32,
         sheet_w: u32,
     ) -> Option<Self> {
-        let (left, top, width, height) =
-            apply_bg::process::bg_page_rect(full.width(), full.height(), aspect_w, aspect_h, sheet_w)?;
-        let thumb = Arc::new(crop_to_thumb(full, left, top, width, height, GPU_TEX_MAX_SIDE));
+        let (left, top, width, height) = apply_bg::process::bg_page_rect(
+            full.width(),
+            full.height(),
+            aspect_w,
+            aspect_h,
+            sheet_w,
+        )?;
+        let thumb = Arc::new(crop_to_thumb(
+            full,
+            left,
+            top,
+            width,
+            height,
+            GPU_TEX_MAX_SIDE,
+        ));
         Some(Self {
             image: rgb_to_render_image_raw(&thumb),
             thumb,
@@ -140,13 +172,23 @@ fn mean_to_u8(m: [f32; 3]) -> [u8; 3] {
     ]
 }
 
-fn sample_thumb(thumb: &image::RgbImage, logical_w: u32, logical_h: u32, lx: f32, ly: f32) -> Option<[u8; 3]> {
+fn sample_thumb(
+    thumb: &image::RgbImage,
+    logical_w: u32,
+    logical_h: u32,
+    lx: f32,
+    ly: f32,
+) -> Option<[u8; 3]> {
     let (tw, th) = thumb.dimensions();
     if tw == 0 || th == 0 || logical_w == 0 || logical_h == 0 {
         return None;
     }
-    let x = (lx * tw as f32 / logical_w as f32).clamp(0.0, (tw - 1) as f32).round() as u32;
-    let y = (ly * th as f32 / logical_h as f32).clamp(0.0, (th - 1) as f32).round() as u32;
+    let x = (lx * tw as f32 / logical_w as f32)
+        .clamp(0.0, (tw - 1) as f32)
+        .round() as u32;
+    let y = (ly * th as f32 / logical_h as f32)
+        .clamp(0.0, (th - 1) as f32)
+        .round() as u32;
     let p = thumb.get_pixel(x.min(tw - 1), y.min(th - 1));
     Some([p[0], p[1], p[2]])
 }
@@ -338,6 +380,7 @@ impl MaskToolApp {
     }
 
     pub fn set_block_tiles(&mut self, tiles: Vec<BlockTile>, bg: Option<BlockBgTile>) {
+        self.clear_view_detail();
         let old_tiles = std::mem::take(&mut self.block_tiles);
         let old_bg = self.block_bg.take();
         for t in old_tiles {
@@ -480,16 +523,15 @@ impl MaskToolApp {
             let (trim_l, trim_r, ext_l, ext_r, _content_w) =
                 crate::layout::effective_h_metrics(tile.width as i32, &adj);
             let overlay_x = canvas_x((adj.shift_x - adj.extra_left) as f32);
-            let overlay_w = canvas_s(
-                (tile.width as i32 + adj.extra_left + adj.extra_right).max(1) as f32,
-            );
+            let overlay_w =
+                canvas_s((tile.width as i32 + adj.extra_left + adj.extra_right).max(1) as f32);
             // 后续界面 (preview_only) 按原块左右裁, 溢出区取样落到后面的底色.
-            let in_overlay_x = x >= overlay_x
-                && x < overlay_x + overlay_w
-                && (!self.preview_only || in_sheet_x);
+            let in_overlay_x =
+                x >= overlay_x && x < overlay_x + overlay_w && (!self.preview_only || in_sheet_x);
             let paper_left_x1 = canvas_x((adj.shift_x + trim_l as i32) as f32);
             let paper_right_x0 = canvas_x((adj.shift_x + tile.width as i32 - trim_r as i32) as f32);
-            let in_paper_x = (x >= canvas_x((adj.shift_x - ext_l as i32) as f32) && x < paper_left_x1)
+            let in_paper_x = (x >= canvas_x((adj.shift_x - ext_l as i32) as f32)
+                && x < paper_left_x1)
                 || (x >= paper_right_x0
                     && x < canvas_x((adj.shift_x + tile.width as i32 + ext_r as i32) as f32));
             let in_block_x = in_overlay_x || (in_paper_x && (!self.preview_only || in_sheet_x));
@@ -511,13 +553,9 @@ impl MaskToolApp {
                     }
                     let local_x = (x - hx_block) / cs;
                     let local_y = (y - piece_origin_y) / cs;
-                    if let Some(rgb) = sample_thumb(
-                        &tile.thumb,
-                        tile.width,
-                        tile.height,
-                        local_x,
-                        local_y,
-                    ) {
+                    if let Some(rgb) =
+                        sample_thumb(&tile.thumb, tile.width, tile.height, local_x, local_y)
+                    {
                         return Some(rgb);
                     }
                 }
@@ -584,7 +622,13 @@ impl MaskToolApp {
     /// 到齐后走这里换回最终预览. `voff`: 新拼合图在画布中的纵向偏移
     /// (调整分块可能改变拼合图总高, 底色合成居中的偏移量也会跟着变,
     /// 必须同步更新, 否则下一帧命中测试/叠加线的位置会跟画面错位).
-    pub fn update_base_image(&mut self, rgb: image::RgbImage, hoff: i64, voff: i64, cx: &mut Context<Self>) {
+    pub fn update_base_image(
+        &mut self,
+        rgb: image::RgbImage,
+        hoff: i64,
+        voff: i64,
+        cx: &mut Context<Self>,
+    ) {
         let render = rgb_to_render_image(&rgb);
         self.update_base_image_with_render(rgb, render, hoff, voff, cx);
     }
@@ -753,7 +797,7 @@ impl MaskToolApp {
             .collect()
     }
 
-    fn mask_sheet_to_canvas(&self, mut m: MaskRect) -> MaskRect {
+    pub(super) fn mask_sheet_to_canvas(&self, mut m: MaskRect) -> MaskRect {
         let cs = self.content_scale_or_1();
         m.map_scale(cs, self.block_hoff as f32, self.block_voff as f32);
         m
@@ -806,6 +850,7 @@ impl MaskToolApp {
         for m in &mut self.masks {
             m.translate(sdx, sdy);
         }
+        self.nudge_brush_sprites(sdx, sdy);
     }
 
     /// 组内各块在当前画布坐标系下 (已叠加 `block_voff` / `content_scale`)
@@ -857,13 +902,19 @@ impl MaskToolApp {
             return;
         }
         self.ensure_sheet_masks();
-        let deltas = layout::block_content_shifts(&self.block_heights, old_layout, &self.block_layout);
+        let deltas =
+            layout::block_content_shifts(&self.block_heights, old_layout, &self.block_layout);
         if deltas.is_empty() {
             return;
         }
         let old_spans = layout::compute_spans(&self.block_heights, old_layout);
+        let mut nudges = Vec::new();
         for m in &mut self.masks {
-            let target = m.bound_block.as_ref().filter(|b| self.block_heights.iter().any(|(id, _)| id == *b)).cloned();
+            let target = m
+                .bound_block
+                .as_ref()
+                .filter(|b| self.block_heights.iter().any(|(id, _)| id == *b))
+                .cloned();
             let target = target.or_else(|| {
                 let cy = (m.y0 + m.y1) as f32 / 2.0;
                 old_spans
@@ -874,8 +925,14 @@ impl MaskToolApp {
             if let Some(rid) = target {
                 if let Some(&(dx, dy)) = deltas.get(&rid) {
                     m.translate(dx, dy);
+                    if m.is_brush() {
+                        nudges.push((m.id.clone(), dx, dy));
+                    }
                 }
             }
+        }
+        for (id, dx, dy) in nudges {
+            self.nudge_brush_sprite(&id, dx, dy);
         }
     }
 
@@ -887,7 +944,11 @@ impl MaskToolApp {
     }
 
     fn ensure_layout_entry(&mut self, region_id: &str) -> usize {
-        if let Some(i) = self.block_layout.iter().position(|a| a.region_id == region_id) {
+        if let Some(i) = self
+            .block_layout
+            .iter()
+            .position(|a| a.region_id == region_id)
+        {
             return i;
         }
         self.block_layout.push(BlockAdjust {
@@ -960,7 +1021,12 @@ impl MaskToolApp {
     /// 拖动命中测试: 在画布 (`ix`, `iy`) (图像坐标, 已含 hoff/voff) 处,
     /// 找最靠近的块四边 (容差 `tol`) 或落在哪个块本体内. 横向按 `shift_x`
     /// 与左右裁扩后的实际位置 (含溢出页面的部分).
-    pub(super) fn hit_block_at(&self, ix: f32, iy: f32, tol: f32) -> Option<(String, BlockHitZone)> {
+    pub(super) fn hit_block_at(
+        &self,
+        ix: f32,
+        iy: f32,
+        tol: f32,
+    ) -> Option<(String, BlockHitZone)> {
         let spans = self.block_spans();
         if spans.is_empty() {
             return None;
@@ -1119,11 +1185,8 @@ impl MaskToolApp {
         if delta == 0 {
             return (undid, false);
         }
-        let abs_start = layout::fold_voff_into_leading_gap(
-            &self.block_heights,
-            start_layout,
-            start_voff,
-        );
+        let abs_start =
+            layout::fold_voff_into_leading_gap(&self.block_heights, start_layout, start_voff);
         let r = layout::redistribute_for_block_move(
             &self.block_heights,
             &abs_start,
@@ -1202,11 +1265,8 @@ impl MaskToolApp {
         if raw_delta == 0 {
             return (undid, false);
         }
-        let mut layout = layout::fold_voff_into_leading_gap(
-            &self.block_heights,
-            start_layout,
-            start_voff,
-        );
+        let mut layout =
+            layout::fold_voff_into_leading_gap(&self.block_heights, start_layout, start_voff);
         let start_extra_top = BlockAdjust::find(&layout, region_id)
             .map(|a| a.extra_top)
             .unwrap_or(0);
@@ -1217,12 +1277,8 @@ impl MaskToolApp {
         if delta == 0 {
             return (undid, false);
         }
-        let (new_extra_top, new_gap_before) = layout::resize_top_apply_delta(
-            start_extra_top,
-            start_gap_before,
-            delta,
-            snap_zero,
-        );
+        let (new_extra_top, new_gap_before) =
+            layout::resize_top_apply_delta(start_extra_top, start_gap_before, delta, snap_zero);
         if let Some(a) = layout.iter_mut().find(|a| a.region_id == region_id) {
             a.extra_top = new_extra_top;
             a.gap_before = new_gap_before;
@@ -1267,11 +1323,8 @@ impl MaskToolApp {
         if delta == 0 {
             return (undid, false);
         }
-        let mut layout = layout::fold_voff_into_leading_gap(
-            &self.block_heights,
-            start_layout,
-            start_voff,
-        );
+        let mut layout =
+            layout::fold_voff_into_leading_gap(&self.block_heights, start_layout, start_voff);
         let start_extra_bottom = BlockAdjust::find(&layout, region_id)
             .map(|a| a.extra_bottom)
             .unwrap_or(0);
@@ -1362,8 +1415,14 @@ impl MaskToolApp {
             return (undid, false);
         }
         let delta = if left { -mouse } else { mouse };
-        let layout =
-            layout::apply_block_resize_side(start_layout, region_id, left, delta, orig_w, snap_zero);
+        let layout = layout::apply_block_resize_side(
+            start_layout,
+            region_id,
+            left,
+            delta,
+            orig_w,
+            snap_zero,
+        );
         if layout == self.block_layout {
             return (undid, false);
         }

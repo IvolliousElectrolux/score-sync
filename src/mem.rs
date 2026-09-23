@@ -11,7 +11,10 @@ pub fn rgb_bytes(img: &RgbImage) -> u64 {
     img.width() as u64 * img.height() as u64 * 3
 }
 
-pub fn rgb_arc_unique_bytes(img: &Arc<RgbImage>, seen: &mut std::collections::HashSet<usize>) -> u64 {
+pub fn rgb_arc_unique_bytes(
+    img: &Arc<RgbImage>,
+    seen: &mut std::collections::HashSet<usize>,
+) -> u64 {
     let p = Arc::as_ptr(img) as usize;
     if !seen.insert(p) {
         0

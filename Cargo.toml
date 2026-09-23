@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "crates/apply_bg", "crates/mask_tool", "crates/score_video"]
+members = [".", "crates/apply_bg", "crates/mask_tool", "crates/score_video", "crates/photo_edit"]
 
 [workspace.package]
 version = "1.4.12"
@@ -21,6 +21,7 @@ gpui = { version = "0.2.2", default-features = false, features = ["windows-manif
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
 mask_tool = { path = "crates/mask_tool" }
 apply_bg = { path = "crates/apply_bg" }
+photo_edit = { path = "crates/photo_edit" }
 pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_6406", "image", "thread_safe"] }
 rfd = "0.15"
 score_video = { path = "crates/score_video" }
@@ -32,8 +33,15 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 ureq = "2"
 thiserror = "2"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
+
+# GPUI 0.2.2 的 Windows load_cursor 漏了 IDC_SIZENWSE / IDC_SIZENESW, 斜向会变成箭头.
+[patch.crates-io]
+gpui = { path = "patches/gpui-0.2.2" }
 
 # 日常 `cargo run -r`: 够快, 链接不再拖到数分钟.
 [profile.release]

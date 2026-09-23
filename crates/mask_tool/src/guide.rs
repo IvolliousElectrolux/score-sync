@@ -128,7 +128,10 @@ mod tests {
 
     #[test]
     fn set_staff_slots_zero_clears() {
-        let mut g = GuideState { lines: vec![10, 20], locked: false };
+        let mut g = GuideState {
+            lines: vec![10, 20],
+            locked: false,
+        };
         g.set_staff_slots(0, 1000);
         assert!(g.lines.is_empty());
     }
@@ -143,19 +146,28 @@ mod tests {
 
     #[test]
     fn is_default_false_once_locked_even_without_lines() {
-        let g = GuideState { lines: vec![], locked: true };
+        let g = GuideState {
+            lines: vec![],
+            locked: true,
+        };
         assert!(!g.is_default());
     }
 
     #[test]
     fn scaled_to_same_height_is_clone() {
-        let g = GuideState { lines: vec![100, 400], locked: false };
+        let g = GuideState {
+            lines: vec![100, 400],
+            locked: false,
+        };
         assert_eq!(g.scaled_to(1000, 1000), g);
     }
 
     #[test]
     fn scaled_to_maps_proportionally() {
-        let g = GuideState { lines: vec![100, 400], locked: false };
+        let g = GuideState {
+            lines: vec![100, 400],
+            locked: false,
+        };
         let s = g.scaled_to(1000, 2000);
         assert_eq!(s.sorted_lines(), vec![200, 800]);
     }

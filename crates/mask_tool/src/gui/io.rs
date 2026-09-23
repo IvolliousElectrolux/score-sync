@@ -276,11 +276,7 @@ impl MaskToolApp {
             Ok(img) => {
                 let rgb = img.to_rgb8();
                 let (w, h) = rgb.dimensions();
-                let restored = self
-                    .page_masks
-                    .get(&path)
-                    .cloned()
-                    .unwrap_or_default();
+                let restored = self.page_masks.get(&path).cloned().unwrap_or_default();
                 let render = rgb_to_render_image(&rgb);
                 // 先把旧页的撤重栈存好, 再切路径.
                 self.stash_history();
@@ -303,15 +299,11 @@ impl MaskToolApp {
                 self.drag = None;
                 self.poly_draft = None;
                 self.poly_cursor = None;
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("image");
-                self.status = format!("已载入 {name} ({w}×{h}) · 蒙版 {} 个", self.masks.len()).into();
-                self.hint = format!(
-                    "已载入 {name}. 框选/折线/画笔画蒙版; 平移拖动画布或已选框."
-                )
-                .into();
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("image");
+                self.status =
+                    format!("已载入 {name} ({w}×{h}) · 蒙版 {} 个", self.masks.len()).into();
+                self.hint =
+                    format!("已载入 {name}. 框选/折线/画笔画蒙版; 平移拖动画布或已选框.").into();
                 cx.notify();
             }
             Err(e) => {
@@ -350,12 +342,10 @@ impl MaskToolApp {
         Self::spawn_native_dialog(
             cx,
             move || {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("打开图片")
-                    .add_filter(
-                        "Images",
-                        &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"],
-                    );
+                let mut dialog = rfd::FileDialog::new().set_title("打开图片").add_filter(
+                    "Images",
+                    &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"],
+                );
                 if let Some(parent) = start {
                     dialog = dialog.set_directory(parent);
                 }
@@ -409,7 +399,10 @@ impl MaskToolApp {
             .and_then(|s| s.to_str())
             .unwrap_or("masked.png")
             .to_string();
-        let start_dir = suggested.parent().filter(|p| p.is_dir()).map(|p| p.to_path_buf());
+        let start_dir = suggested
+            .parent()
+            .filter(|p| p.is_dir())
+            .map(|p| p.to_path_buf());
         Self::spawn_native_dialog(
             cx,
             move || {

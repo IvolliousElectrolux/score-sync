@@ -136,7 +136,10 @@ mod tests {
             img.put_pixel(x, 10, Rgb([10, 10, 10]));
         }
         let (mean, _std) = sample_bg_stats(&img, 128);
-        assert!(mean[0] > 240.0, "mean should stay near background: {mean:?}");
+        assert!(
+            mean[0] > 240.0,
+            "mean should stay near background: {mean:?}"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! 底色面板: 右侧栏选图、纯色取色、应用到工程组合.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 use apply_bg::process::is_image;
 use image::{Frame, ImageBuffer, RgbaImage};
 use mask_tool::color_prefs::{hsv_to_rgb, rgb_to_hsv};
@@ -177,10 +177,14 @@ impl ScoreSyncApp {
             .detach();
         cx.observe(&self.bg.rgb_b, |this, _, cx| this.apply_bg_rgb_inputs(cx))
             .detach();
-        cx.observe(&self.bg.aspect_w, |this, _, cx| this.apply_bg_aspect_inputs(cx))
-            .detach();
-        cx.observe(&self.bg.aspect_h, |this, _, cx| this.apply_bg_aspect_inputs(cx))
-            .detach();
+        cx.observe(&self.bg.aspect_w, |this, _, cx| {
+            this.apply_bg_aspect_inputs(cx)
+        })
+        .detach();
+        cx.observe(&self.bg.aspect_h, |this, _, cx| {
+            this.apply_bg_aspect_inputs(cx)
+        })
+        .detach();
     }
 
     pub(super) fn sync_bg_ui_from_doc(&mut self, cx: &mut Context<Self>) {
@@ -437,10 +441,7 @@ impl ScoreSyncApp {
         if !is_image(&path) {
             self.show_error(
                 "无法作为底色",
-                crate::error::Error::msg(format!(
-                    "只支持一张图片文件: {}",
-                    path.display()
-                )),
+                crate::error::Error::msg(format!("只支持一张图片文件: {}", path.display())),
                 cx,
             );
             return;
@@ -462,31 +463,29 @@ impl ScoreSyncApp {
         });
         cx.spawn(async move |this, cx| {
             let r = rx.recv().await.ok();
-            this.update(cx, |view, cx| {
-                match r {
-                    Some(Ok(Ok((rgb, thumb)))) => {
-                        view.cache_bg_file(path, rgb);
-                        view.bg.pending_preview = Some(rgb_to_render_image(&thumb));
-                        view.status = "已选择底色图, 点「应用底色」叠到工程组合.".into();
-                        view.hint = view.status.clone();
-                        cx.notify();
-                    }
-                    Some(Ok(Err(e))) => {
-                        view.show_error(
-                            "无法打开底色",
-                            crate::error::Error::image_open(path.clone(), e),
-                            cx,
-                        );
-                    }
-                    Some(Err(_)) => {
-                        view.show_error(
-                            "无法打开底色",
-                            crate::error::Error::msg("加载超高清底色时内存不足, 请换一张较小的图"),
-                            cx,
-                        );
-                    }
-                    None => {}
+            this.update(cx, |view, cx| match r {
+                Some(Ok(Ok((rgb, thumb)))) => {
+                    view.cache_bg_file(path, rgb);
+                    view.bg.pending_preview = Some(rgb_to_render_image(&thumb));
+                    view.status = "已选择底色图, 点「应用底色」叠到工程组合.".into();
+                    view.hint = view.status.clone();
+                    cx.notify();
                 }
+                Some(Ok(Err(e))) => {
+                    view.show_error(
+                        "无法打开底色",
+                        crate::error::Error::image_open(path.clone(), e),
+                        cx,
+                    );
+                }
+                Some(Err(_)) => {
+                    view.show_error(
+                        "无法打开底色",
+                        crate::error::Error::msg("加载超高清底色时内存不足, 请换一张较小的图"),
+                        cx,
+                    );
+                }
+                None => {}
             })
             .ok();
         })
@@ -498,9 +497,8 @@ impl ScoreSyncApp {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("bg.png");
-        let session = crate::page_cache::ingest_file(&path, name).or_else(|_| {
-            crate::page_cache::write_rgb_png(&rgb, "bg_cache")
-        });
+        let session = crate::page_cache::ingest_file(&path, name)
+            .or_else(|_| crate::page_cache::write_rgb_png(&rgb, "bg_cache"));
         // 超高清原图只留磁盘, 内存里等「应用」再按页裁. 选图预览用 pending_preview.
         drop(rgb);
         self.bg.cached_image = None;
@@ -727,9 +725,7 @@ impl ScoreSyncApp {
             Ok(img) => img,
             Err(arc) => (*arc).clone(),
         };
-        let working = Arc::new(apply_bg::process::working_bg_copy(
-            owned, aw, ah, max_sw,
-        ));
+        let working = Arc::new(apply_bg::process::working_bg_copy(owned, aw, ah, max_sw));
         match self.doc.set_project_bg_arc(working, source.clone(), aw, ah) {
             Ok(()) => {
                 self.bg.applied_is_solid = false;
@@ -1022,13 +1018,7 @@ impl ScoreSyncApp {
                                     ),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .h(px(1.))
-                            .w_full()
-                            .bg(rgb(0xcbd5e1)),
-                    )
+                    .child(div().flex_shrink_0().h(px(1.)).w_full().bg(rgb(0xcbd5e1)))
                     .child(
                         div()
                             .flex_1()
@@ -1099,13 +1089,7 @@ impl ScoreSyncApp {
                 let id_up = id;
                 let id_out = id;
                 d.cursor_pointer()
-                    .hover(move |s| {
-                        s.bg(if active {
-                            rgb(0x1d4ed8)
-                        } else {
-                            rgb(0xcbd5e1)
-                        })
-                    })
+                    .hover(move |s| s.bg(if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -1249,9 +1233,12 @@ impl ScoreSyncApp {
                         } else {
                             col.justify_between()
                         };
-                        col.children(cells.into_iter().enumerate().map(|(i, color)| {
-                            self.bg_recent_swatch(i, color, compressed, cx)
-                        }))
+                        col.children(
+                            cells
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, color)| self.bg_recent_swatch(i, color, compressed, cx)),
+                        )
                     })
                     .child(
                         div()
@@ -1469,27 +1456,33 @@ impl ScoreSyncApp {
                                 }),
                             ),
                     )
+                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("R"))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(0x94a3b8))
-                            .child("R"),
+                            .id("bg_rgb_r")
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h(px(20.))
+                            .child(r_in),
                     )
-                    .child(div().id("bg_rgb_r").flex_1().min_w(px(0.)).h(px(20.)).child(r_in))
+                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("G"))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(0x94a3b8))
-                            .child("G"),
+                            .id("bg_rgb_g")
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h(px(20.))
+                            .child(g_in),
                     )
-                    .child(div().id("bg_rgb_g").flex_1().min_w(px(0.)).h(px(20.)).child(g_in))
+                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("B"))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(0x94a3b8))
-                            .child("B"),
-                    )
-                    .child(div().id("bg_rgb_b").flex_1().min_w(px(0.)).h(px(20.)).child(b_in)),
+                            .id("bg_rgb_b")
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h(px(20.))
+                            .child(b_in),
+                    ),
             )
     }
 
@@ -1613,10 +1606,7 @@ impl ScoreSyncApp {
                                         .justify_center()
                                         .gap_2()
                                         .child(
-                                            div()
-                                                .text_3xl()
-                                                .text_color(rgb(0x64748b))
-                                                .child("🖼"),
+                                            div().text_3xl().text_color(rgb(0x64748b)).child("🖼"),
                                         )
                                         .child(
                                             div()
@@ -1638,10 +1628,7 @@ impl ScoreSyncApp {
                                         .flex()
                                         .justify_center()
                                         .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xf8fafc))
-                                                .child(hint),
+                                            div().text_xs().text_color(rgb(0xf8fafc)).child(hint),
                                         ),
                                 )
                             }),
@@ -1671,10 +1658,7 @@ impl ScoreSyncApp {
             .into_any_element()
     }
 
-    pub(super) fn apply_bg_batch_overlay(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn apply_bg_batch_overlay(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.bg.batch_open {
             return div().into_any_element();
         }

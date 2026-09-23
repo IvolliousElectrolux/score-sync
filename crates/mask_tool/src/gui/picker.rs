@@ -131,35 +131,31 @@ impl MaskToolApp {
     pub(super) fn picker_caret(place_below: bool, caret_x: f32) -> impl IntoElement {
         let h = 8.0_f32;
         let half = 8.0_f32;
-        div()
-            .w_full()
-            .h(px(h))
-            .relative()
-            .child(
-                canvas(|_, _, _| {}, {
-                    move |bounds, _, window, _| {
-                        let ox = f32::from(bounds.origin.x);
-                        let oy = f32::from(bounds.origin.y);
-                        let cx = ox + caret_x;
-                        let mut builder = PathBuilder::fill();
-                        if place_below {
-                            builder.move_to(point(px(cx), px(oy)));
-                            builder.line_to(point(px(cx - half), px(oy + h)));
-                            builder.line_to(point(px(cx + half), px(oy + h)));
-                        } else {
-                            builder.move_to(point(px(cx), px(oy + h)));
-                            builder.line_to(point(px(cx - half), px(oy)));
-                            builder.line_to(point(px(cx + half), px(oy)));
-                        }
-                        builder.close();
-                        if let Ok(path) = builder.build() {
-                            window.paint_path(path, rgb(0x1e293b));
-                        }
+        div().w_full().h(px(h)).relative().child(
+            canvas(|_, _, _| {}, {
+                move |bounds, _, window, _| {
+                    let ox = f32::from(bounds.origin.x);
+                    let oy = f32::from(bounds.origin.y);
+                    let cx = ox + caret_x;
+                    let mut builder = PathBuilder::fill();
+                    if place_below {
+                        builder.move_to(point(px(cx), px(oy)));
+                        builder.line_to(point(px(cx - half), px(oy + h)));
+                        builder.line_to(point(px(cx + half), px(oy + h)));
+                    } else {
+                        builder.move_to(point(px(cx), px(oy + h)));
+                        builder.line_to(point(px(cx - half), px(oy)));
+                        builder.line_to(point(px(cx + half), px(oy)));
                     }
-                })
-                .absolute()
-                .size_full(),
-            )
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, rgb(0x1e293b));
+                    }
+                }
+            })
+            .absolute()
+            .size_full(),
+        )
     }
 
     pub(super) fn color_picker_floating(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -243,7 +239,9 @@ impl MaskToolApp {
                     )
                     .when(place_below, |d| d.child(Self::picker_caret(true, caret_x)))
                     .child(self.color_picker_popover(cx))
-                    .when(!place_below, |d| d.child(Self::picker_caret(false, caret_x))),
+                    .when(!place_below, |d| {
+                        d.child(Self::picker_caret(false, caret_x))
+                    }),
             )
     }
 
@@ -345,6 +343,12 @@ impl MaskToolApp {
         let y = iy.round().clamp(0.0, (self.img_h - 1) as f32) as u32;
         let p = img.get_pixel(x, y);
         Some([p[0], p[1], p[2]])
+    }
+
+    pub(super) fn sample_ring_under(&self, cx: f32, cy: f32, r: f32) -> Vec<[u8; 3]> {
+        sample_ring_points(cx, cy, r)
+            .filter_map(|(x, y)| self.sample_image_rgb(x, y))
+            .collect()
     }
 
     /// 取色预览: 只改色盘/HSV/目标色与 RGB 文本, 不改已选蒙版项、不入最近色.

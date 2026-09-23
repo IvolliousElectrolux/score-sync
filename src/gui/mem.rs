@@ -1,7 +1,7 @@
 //! 内存分项 dump: `SCORE_SYNC_TRACE=1` 每 2 秒采样, `{ms}M` 立刻打到状态栏和日志.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 use crate::mem::{self, fmt_bytes};
 
 fn gpu_bytes(img: &RenderImage) -> u64 {
@@ -21,9 +21,7 @@ impl ScoreSyncApp {
         cx.spawn(async move |this, cx| {
             let mut ticks = 0u32;
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_secs(2))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(2)).await;
                 ticks = ticks.wrapping_add(1);
                 let heartbeat = ticks % 15 == 0;
                 let cont = this
@@ -61,7 +59,12 @@ impl ScoreSyncApp {
         self.record_and_write(if heartbeat { "heartbeat" } else { "poll" }, false, snap);
     }
 
-    pub(super) fn emit_memory(&mut self, reason: &str, force_file: bool, cx: &Context<Self>) -> String {
+    pub(super) fn emit_memory(
+        &mut self,
+        reason: &str,
+        force_file: bool,
+        cx: &Context<Self>,
+    ) -> String {
         let snap = self.collect_memory(cx);
         self.record_and_write(reason, force_file, snap)
     }

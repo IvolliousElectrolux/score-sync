@@ -13,12 +13,16 @@ impl MaskToolApp {
         }
         self.poly_draft = None;
         self.poly_cursor = None;
-        self.status = "已取消折线.".into();
+        self.status = "已取消套索.".into();
         cx.notify();
     }
 
     /// 折线光标: 点数≥3 且靠近首点时吸附到首点.
     pub(super) fn poly_maybe_snap(&self, ix: f32, iy: f32) -> (f32, f32, bool) {
+        self.poly_snap_within(ix, iy, POLY_SNAP_SCREEN_PX)
+    }
+
+    pub(super) fn poly_snap_within(&self, ix: f32, iy: f32, radius: f32) -> (f32, f32, bool) {
         let Some(draft) = &self.poly_draft else {
             return (ix, iy, false);
         };
@@ -30,7 +34,7 @@ impl MaskToolApp {
         let (sx, sy) = xform.image_to_screen(ix, iy);
         let (fsx, fsy) = xform.image_to_screen(fx, fy);
         let dist = (sx - fsx).hypot(sy - fsy);
-        if dist <= POLY_SNAP_SCREEN_PX {
+        if dist <= radius {
             (fx, fy, true)
         } else {
             (ix, iy, false)
@@ -38,20 +42,27 @@ impl MaskToolApp {
     }
 
     pub(super) fn finalize_poly(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.poly_draft.take() else {
+        let Some(mut draft) = self.poly_draft.take() else {
             return;
         };
-        self.poly_cursor = None;
+        if let Some((x, y)) = self.poly_cursor.take() {
+            let far = draft
+                .last()
+                .map(|&(lx, ly)| (lx - x).hypot(ly - y) > 0.4)
+                .unwrap_or(true);
+            if far {
+                draft.push((x, y));
+            }
+        }
         if draft.len() < 3 || self.img_w < 2 || self.img_h < 2 {
-            self.status = "折线至少需要 3 个点.".into();
+            self.status = "套索至少需要 3 个点.".into();
             cx.notify();
             return;
         }
         let iw = self.img_w as i32;
         let ih = self.img_h as i32;
-        let clamp = |v: f32, hi: i32| -> i32 {
-            v.round().clamp(0.0, (hi - 1).max(0) as f32) as i32
-        };
+        let clamp =
+            |v: f32, hi: i32| -> i32 { v.round().clamp(0.0, (hi - 1).max(0) as f32) as i32 };
         self.ensure_sheet_masks();
         let pts: Vec<(i32, i32)> = draft
             .iter()
@@ -70,7 +81,7 @@ impl MaskToolApp {
             }
         }
         if dedup.len() < 3 {
-            self.status = "折线顶点过少, 已取消.".into();
+            self.status = "套索顶点过少, 已取消.".into();
             cx.notify();
             return;
         }
@@ -94,7 +105,7 @@ impl MaskToolApp {
         self.masks.push(m);
         self.selected.clear();
         self.selected.insert(mid);
-        self.status = format!("蒙版 {} 个 (折线闭环)", self.masks.len()).into();
+        self.status = format!("蒙版 {} 个 (套索闭环)", self.masks.len()).into();
         cx.notify();
     }
     pub fn fit_to_view(&mut self, cx: &mut Context<Self>) {
@@ -180,9 +191,9 @@ impl MaskToolApp {
     pub(super) fn mode_status(mode: ToolMode) -> SharedString {
         match mode {
             ToolMode::Draw => "框选".into(),
-            ToolMode::Poly => "折线: 逐点连线, 靠近首点吸附闭环 (右键取消)".into(),
-            ToolMode::Brush => "画笔 (拖动画布涂抹; 可改颜色/粗细)".into(),
-            ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光".into(),
+            ToolMode::Poly => "套索: 单击折线, 按住拖轨迹, 靠近首点或松手闭环".into(),
+            ToolMode::Brush => "画笔 (拖动画布涂抹; 可改颜色/粗细; Alt+滚轮调大小)".into(),
+            ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光; Alt+滚轮调大小".into(),
             ToolMode::Select => format!(
                 "选择 (可 {}多选 / Shift 拖选); 未选中蒙版时拖块上下移, 拖四边裁切, Shift+拖左右移",
                 apply_bg::primary_mod()
@@ -213,6 +224,15 @@ impl MaskToolApp {
         cx.notify();
     }
 
+    pub(super) fn bump_brush_size(&mut self, bigger: bool) {
+        let max = self.brush_size_max();
+        let t = brush_size_to_t(self.brush_size, BRUSH_SIZE_MIN, max);
+        let step = 0.06;
+        let nt = if bigger { t + step } else { t - step };
+        self.brush_size = brush_size_from_t(nt.clamp(0.0, 1.0), BRUSH_SIZE_MIN, max);
+        self.clamp_brush_size();
+    }
+
     pub(super) fn append_brush_point(&mut self, id: &str, ix: f32, iy: f32) -> bool {
         self.ensure_sheet_masks();
         let (sx, sy) = self.canvas_to_sheet_xy(ix, iy);
@@ -230,7 +250,7 @@ impl MaskToolApp {
             }
         }
         m.brush_points.push((px, py));
-        m.refresh_brush_bounds();
+        m.include_brush_point(px, py);
         true
     }
 
@@ -340,6 +360,15 @@ impl MaskToolApp {
                 m.translate(sdx, sdy);
             }
         }
+        let nudged: Vec<String> = self
+            .masks
+            .iter()
+            .filter(|m| m.is_brush() && self.selected.contains(&m.id))
+            .map(|m| m.id.clone())
+            .collect();
+        for id in nudged {
+            self.nudge_brush_sprite(&id, sdx, sdy);
+        }
         (
             (sdx as f32 * cs).round() as i32,
             (sdy as f32 * cs).round() as i32,
@@ -382,10 +411,7 @@ impl MaskToolApp {
     /// 再撤一次把已经回滚的全局状态冲乱.
     pub fn purge_host_token(&mut self, token: u64) {
         fn strip(stack: &mut Vec<UndoSnapshot>, token: u64) {
-            if let Some(i) = stack
-                .iter()
-                .position(|s| s.host_guide_token == Some(token))
-            {
+            if let Some(i) = stack.iter().position(|s| s.host_guide_token == Some(token)) {
                 stack.truncate(i);
             }
         }

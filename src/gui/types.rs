@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{Pixels, Point, SharedString};
 use crate::model::{Group, Page, Region};
+use gpui::{Pixels, Point, SharedString};
 use mask_tool::guide::GuideState;
 use mask_tool::layout::BlockAdjust;
 use mask_tool::mask::MaskRect;
@@ -60,9 +60,13 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 \n\
 【蒙版】快捷键 (右侧切到蒙版后):\n\
    初始为选择态 (不激活框选); 未选中任何蒙版时可直接拖动/拉伸「组合分块」 (拖上下移; 拖左右边裁宽; Shift+拖左右移, 可超出原块左右; 拖动中贴图跟手)\n\
-  B 框选 | L 折线 (逐点连线, 吸附首点闭环) | P 平移 | 画笔/橡皮 (侧栏, 可调色/粗细)\n\
+  B 框选 | L 套索 (单击折线, 按住拖轨迹, 靠近首点或松手闭环) | P 平移 | 画笔/橡皮 (侧栏, 可调色/粗细; Alt+滚轮调大小)\n\
   E 导出本页图片 | F 适应 | Delete 删除选中\n\
   {m}A 全选蒙版 | {m}Z/Y 撤重 (蒙版与分块微调共用, 按组合独立记忆, 切走再回来仍可撤)\n\
+  右侧「组合分块」里「修图 (T)」或按 T: 对选中分块进入修图; Esc 取消本次不写盘\n\
+  框选 (V) / 魔棒 (W) / 套索 (L) 拖边界改选区 (吸附画布边/起点), 提出图层 (J); 移动 (M) 拖图层 (Shift 锁横平竖直), 拖边角拉伸 (Shift 锁比例), 再往外拖旋转 (Shift 按 15° 吸附); 画布 (K) 拖边吸附原尺寸与图层边界;\n\
+  图章 (S) 按住 Alt 取样; 画笔 (B) 点色块开调色盘, Alt 点画布取色; 橡皮 (E) 痕迹 (笔尖/整笔) 或图层, 单击只动最上层, 拖动擦碰到的; 画笔/修复/图章/橡皮 Alt+滚轮调大小; 魔棒按 Photoshop 容差选当前图层的真实像素 (连续/抗锯齿可关; Shift 加选, Alt 减选, Shift+Alt 交选); 图层可拖动调叠放顺序;\n\
+  应用并退出=写下这块覆盖; 取消 (Esc)=退出本次; 还原=这块回到初始裁切, 仍留在修图\n\
   {m}S 保存工程 (各面板通用)\n\
   顶栏「辅助线」开关 (右键: 全局开启 / 同步同根数位置 / 当前页根数);\n\
   「对齐」把本组合锚到辅助线 (右键: 全局对齐 / 还原初始状态)\n\
@@ -249,7 +253,9 @@ pub(crate) struct BgHistory {
 }
 
 pub(crate) enum DragKind {
-    PagePan { last: Point<Pixels> },
+    PagePan {
+        last: Point<Pixels>,
+    },
     Edge {
         region_id: String,
         edge: &'static str,
@@ -352,6 +358,10 @@ pub(crate) enum DialogKind {
     UnsavedExit,
     /// 新建工程前有未保存改动
     UnsavedNew,
+    /// 离开 P 图时有未应用改动
+    UnsavedPhoto {
+        next: Option<SideTool>,
+    },
     /// GitHub 上有更新的正式版
     UpdateAvailable {
         current: String,

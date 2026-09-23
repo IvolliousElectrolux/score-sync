@@ -46,7 +46,11 @@ pub(crate) fn compose_parts_impl(
                 })
         })
         .collect();
-    Some(mask_tool::layout::stitch_with_stats(parts, &piece_stats, layout))
+    Some(mask_tool::layout::stitch_with_stats(
+        parts,
+        &piece_stats,
+        layout,
+    ))
 }
 
 /// 底色合成所需的快照 (见 [`GroupRenderJob`]).
@@ -70,6 +74,7 @@ struct GroupRenderPart {
     y0: u32,
     height: u32,
     inline: Option<RgbImage>,
+    override_path: Option<PathBuf>,
 }
 
 /// `DocState::render_group_final` 所需只读数据的快照, 由
@@ -94,6 +99,12 @@ impl GroupRenderJob {
         let mut cache: HashMap<PathBuf, RgbImage> = HashMap::new();
         let mut parts = Vec::with_capacity(self.members.len());
         for m in &self.members {
+            if let Some(path) = &m.override_path {
+                if path.is_file() {
+                    parts.push((m.rid.clone(), crate::page_cache::load_rgb(path)?));
+                    continue;
+                }
+            }
             if let Some(img) = &m.inline {
                 parts.push((m.rid.clone(), img.clone()));
                 continue;
@@ -124,9 +135,8 @@ impl GroupRenderJob {
     /// 纯计算, 不接触 `DocState`, 可安全放到非主线程跑.
     pub fn render(&self) -> Result<RgbImage, String> {
         let parts = self.collect_full_parts()?;
-        let mut combined =
-            compose_parts_impl(&parts, &self.block_layout, self.ink_threshold, None)
-                .ok_or_else(|| "无成员片段".to_string())?;
+        let mut combined = compose_parts_impl(&parts, &self.block_layout, self.ink_threshold, None)
+            .ok_or_else(|| "无成员片段".to_string())?;
         drop(parts);
         if !self.masks.is_empty() {
             mask_tool::mask::apply_masks_to_sheet(
@@ -166,9 +176,7 @@ impl GroupRenderJob {
                 match composed {
                     Ok(c) => combined = c,
                     Err(e) => {
-                        crate::trace::log(&format!(
-                            "GroupRenderJob: 底色合成失败, 用纯谱面: {e}"
-                        ));
+                        crate::trace::log(&format!("GroupRenderJob: 底色合成失败, 用纯谱面: {e}"));
                     }
                 }
             }
@@ -210,6 +218,9 @@ impl DocState {
         g.region_ids
             .iter()
             .filter_map(|rid| {
+                if let Some((_, h)) = self.region_edit_size(rid) {
+                    return Some((rid.clone(), h));
+                }
                 let (_, r) = self.find_region(rid)?;
                 Some((rid.clone(), (r.y1 - r.y0 + 1).max(0) as u32))
             })
@@ -224,8 +235,16 @@ impl DocState {
         g.region_ids
             .iter()
             .filter_map(|rid| {
-                let (pi, _) = self.find_region(rid)?;
-                Some(self.pages.get(pi)?.width().max(1))
+                let edit_w = self.region_edit_size(rid).map(|(w, _)| w);
+                let page_w = self
+                    .find_region(rid)
+                    .and_then(|(pi, _)| self.pages.get(pi).map(|p| p.width().max(1)));
+                match (edit_w, page_w) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
             })
             .max()
             .unwrap_or(1)
@@ -292,7 +311,12 @@ impl DocState {
         };
         g.region_ids
             .iter()
-            .filter_map(|rid| self.crop_region(rid).map(|img| (rid.clone(), img)))
+            .filter_map(|rid| {
+                if let Some(flat) = self.load_region_flat(rid) {
+                    return Some((rid.clone(), flat));
+                }
+                self.crop_region(rid).map(|img| (rid.clone(), img))
+            })
             .collect()
     }
 
@@ -325,7 +349,12 @@ impl DocState {
         parts: &[(String, image::RgbImage)],
         stats: Option<&std::collections::HashMap<String, mask_tool::layout::PieceStats>>,
     ) -> Option<image::RgbImage> {
-        compose_parts_impl(parts, self.get_block_layout(group_id), self.ink_threshold, stats)
+        compose_parts_impl(
+            parts,
+            self.get_block_layout(group_id),
+            self.ink_threshold,
+            stats,
+        )
     }
 
     /// 组合最前面那个块自己的 `gap_before` (人为拖动第一块腾出的、没有
@@ -361,17 +390,10 @@ impl DocState {
     /// 组合内各块在拼合图中的纵向范围 (`(region_id, comp_y0, comp_y1)`),
     /// 已应用 `group_block_layout` 微调; 供「组合分块」列表/蒙版画布使用.
     pub fn group_member_spans(&self, group_id: &str) -> Vec<(String, i64, i64)> {
-        let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
+        if self.groups.iter().all(|g| g.id != group_id) {
             return Vec::new();
-        };
-        let heights: Vec<(String, u32)> = g
-            .region_ids
-            .iter()
-            .filter_map(|rid| {
-                let (_, r) = self.find_region(rid)?;
-                Some((rid.clone(), (r.y1 - r.y0 + 1).max(0) as u32))
-            })
-            .collect();
+        }
+        let heights = self.group_member_heights(group_id);
         mask_tool::layout::compute_spans(&heights, self.get_block_layout(group_id))
     }
 
@@ -483,12 +505,22 @@ impl DocState {
             if inline.is_none() && !page.disk_path.is_file() {
                 continue;
             }
+            let override_path = if self.has_region_edit(rid) {
+                Some(Self::region_edit_dir(rid).join("flat.png"))
+            } else {
+                None
+            };
             members.push(GroupRenderPart {
                 rid: rid.clone(),
                 disk_path: page.disk_path.clone(),
                 y0,
                 height,
-                inline,
+                inline: if override_path.is_some() {
+                    None
+                } else {
+                    inline
+                },
+                override_path,
             });
         }
         if members.is_empty() {

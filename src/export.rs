@@ -25,7 +25,10 @@ fn export_stem(doc: &DocState) -> String {
 
 /// 同步导出全部组合 (供测试/脚本; GUI 走分块异步流水线).
 #[allow(dead_code)]
-pub fn export_groups(doc: &mut DocState, out_dir: &Path) -> Result<(usize, PathBuf), crate::error::Error> {
+pub fn export_groups(
+    doc: &mut DocState,
+    out_dir: &Path,
+) -> Result<(usize, PathBuf), crate::error::Error> {
     if doc.groups.is_empty() {
         return Err(crate::error::Error::export("没有可导出的内容."));
     }
@@ -58,9 +61,9 @@ pub fn export_groups_chunk(
         };
         let name = format!("{stem}_g{:02}.png", start_index + j + 1);
         let path = out_dir.join(&name);
-        combined
-            .save(&path)
-            .map_err(|e| crate::error::Error::export(format!("保存失败 {}: {e}", path.display())))?;
+        combined.save(&path).map_err(|e| {
+            crate::error::Error::export(format!("保存失败 {}: {e}", path.display()))
+        })?;
         saved += 1;
     }
     Ok(saved)

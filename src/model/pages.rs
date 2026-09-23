@@ -43,7 +43,10 @@ impl DocState {
 
     /// 按当前页体积决定内存窗口半径 (高清页小于默认 ±4).
     pub fn memory_window_radius(&self) -> usize {
-        let b = self.current_page().map(|p| p.estimated_bytes()).unwrap_or(0);
+        let b = self
+            .current_page()
+            .map(|p| p.estimated_bytes())
+            .unwrap_or(0);
         crate::page_cache::window_radius_for_bytes(b)
     }
 
@@ -225,11 +228,7 @@ impl DocState {
         if self.pages.is_empty() {
             self.current_page_index = 0;
         } else if let Some(id) = keep_id {
-            self.current_page_index = self
-                .pages
-                .iter()
-                .position(|p| p.id == id)
-                .unwrap_or(0);
+            self.current_page_index = self.pages.iter().position(|p| p.id == id).unwrap_or(0);
         } else if let Some(old) = fallback_old {
             let new_idx = (0..old).filter(|i| !drop.contains(i)).count();
             self.current_page_index = new_idx.min(self.pages.len() - 1);
@@ -269,7 +268,10 @@ impl DocState {
         if moving_set.is_empty() || moving_set.contains(&anchor) {
             return;
         }
-        let cur_id = self.pages.get(self.current_page_index).map(|p| p.id.clone());
+        let cur_id = self
+            .pages
+            .get(self.current_page_index)
+            .map(|p| p.id.clone());
         let raw_insert = if after { anchor + 1 } else { anchor };
         let insert_in_remaining =
             raw_insert - moving_set.iter().filter(|&&i| i < raw_insert).count();

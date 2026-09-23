@@ -106,6 +106,22 @@ impl MaskRect {
         self.y1 = max_y;
     }
 
+    /// 新点只扩张包围盒. 点数已经包含这个点.
+    pub fn include_brush_point(&mut self, x: i32, y: i32) {
+        let r = self.brush_radius.max(1);
+        if self.brush_points.len() <= 1 {
+            self.x0 = x - r;
+            self.y0 = y - r;
+            self.x1 = x + r;
+            self.y1 = y + r;
+            return;
+        }
+        self.x0 = self.x0.min(x - r);
+        self.y0 = self.y0.min(y - r);
+        self.x1 = self.x1.max(x + r);
+        self.y1 = self.y1.max(y + r);
+    }
+
     pub fn refresh_poly_bounds(&mut self) {
         if self.poly_points.is_empty() {
             return;
@@ -209,10 +225,7 @@ impl MaskRect {
             return point_in_poly(x, y, &self.poly_points);
         }
         let r = self.normalized();
-        x >= r.x0 as f32
-            && x <= (r.x1 as f32) + 1.0
-            && y >= r.y0 as f32
-            && y <= (r.y1 as f32) + 1.0
+        x >= r.x0 as f32 && x <= (r.x1 as f32) + 1.0 && y >= r.y0 as f32 && y <= (r.y1 as f32) + 1.0
     }
 
     pub fn intersects_rect(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
@@ -299,8 +312,8 @@ pub fn point_in_poly(x: f32, y: f32, pts: &[(i32, i32)]) -> bool {
     for i in 0..pts.len() {
         let (xi, yi) = (pts[i].0 as f32, pts[i].1 as f32);
         let (xj, yj) = (pts[j].0 as f32, pts[j].1 as f32);
-        let intersect = ((yi > y) != (yj > y))
-            && (x < (xj - xi) * (y - yi) / (yj - yi + f32::EPSILON) + xi);
+        let intersect =
+            ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + f32::EPSILON) + xi);
         if intersect {
             inside = !inside;
         }
@@ -528,9 +541,7 @@ pub fn default_export_path(image_path: Option<&Path>) -> PathBuf {
     match image_path {
         Some(p) => p.with_file_name(format!(
             "{}_masked.png",
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("masked")
+            p.file_stem().and_then(|s| s.to_str()).unwrap_or("masked")
         )),
         None => PathBuf::from("masked.png"),
     }

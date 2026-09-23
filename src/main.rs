@@ -8,6 +8,7 @@ mod config;
 mod detect_cache;
 mod error;
 mod export;
+mod file_assoc;
 mod gui;
 mod mem;
 mod model;
@@ -23,9 +24,6 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use model::is_open_path;
-use project::is_project_path;
-
 #[derive(Parser, Debug)]
 #[command(
     name = "score_sync",
@@ -38,20 +36,12 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    for p in &args.paths {
-        if !p.is_file() {
-            eprintln!("文件不存在: {}", p.display());
-            return ExitCode::FAILURE;
-        }
-        if !(is_open_path(p) || is_project_path(p)) {
-            eprintln!("不支持的文件类型: {}", p.display());
-            return ExitCode::FAILURE;
-        }
-    }
-    // 启动建会话目录; 退出清理会话 tmp (保留工程旁视频池缓存)
+    // 损坏/类型不对的文件交给 GUI 弹窗, 不要在进窗前直接退出
+    // (否则设成 .staffcrop 默认打开程序后, 双击坏文件只会闪一下).
     page_cache::init_session();
     trace::init();
     crate::trace::log("main: 即将进入 GUI");
+    file_assoc::ensure_staffcrop_association();
     let _guard = scopeguard_cleanup();
     gui::run_gui(args.paths);
     crate::trace::log("main: GUI 已退出");

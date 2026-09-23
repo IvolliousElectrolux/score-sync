@@ -224,15 +224,10 @@ fn has_brace(ink: &[Vec<bool>], y0: i32, y1: i32) -> bool {
     }
     let w = ink[0].len();
     let x_lo = ((w as f32 * 0.004).round() as usize).min(w.saturating_sub(1));
-    let x_hi = ((w as f32 * 0.09).round() as usize)
-        .max(x_lo + 3)
-        .min(w);
+    let x_hi = ((w as f32 * 0.09).round() as usize).max(x_lo + 3).min(w);
     let mut hit_rows = 0i32;
     for y in y0..=y1 {
-        let cnt = ink[y as usize][x_lo..x_hi]
-            .iter()
-            .filter(|&&v| v)
-            .count();
+        let cnt = ink[y as usize][x_lo..x_hi].iter().filter(|&&v| v).count();
         if cnt >= 2 {
             hit_rows += 1;
         }
@@ -495,10 +490,7 @@ fn cc_has_enclosed_hole(
 
 /// 去掉贴边分量后, 该行是否还有墨 (用于行间缝 / 漏检五线时的竖段).
 fn interior_hit_rows(interior: &[Vec<bool>]) -> Vec<bool> {
-    interior
-        .iter()
-        .map(|row| row.iter().any(|&v| v))
-        .collect()
+    interior.iter().map(|row| row.iter().any(|&v| v)).collect()
 }
 
 /// 去掉贴边分量后的连续谱行竖段 (行间缝会断开). 漏检五线时仍能抓住整块谱行.
@@ -773,11 +765,11 @@ fn system_extents(
         return Vec::new();
     }
     // 真正的「横向完全没有黑像素」
-    let row_blank: Vec<bool> = ink
-        .iter()
-        .map(|row| !row.iter().any(|&x| x))
+    let row_blank: Vec<bool> = ink.iter().map(|row| !row.iter().any(|&x| x)).collect();
+    let left_blank: Vec<bool> = interior_hit_rows(interior)
+        .into_iter()
+        .map(|hit| !hit)
         .collect();
-    let left_blank: Vec<bool> = interior_hit_rows(interior).into_iter().map(|hit| !hit).collect();
     let left_sep = (typical_line_gap(&find_staff_line_ys(ink)) * 2 + 4).clamp(12, 40);
     // 谱表与 Ped. 之间细白缝不截断; 达到此长度才算行间分隔
     let sep_blank = 3i32;
@@ -793,8 +785,7 @@ fn system_extents(
         };
 
         // 判定: 碰到下一行五线之前是否存在整行无墨
-        let loose_down =
-            has_blank_before(&row_blank, cb, hard_bot, 1) || i + 1 >= cores.len();
+        let loose_down = has_blank_before(&row_blank, cb, hard_bot, 1) || i + 1 >= cores.len();
         let loose_up = has_blank_before(&row_blank, ct, hard_top, -1) || i == 0;
 
         let mut y1 = if loose_down {
@@ -873,13 +864,7 @@ fn first_blank_row(row_blank: &[bool], from: i32, hard: i32, dir: i32) -> Option
 }
 
 /// 沿 dir 扩展: 吃掉有墨行; 短于 `sep` 的空白桥接过去; 遇到 ≥sep 的空白分隔则停在最后有墨行.
-fn expand_to_separator(
-    row_blank: &[bool],
-    from: i32,
-    hard: i32,
-    dir: i32,
-    sep: i32,
-) -> i32 {
+fn expand_to_separator(row_blank: &[bool], from: i32, hard: i32, dir: i32, sep: i32) -> i32 {
     let h = row_blank.len() as i32;
     let mut y = from;
     let mut scan = from;
@@ -1162,11 +1147,7 @@ fn pick_body_systems(systems: Vec<(i32, i32)>, page_h: i32) -> Vec<(i32, i32)> {
     }
 }
 
-pub fn detect_bands(
-    image: &RgbImage,
-    ink_threshold: i32,
-    margin: i32,
-) -> Vec<Band> {
+pub fn detect_bands(image: &RgbImage, ink_threshold: i32, margin: i32) -> Vec<Band> {
     let threshold = ink_threshold.clamp(1, 254) as u8;
     let ink = to_ink(image, threshold);
     let h = ink.len() as i32;
@@ -1212,10 +1193,7 @@ pub fn detect_bands(
                     next_pieces.push((p0.max(s1 + 1), p1));
                 }
             }
-            pieces = next_pieces
-                .into_iter()
-                .filter(|&(x, y)| y >= x)
-                .collect();
+            pieces = next_pieces.into_iter().filter(|&(x, y)| y >= x).collect();
         }
         for (p0, p1) in pieces {
             if p1 - p0 + 1 >= 8 {
@@ -1238,9 +1216,8 @@ pub fn detect_bands(
     let absorb_gap = margin.max(16).min(36);
     // 只吸收紧贴正文谱表的碎片; 正文底边以下留给 footer
     let body_end = systems.last().map(|s| s.1).unwrap_or(-1);
-    let (near_body, below_body): (Vec<_>, Vec<_>) = uncovered
-        .into_iter()
-        .partition(|&(a, _)| a <= body_end);
+    let (near_body, below_body): (Vec<_>, Vec<_>) =
+        uncovered.into_iter().partition(|&(a, _)| a <= body_end);
     let mut near_body =
         absorb_fragments_into_systems(&mut systems, &near_body, absorb_gap, max_frag_h);
     clamp_systems_apart(&mut systems);
@@ -1528,7 +1505,10 @@ mod tests {
         paint_staff(&mut img, 340);
         paint_staff_frame(&mut img, 80, 380);
         let (n, bands) = system_count(&img);
-        assert_eq!(n, 1, "left connector should merge all four staves, got {bands:?}");
+        assert_eq!(
+            n, 1,
+            "left connector should merge all four staves, got {bands:?}"
+        );
     }
 
     #[test]
@@ -1584,10 +1564,7 @@ mod tests {
             "left-side gap inside a block must split it, got {split:?}"
         );
         let (n, bands) = system_count(&img);
-        assert_eq!(
-            n, 2,
-            "detect must also keep two systems, got {bands:?}"
-        );
+        assert_eq!(n, 2, "detect must also keep two systems, got {bands:?}");
     }
 
     #[test]
@@ -1630,7 +1607,10 @@ mod tests {
             }
         }
         let (n, bands) = system_count(&img);
-        assert_eq!(n, 1, "jagged left connector should still merge, got {bands:?}");
+        assert_eq!(
+            n, 1,
+            "jagged left connector should still merge, got {bands:?}"
+        );
     }
 
     #[test]
@@ -1673,7 +1653,10 @@ mod tests {
         let y1 = y1.min(h.saturating_sub(1));
         for y in y0..=y1 {
             for x in x0..=x1 {
-                let on_edge = x <= x0 + 1 || x >= x1.saturating_sub(1) || y <= y0 + 1 || y >= y1.saturating_sub(1);
+                let on_edge = x <= x0 + 1
+                    || x >= x1.saturating_sub(1)
+                    || y <= y0 + 1
+                    || y >= y1.saturating_sub(1);
                 if on_edge {
                     img.put_pixel(x, y, Rgb([0, 0, 0]));
                 }
@@ -1709,7 +1692,10 @@ mod tests {
         paint_staff_frame(&mut img, 80, 380);
         paint_barline(&mut img, 200, 80, 380);
         let (n, bands) = system_count(&img);
-        assert_eq!(n, 1, "barline in the middle of the page should merge, got {bands:?}");
+        assert_eq!(
+            n, 1,
+            "barline in the middle of the page should merge, got {bands:?}"
+        );
     }
 
     #[test]
@@ -1787,10 +1773,7 @@ mod tests {
             let conn = nxt
                 .map(|(nt, _)| left_ink_connects(&connectors, b, nt, 8))
                 .unwrap_or(false);
-            println!(
-                "  staff {i}: {t}-{b} h={} next_conn={conn}",
-                b - t + 1
-            );
+            println!("  staff {i}: {t}-{b} h={} next_conn={conn}", b - t + 1);
         }
         println!("  merged: {merged:?}");
         println!("  split:  {split:?}");
@@ -1843,9 +1826,7 @@ mod tests {
             std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", dll);
         }
         let pdfium = crate::pdf::bind_pdfium().expect("pdfium");
-        let document = pdfium
-            .load_pdf_from_file(&pdf, None)
-            .expect("open K537");
+        let document = pdfium.load_pdf_from_file(&pdf, None).expect("open K537");
         let n = document.pages().len() as usize;
         println!("K537 pages={n}");
         let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1854,14 +1835,10 @@ mod tests {
             .join("_k537_debug");
         let _ = std::fs::create_dir_all(&out_dir);
         // 跳过封面, 抽几页总谱
-        let pages: Vec<usize> = [2, 3, 4, 5, 8, 12]
-            .into_iter()
-            .filter(|&i| i < n)
-            .collect();
+        let pages: Vec<usize> = [2, 3, 4, 5, 8, 12].into_iter().filter(|&i| i < n).collect();
         for i in pages {
             let page = document.pages().get(i as u16).expect("page");
-            let cfg = pdfium_render::prelude::PdfRenderConfig::new()
-                .scale_page_by_factor(3.0);
+            let cfg = pdfium_render::prelude::PdfRenderConfig::new().scale_page_by_factor(3.0);
             let image = page
                 .render_with_config(&cfg)
                 .expect("render")
@@ -1905,8 +1882,7 @@ mod tests {
                 continue;
             }
             let page = document.pages().get(i as u16).expect("page");
-            let cfg = pdfium_render::prelude::PdfRenderConfig::new()
-                .scale_page_by_factor(3.0);
+            let cfg = pdfium_render::prelude::PdfRenderConfig::new().scale_page_by_factor(3.0);
             let image = page
                 .render_with_config(&cfg)
                 .expect("render")
@@ -1931,7 +1907,10 @@ mod tests {
                     cols.iter().take(15).collect::<Vec<_>>()
                 );
                 let interior = strip_border_components(&ink);
-                let kept: usize = interior.iter().map(|r| r.iter().filter(|&&v| v).count()).sum();
+                let kept: usize = interior
+                    .iter()
+                    .map(|r| r.iter().filter(|&&v| v).count())
+                    .sum();
                 let raw: usize = ink.iter().map(|r| r.iter().filter(|&&v| v).count()).sum();
                 println!("  interior ink {kept}/{raw} of w={w}");
             }

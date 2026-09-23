@@ -1,7 +1,7 @@
 //! 分块撤重.
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 impl ScoreSyncApp {
     pub(super) fn capture_crop_snap(&self, page_ids: &[String]) -> CropSnap {
@@ -204,6 +204,9 @@ impl ScoreSyncApp {
     pub(super) fn undo_action(&mut self, cx: &mut Context<Self>) {
         match self.side_tool {
             SideTool::Crop => self.undo_crop(cx),
+            SideTool::Mask if self.photo_open() => {
+                self.photo_edit.update(cx, |p, cx| p.undo(cx));
+            }
             SideTool::Mask => {
                 self.mask_tool.update(cx, |m, cx| m.undo(cx));
             }
@@ -217,6 +220,9 @@ impl ScoreSyncApp {
     pub(super) fn redo_action(&mut self, cx: &mut Context<Self>) {
         match self.side_tool {
             SideTool::Crop => self.redo_crop(cx),
+            SideTool::Mask if self.photo_open() => {
+                self.photo_edit.update(cx, |p, cx| p.redo(cx));
+            }
             SideTool::Mask => {
                 self.mask_tool.update(cx, |m, cx| m.redo(cx));
             }

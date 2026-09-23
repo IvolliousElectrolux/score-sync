@@ -63,6 +63,18 @@ struct ProjectFile {
     /// 视频面板时间轴 (可选, 旧工程文件没有这个字段)
     #[serde(default)]
     video: ProjectVideo,
+    /// 分块 P 图覆盖元数据; 像素在 zip `edits/{region_id}/`.
+    #[serde(default)]
+    region_edits: HashMap<String, ProjectRegionEdit>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ProjectRegionEdit {
+    canvas_w: u32,
+    canvas_h: u32,
+    paper_rgb: [u8; 3],
+    #[serde(default)]
+    source: Option<photo_edit::SourceFingerprint>,
 }
 
 /// 视频面板时间轴的纯数据快照.
@@ -229,7 +241,8 @@ fn encode_png(image: &image::RgbImage) -> Result<Vec<u8>, String> {
 
 /// 把已有 PNG 文件流式写入 zip 条目 (不整文件读进内存).
 fn copy_file_into_zip(zip: &mut ZipWriter<File>, path: &Path) -> Result<(), String> {
-    let mut src = File::open(path).map_err(|e| format!("读取页图失败 ({}): {e}", path.display()))?;
+    let mut src =
+        File::open(path).map_err(|e| format!("读取页图失败 ({}): {e}", path.display()))?;
     std::io::copy(&mut src, zip).map_err(|e| format!("写入页图失败 ({}): {e}", path.display()))?;
     Ok(())
 }
@@ -298,10 +311,7 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
                 aspect_w: doc.bg_aspect_w,
                 aspect_h: doc.bg_aspect_h,
                 image: "bg.png".into(),
-                source_path: doc
-                    .bg_source_path
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
+                source_path: doc.bg_source_path.as_ref().map(|p| p.display().to_string()),
                 solid_rgb: None,
             })
         } else {
@@ -358,7 +368,9 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         staff_grouping: doc.staff_grouping,
         mask_opacity: doc.mask_prefs.mask_opacity,
         mask_prefs: Some(doc.mask_prefs.clone()),
-        current_page_index: doc.current_page_index.min(doc.pages.len().saturating_sub(1)),
+        current_page_index: doc
+            .current_page_index
+            .min(doc.pages.len().saturating_sub(1)),
         active_group_id: doc.active_group_id.clone(),
         selected_region_ids: selected,
         pages,
@@ -367,7 +379,12 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         group_block_layout: doc
             .group_block_layout
             .iter()
-            .map(|(gid, v)| (gid.clone(), v.iter().map(ProjectBlockAdjust::from).collect()))
+            .map(|(gid, v)| {
+                (
+                    gid.clone(),
+                    v.iter().map(ProjectBlockAdjust::from).collect(),
+                )
+            })
             .collect(),
         group_voff_shift: doc.group_voff_shift.clone(),
         group_guides: doc.group_guides.clone(),
@@ -376,6 +393,21 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         groups_manual_order: doc.groups_manual_order,
         bg: bg_meta,
         video,
+        region_edits: doc
+            .region_edits
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ProjectRegionEdit {
+                        canvas_w: v.canvas_w,
+                        canvas_h: v.canvas_h,
+                        paper_rgb: v.paper_rgb,
+                        source: v.source.clone(),
+                    },
+                )
+            })
+            .collect(),
     };
     let json = serde_json::to_vec_pretty(&meta).map_err(|e| format!("序列化工程失败: {e}"))?;
 
@@ -401,11 +433,42 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
             if page.disk_path.is_file() {
                 copy_file_into_zip(&mut zip, &page.disk_path)?;
             } else if let Some(img) = page.image.as_ref() {
-                let png = encode_png(img).map_err(|e| format!("保存页图失败 ({}): {e}", page.id))?;
+                let png =
+                    encode_png(img).map_err(|e| format!("保存页图失败 ({}): {e}", page.id))?;
                 zip.write_all(&png)
                     .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
             } else {
                 return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));
+            }
+        }
+
+        for (rid, _) in &doc.region_edits {
+            let dir = crate::model::DocState::region_edit_dir(rid);
+            if !dir.is_dir() {
+                continue;
+            }
+            for name in ["manifest.json", "flat.png"] {
+                let p = dir.join(name);
+                if p.is_file() {
+                    let rel = format!("edits/{rid}/{name}");
+                    zip.start_file(&rel, png_opts)
+                        .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
+                    copy_file_into_zip(&mut zip, &p)?;
+                }
+            }
+            let layer_dir = dir.join("layers");
+            if let Ok(rd) = std::fs::read_dir(&layer_dir) {
+                for ent in rd.flatten() {
+                    let p = ent.path();
+                    if !p.is_file() {
+                        continue;
+                    }
+                    let fname = ent.file_name().to_string_lossy().into_owned();
+                    let rel = format!("edits/{rid}/layers/{fname}");
+                    zip.start_file(&rel, png_opts)
+                        .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
+                    copy_file_into_zip(&mut zip, &p)?;
+                }
             }
         }
 
@@ -428,14 +491,36 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     }
 
     if project_path.exists() {
-        std::fs::remove_file(&project_path)
-            .map_err(|e| format!("覆盖旧工程失败: {e}"))?;
+        std::fs::remove_file(&project_path).map_err(|e| format!("覆盖旧工程失败: {e}"))?;
     }
     std::fs::rename(&tmp_path, &project_path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp_path);
         format!("写出工程文件失败: {e}")
     })?;
     Ok(project_path)
+}
+
+fn extract_edit_entries(zip: &mut ZipArchive<File>, session: &Path) -> Result<(), String> {
+    let names: Vec<String> = (0..zip.len())
+        .filter_map(|i| {
+            let e = zip.by_index(i).ok()?;
+            let n = e.name().replace('\\', "/");
+            if n.starts_with("edits/") && !n.ends_with('/') {
+                Some(n)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for name in names {
+        let bytes = read_zip_entry(zip, &name)?;
+        let dest = session.join(&name);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建 {name} 目录失败: {e}"))?;
+        }
+        std::fs::write(&dest, bytes).map_err(|e| format!("写出 {name} 失败: {e}"))?;
+    }
+    Ok(())
 }
 
 fn read_zip_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, String> {
@@ -455,13 +540,12 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         return Err("不是 .staffcrop 工程文件".into());
     }
     let file = File::open(path).map_err(|e| format!("打开工程失败: {e}"))?;
-    let mut zip = ZipArchive::new(file).map_err(|e| {
-        format!("无法作为工程压缩包打开 (是否为旧版旁路目录工程?): {e}")
-    })?;
+    let mut zip = ZipArchive::new(file)
+        .map_err(|e| format!("无法作为工程压缩包打开 (是否为旧版旁路目录工程?): {e}"))?;
 
     let json_bytes = read_zip_entry(&mut zip, "project.json")?;
-    let meta: ProjectFile = serde_json::from_slice(&json_bytes)
-        .map_err(|e| format!("解析 project.json 失败: {e}"))?;
+    let meta: ProjectFile =
+        serde_json::from_slice(&json_bytes).map_err(|e| format!("解析 project.json 失败: {e}"))?;
     if meta.version == 0 || meta.version > PROJECT_VERSION {
         return Err(format!(
             "不支持的工程版本 {} (当前支持 1–{PROJECT_VERSION})",
@@ -586,7 +670,19 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         },
         rid_page: HashMap::new(),
         display_max_side: 0,
+        region_edits: HashMap::new(),
     };
+    for (rid, e) in meta.region_edits {
+        doc.region_edits.insert(
+            rid,
+            crate::model::RegionEditMeta {
+                canvas_w: e.canvas_w,
+                canvas_h: e.canvas_h,
+                paper_rgb: e.paper_rgb,
+                source: e.source,
+            },
+        );
+    }
     if let Some(bg) = meta.bg {
         if bg.enabled {
             doc.bg_aspect_w = bg.aspect_w.max(1);
@@ -628,6 +724,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         .collect();
     doc.selected_region_ids
         .retain(|id| valid_regions.contains(id));
+    extract_edit_entries(&mut zip, &session)?;
     doc.retain_memory_window();
     doc.rebuild_rid_index();
     doc.seed_guide_defaults();

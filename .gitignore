@@ -12,6 +12,7 @@ Thumbs.db
 # 把 vendor/ 下这两份手动拷到 exe 同目录即可, 程序会优先找同目录的那份,
 # 找不到再退回系统 PATH.
 /vendor/
+/patches/gpui-0.2.2/
 /transition_review/
 ffmpeg.exe
 pdfium.dll
@@ -33,4 +34,5 @@ crates/**/Cargo.lock
 /tools/dist/
 /tools/build/
 **/__pycache__/
+/_cursor_preview/
 

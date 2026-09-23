@@ -109,8 +109,12 @@ impl ViewLod {
         }
         let x = x0.floor() as u32;
         let y = y0.floor() as u32;
-        let w = ((x1.ceil() as u32).saturating_sub(x)).max(1).min(img_w.saturating_sub(x));
-        let h = ((y1.ceil() as u32).saturating_sub(y)).max(1).min(img_h.saturating_sub(y));
+        let w = ((x1.ceil() as u32).saturating_sub(x))
+            .max(1)
+            .min(img_w.saturating_sub(x));
+        let h = ((y1.ceil() as u32).saturating_sub(y))
+            .max(1)
+            .min(img_h.saturating_sub(y));
         // 贴图像素 = 该矩形的屏幕大小, 但不超过原图 1:1.
         let cap = xform.scale.min(1.0).max(0.0001);
         let tex_w = ((w as f32) * cap).round().max(1.0) as u32;
@@ -198,17 +202,12 @@ pub fn region_at(
     if hits.is_empty() {
         return None;
     }
-    hits.sort_by_key(|(rid, y0, y1)| {
-        (
-            if selected.contains(rid) { 0 } else { 1 },
-            -(*y1 - *y0),
-        )
-    });
+    hits.sort_by_key(|(rid, y0, y1)| (if selected.contains(rid) { 0 } else { 1 }, -(*y1 - *y0)));
     Some(hits[0].0.clone())
 }
 
-use super::*;
 use super::ScoreSyncApp;
+use super::*;
 
 impl ScoreSyncApp {
     pub(super) fn xform(&self) -> ViewXform {
@@ -379,7 +378,8 @@ impl ScoreSyncApp {
                     self.push_crop_undo_current();
                     undid = true;
                 }
-                self.doc.apply_edge_drag(&region_id, edge, iy.round() as i32);
+                self.doc
+                    .apply_edge_drag(&region_id, edge, iy.round() as i32);
                 self.drag = Some(DragKind::Edge {
                     region_id,
                     edge,
@@ -390,9 +390,7 @@ impl ScoreSyncApp {
                 return;
             }
             Some(DragKind::AddBlock {
-                anchor_y,
-                mut role,
-                ..
+                anchor_y, mut role, ..
             }) => {
                 let cur = iy.round() as i32;
                 const LOCK_PX: i32 = 2;
@@ -524,7 +522,12 @@ impl ScoreSyncApp {
         }
     }
 
-    pub(super) fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.dialog.is_some() {
             return;
         }
@@ -533,7 +536,11 @@ impl ScoreSyncApp {
             ScrollDelta::Lines(l) => (l.x * 30.0, l.y * 30.0),
         };
         if is_primary_mod(&event.modifiers) {
-            let zoom_delta = if delta_y.abs() > 0.01 { delta_y } else { delta_x };
+            let zoom_delta = if delta_y.abs() > 0.01 {
+                delta_y
+            } else {
+                delta_x
+            };
             let (sx, sy) = self.screen_in_view(event.position);
             let xform = self.xform();
             let (ix, iy) = xform.screen_to_image(sx, sy);
@@ -559,7 +566,11 @@ impl ScoreSyncApp {
             // 与蒙版一致: 滚轮的 x/y 都平移画布. Shift+滚轮在 Windows 上常把
             // 滚动量放进 x; 其它平台仍在 y, 此时把 y 当作横向位移.
             if event.modifiers.shift {
-                let dx = if delta_x.abs() > 0.01 { delta_x } else { delta_y };
+                let dx = if delta_x.abs() > 0.01 {
+                    delta_x
+                } else {
+                    delta_y
+                };
                 self.pan.x += dx;
             } else {
                 self.pan.x += delta_x;
@@ -720,12 +731,8 @@ impl ScoreSyncApp {
                             if let (Some(img), Some(lod)) = (render_image.as_ref(), view_lod) {
                                 let x1 = lod.x.saturating_add(lod.w.saturating_sub(1)) as i32;
                                 let y1 = lod.y.saturating_add(lod.h.saturating_sub(1)) as i32;
-                                let mut b = xform.image_rect_to_screen(
-                                    lod.x as i32,
-                                    lod.y as i32,
-                                    x1,
-                                    y1,
-                                );
+                                let mut b =
+                                    xform.image_rect_to_screen(lod.x as i32, lod.y as i32, x1, y1);
                                 b.origin.x = bounds.origin.x + b.origin.x;
                                 b.origin.y = bounds.origin.y + b.origin.y;
                                 let _ = window.paint_image(

@@ -163,7 +163,8 @@ pub fn save_rgb_png_fast(rgb: &RgbImage, path: &Path) -> Result<(), String> {
     use image::{ExtendedColorType, ImageEncoder};
     use std::fs::File;
     use std::io::BufWriter;
-    let file = File::create(path).map_err(|e| format!("创建 PNG 失败 ({}): {e}", path.display()))?;
+    let file =
+        File::create(path).map_err(|e| format!("创建 PNG 失败 ({}): {e}", path.display()))?;
     let writer = BufWriter::new(file);
     let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, PngFilter::Adaptive);
     encoder
@@ -251,8 +252,7 @@ pub fn map_band_to_proxy(y0: u32, height: u32, orig_h: u32, proxy_h: u32) -> (u3
         return (y0, h);
     }
     let py0 = ((y0 as u64).saturating_mul(proxy_h as u64) / orig_h as u64) as u32;
-    let py1 =
-        ((y0 as u64 + height as u64).saturating_mul(proxy_h as u64) / orig_h as u64) as u32;
+    let py1 = ((y0 as u64 + height as u64).saturating_mul(proxy_h as u64) / orig_h as u64) as u32;
     let py0 = py0.min(proxy_h.saturating_sub(1));
     let py1 = py1.max(py0.saturating_add(1)).min(proxy_h);
     (py0, py1 - py0)
@@ -447,8 +447,8 @@ fn windows_available_memory() -> Option<u64> {
 
 #[cfg(test)]
 mod window_radius_tests {
-    use super::window_radius_for_bytes;
     use super::org_thumb_path;
+    use super::window_radius_for_bytes;
     use std::path::PathBuf;
 
     #[test]

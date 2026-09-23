@@ -21,10 +21,11 @@ mod guides;
 mod history;
 mod host;
 mod io;
-mod page_organize;
-mod pdf_import;
 mod lists;
 mod mem;
+mod page_organize;
+mod pdf_import;
+mod photo;
 mod sync;
 mod tabs;
 mod types;
@@ -67,29 +68,30 @@ actions!(
         Undo,
         Redo,
         SelectAllPageRegions,
+        OpenPhotoEdit,
     ]
 );
 
-
-pub(crate) use gpui::prelude::*;
-pub(crate) use gpui::{
-    canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
-    DispatchPhase, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
-    Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
-};
 pub(crate) use crate::config;
 pub(crate) use crate::model::{
     is_image_path, is_open_path, is_pdf_path, parse_color_hex, DocState,
 };
 pub(crate) use crate::pdf;
 pub(crate) use crate::project::{self, is_project_path};
-pub(crate) use apply_bg::text_input::TextInput;
 pub(crate) use apply_bg::gui::ApplyBgApp;
 pub(crate) use apply_bg::is_primary_mod;
+pub(crate) use apply_bg::text_input::TextInput;
+pub(crate) use gpui::prelude::*;
+pub(crate) use gpui::{
+    canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
+    DispatchPhase, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
+    Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
+};
 pub(crate) use mask_tool::gui::MaskToolApp;
 pub(crate) use mask_tool::mask::MaskRect;
+pub(crate) use photo_edit::PhotoEditApp;
 pub(crate) use score_video::gui::ScoreVideoApp;
 pub(crate) use score_video::model::MaterialItem;
 
@@ -125,8 +127,11 @@ pub(crate) struct ScoreSyncApp {
     /// 画布工具: 普通 / 添加新块 / 分割块
     canvas_tool: CanvasTool,
     mask_tool: Entity<MaskToolApp>,
+    photo_edit: Entity<PhotoEditApp>,
     apply_bg: Entity<ApplyBgApp>,
     score_video: Entity<ScoreVideoApp>,
+    photo_session: Option<photo::PhotoSession>,
+    photo_cmd_pending: bool,
     bg: bg::BgUi,
     /// 当前蒙版编辑目标: group_id (拼合图)
     mask_target: Option<String>,
@@ -319,6 +324,17 @@ impl ScoreSyncApp {
             }
         })
         .detach();
+        let photo_edit = cx.new(|cx| PhotoEditApp::new(cx, false));
+        cx.observe(&photo_edit, |this, photo, cx| {
+            let p = photo.read(cx);
+            if p.has_host_cmd() {
+                this.photo_cmd_pending = true;
+                cx.notify();
+            } else if !p.is_nav_only() {
+                cx.notify();
+            }
+        })
+        .detach();
         let apply_bg = cx.new(ApplyBgApp::new);
         cx.observe(&apply_bg, |_, _, cx| cx.notify()).detach();
         let score_video = cx.new(ScoreVideoApp::new);
@@ -367,6 +383,9 @@ impl ScoreSyncApp {
             side_tool: SideTool::Crop,
             canvas_tool: CanvasTool::Normal,
             mask_tool,
+            photo_edit,
+            photo_session: None,
+            photo_cmd_pending: false,
             apply_bg,
             score_video,
             bg: bg::BgUi::new(cx),
@@ -523,11 +542,18 @@ impl Render for ScoreSyncApp {
 
         // A4-ish: side panel fixed; left takes rest (ratio used as min width hint)
         let _ = A4_RATIO;
+        if self.photo_cmd_pending {
+            self.photo_cmd_pending = false;
+            self.handle_photo_host_cmd(window, cx);
+        }
         let mask_mode = self.side_tool == SideTool::Mask;
         let video_mode = self.side_tool == SideTool::Video;
         let organize_open = self.page_organize.is_some();
+        let photo_open = self.photo_session.is_some();
         let focus = if organize_open {
             self.focus_handle.clone()
+        } else if photo_open {
+            self.photo_edit.read(cx).focus_handle_ref().clone()
         } else if mask_mode {
             self.mask_tool.read(cx).focus_handle_ref().clone()
         } else if video_mode {
@@ -537,6 +563,8 @@ impl Render for ScoreSyncApp {
         };
         let key_ctx = if organize_open {
             "PageOrganize"
+        } else if photo_open {
+            "PhotoEdit"
         } else if mask_mode {
             "MaskTool"
         } else if video_mode {
@@ -551,6 +579,14 @@ impl Render for ScoreSyncApp {
             .id("root")
             .key_context(key_ctx)
             .track_focus(&focus)
+            .on_modifiers_changed(
+                cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _, cx| {
+                    if this.side_tool == SideTool::Mask && !this.photo_open() {
+                        let shift = ev.modifiers.shift;
+                        this.mask_tool.update(cx, |m, cx| m.note_shift(shift, cx));
+                    }
+                }),
+            )
             .relative()
             .on_mouse_down(
                 MouseButton::Left,
@@ -572,6 +608,10 @@ impl Render for ScoreSyncApp {
                     if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
                         this.apply_scrollbar_drag(x, y, cx);
                     }
+                    return;
+                }
+                if this.photo_open() {
+                    this.apply_host_drag_at(x, y, cx);
                     return;
                 }
                 // 视频栏: 素材池 → 轨道跨面板拖放, 由宿主根节点转发鼠标坐标
@@ -607,6 +647,14 @@ impl Render for ScoreSyncApp {
                         }
                         return;
                     }
+                    if this.photo_open() {
+                        this.finish_host_drag_at(
+                            f32::from(ev.position.x),
+                            f32::from(ev.position.y),
+                            cx,
+                        );
+                        return;
+                    }
                     if this.side_tool == SideTool::Video {
                         let x = f32::from(ev.position.x);
                         let y = f32::from(ev.position.y);
@@ -616,16 +664,18 @@ impl Render for ScoreSyncApp {
                     if this.side_tool == SideTool::Mask {
                         let x = f32::from(ev.position.x);
                         let y = f32::from(ev.position.y);
-                        this.mask_tool
-                            .update(cx, |m, cx| m.root_mouse_up(x, y, cx));
+                        this.mask_tool.update(cx, |m, cx| m.root_mouse_up(x, y, cx));
                     }
                     if this.side_tool == SideTool::Project {
                         let x = f32::from(ev.position.x);
                         let y = f32::from(ev.position.y);
-                        this.mask_tool
-                            .update(cx, |m, cx| m.root_mouse_up(x, y, cx));
+                        this.mask_tool.update(cx, |m, cx| m.root_mouse_up(x, y, cx));
                     }
-                    this.finish_host_drag_at(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                    this.finish_host_drag_at(
+                        f32::from(ev.position.x),
+                        f32::from(ev.position.y),
+                        cx,
+                    );
                 }),
             )
             .on_mouse_up_out(
@@ -644,18 +694,20 @@ impl Render for ScoreSyncApp {
                 }
                 this.open_file(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
-                this.open_project(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &NewProject, window, cx| {
-                this.request_new_project(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SaveProject, window, cx| {
-                this.save_project(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SaveProjectAs, window, cx| {
-                this.save_project_as(window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &OpenProject, window, cx| this.open_project(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NewProject, window, cx| {
+                    this.request_new_project(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &SaveProject, window, cx| this.save_project(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SaveProjectAs, window, cx| this.save_project_as(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &DetectPage, _, cx| {
                 if !this.crop_keys_live() {
                     return;
@@ -726,10 +778,11 @@ impl Render for ScoreSyncApp {
                 }
                 this.toggle_page_organize(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
-            .on_action(cx.listener(|this, _: &DumpMemory, _, cx| {
-                this.dump_memory_now(cx)
+            .on_action(cx.listener(|this, _: &OpenPhotoEdit, window, cx| {
+                this.try_open_photo_edit(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
+            .on_action(cx.listener(|this, _: &DumpMemory, _, cx| this.dump_memory_now(cx)))
             .on_action(cx.listener(|this, _: &ShareIntoGroup, _, cx| {
                 if !this.crop_keys_live() {
                     return;
@@ -762,45 +815,151 @@ impl Render for ScoreSyncApp {
                     this.dismiss_blocking_overlays(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::ExportImage, window, cx| {
-                this.mask_tool.update(cx, |m, cx| m.export_image(window, cx));
-            }))
+            .on_action(
+                cx.listener(|this, _: &mask_tool::gui::ExportImage, window, cx| {
+                    this.mask_tool
+                        .update(cx, |m, cx| m.export_image(window, cx));
+                }),
+            )
             .on_action(cx.listener(|this, _: &mask_tool::gui::FitView, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.fit_to_view(cx));
             }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::DeleteSelected, _, cx| {
-                this.mask_tool.update(cx, |m, cx| m.delete_selected(cx));
-            }))
+            .on_action(
+                cx.listener(|this, _: &mask_tool::gui::DeleteSelected, _, cx| {
+                    this.mask_tool.update(cx, |m, cx| m.delete_selected(cx));
+                }),
+            )
             .on_action(cx.listener(|this, _: &mask_tool::gui::ClearMasks, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.clear_masks(cx));
             }))
             .on_action(cx.listener(|this, _: &mask_tool::gui::SelectAll, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.select_all_masks(cx));
             }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::ToggleDrawMode, _, cx| {
-                this.mask_tool.update(cx, |m, cx| m.toggle_draw_mode(cx));
+            .on_action(
+                cx.listener(|this, _: &mask_tool::gui::ToggleDrawMode, _, cx| {
+                    this.mask_tool.update(cx, |m, cx| m.toggle_draw_mode(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &mask_tool::gui::TogglePanMode, _, cx| {
+                    this.mask_tool.update(cx, |m, cx| m.toggle_pan_mode(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &mask_tool::gui::ToggleBrushMode, _, cx| {
+                    this.mask_tool.update(cx, |m, cx| m.toggle_brush_mode(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &mask_tool::gui::TogglePolyMode, _, cx| {
+                    this.mask_tool.update(cx, |m, cx| m.toggle_poly_mode(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &mask_tool::gui::CancelPolyDraft, _, cx| {
+                    this.mask_tool.update(cx, |m, cx| m.cancel_poly_draft(cx));
+                }),
+            )
+            .on_action(cx.listener(|this, _: &photo_edit::gui::Undo, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.undo(cx));
             }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::TogglePanMode, _, cx| {
-                this.mask_tool.update(cx, |m, cx| m.toggle_pan_mode(cx));
+            .on_action(cx.listener(|this, _: &photo_edit::gui::Redo, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.redo(cx));
             }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::ToggleBrushMode, _, cx| {
-                this.mask_tool.update(cx, |m, cx| m.toggle_brush_mode(cx));
+            .on_action(cx.listener(|this, _: &photo_edit::gui::FitView, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.fit_to_view(cx));
             }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::TogglePolyMode, _, cx| {
-                this.mask_tool.update(cx, |m, cx| m.toggle_poly_mode(cx));
+            .on_action(
+                cx.listener(|this, _: &photo_edit::gui::DeleteLayer, _, cx| {
+                    this.photo_edit
+                        .update(cx, |p, cx| p.delete_active_layer(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &photo_edit::gui::NewLayerFromSel, _, cx| {
+                    this.photo_edit
+                        .update(cx, |p, cx| p.new_layer_from_selection(cx));
+                }),
+            )
+            .on_action(cx.listener(|this, _: &photo_edit::gui::Cancel, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.on_escape(cx));
             }))
-            .on_action(cx.listener(|this, _: &mask_tool::gui::CancelPolyDraft, _, cx| {
-                this.mask_tool.update(cx, |m, cx| m.cancel_poly_draft(cx));
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ApplyEdit, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.request_apply(cx));
+            }))
+            .on_action(
+                cx.listener(|this, _: &photo_edit::gui::RestoreOriginal, _, cx| {
+                    this.photo_edit.update(cx, |p, cx| p.request_restore(cx));
+                }),
+            )
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolSelect, _, cx| {
+                this.photo_edit.update(cx, |p, cx| {
+                    p.set_mode(photo_edit::gui::ToolMode::Select, cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolMove, _, cx| {
+                this.photo_edit
+                    .update(cx, |p, cx| p.set_mode(photo_edit::gui::ToolMode::Move, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolCanvas, _, cx| {
+                this.photo_edit.update(cx, |p, cx| {
+                    p.set_mode(photo_edit::gui::ToolMode::Canvas, cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolHeal, _, cx| {
+                this.photo_edit
+                    .update(cx, |p, cx| p.set_mode(photo_edit::gui::ToolMode::Heal, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolClone, _, cx| {
+                this.photo_edit
+                    .update(cx, |p, cx| p.set_mode(photo_edit::gui::ToolMode::Clone, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolPaint, _, cx| {
+                this.photo_edit
+                    .update(cx, |p, cx| p.set_mode(photo_edit::gui::ToolMode::Paint, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolEraser, _, cx| {
+                this.photo_edit.update(cx, |p, cx| {
+                    p.set_mode(photo_edit::gui::ToolMode::Eraser, cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolWand, _, cx| {
+                this.photo_edit
+                    .update(cx, |p, cx| p.set_mode(photo_edit::gui::ToolMode::Wand, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolLasso, _, cx| {
+                this.photo_edit
+                    .update(cx, |p, cx| p.set_mode(photo_edit::gui::ToolMode::Lasso, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::ToolPan, _, cx| {
+                this.photo_edit
+                    .update(cx, |p, cx| p.set_mode(photo_edit::gui::ToolMode::Pan, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::NudgeLeft, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.nudge(-1, 0, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::NudgeRight, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.nudge(1, 0, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::NudgeUp, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.nudge(0, -1, cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::NudgeDown, _, cx| {
+                this.photo_edit.update(cx, |p, cx| p.nudge(0, 1, cx));
             }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| {
-                if this.page_organize.is_some() {
+                if this.photo_session.is_some() {
+                    this.photo_edit.update(cx, |p, cx| p.undo(cx));
+                } else if this.page_organize.is_some() {
                     this.undo_organize(cx);
                 } else {
                     this.undo_action(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Redo, _, cx| {
-                if this.page_organize.is_some() {
+                if this.photo_session.is_some() {
+                    this.photo_edit.update(cx, |p, cx| p.redo(cx));
+                } else if this.page_organize.is_some() {
                     this.redo_organize(cx);
                 } else {
                     this.redo_action(cx);
@@ -836,36 +995,48 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &score_video::gui::SeekBack, _, cx| {
                 this.score_video.update(cx, |v, cx| v.seek_by(-1.0, cx));
             }))
-            .on_action(cx.listener(|this, _: &score_video::gui::SeekForward, _, cx| {
-                this.score_video.update(cx, |v, cx| v.seek_by(1.0, cx));
-            }))
-            .on_action(cx.listener(|this, _: &score_video::gui::SeekBackBig, _, cx| {
-                this.score_video.update(cx, |v, cx| v.seek_by(-5.0, cx));
-            }))
-            .on_action(cx.listener(|this, _: &score_video::gui::SeekForwardBig, _, cx| {
-                this.score_video.update(cx, |v, cx| v.seek_by(5.0, cx));
-            }))
-            .on_action(cx.listener(|this, _: &score_video::gui::InsertNext, _, cx| {
-                this.score_video.update(cx, |v, cx| v.insert_next(cx));
-            }))
-            .on_action(cx.listener(|this, _: &score_video::gui::InsertNextWipe, _, cx| {
-                this.score_video.update(cx, |v, cx| v.insert_next_wipe(cx));
-            }))
-            .on_action(cx.listener(|this, _: &score_video::gui::MarkFadeIn, _, cx| {
-                this.score_video.update(cx, |v, cx| v.mark_fade_in(cx));
-            }))
-            .on_action(cx.listener(|this, _: &score_video::gui::MarkFadeOut, _, cx| {
-                this.score_video.update(cx, |v, cx| v.mark_fade_out(cx));
-            }))
-            .on_action(cx.listener(|this, _: &score_video::gui::DeleteSelected, _, cx| {
-                this.score_video.update(cx, |v, cx| v.delete_selected(cx));
-            }))
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::SeekForward, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.seek_by(1.0, cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::SeekBackBig, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.seek_by(-5.0, cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::SeekForwardBig, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.seek_by(5.0, cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::InsertNext, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.insert_next(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::InsertNextWipe, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.insert_next_wipe(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::MarkFadeIn, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.mark_fade_in(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::MarkFadeOut, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.mark_fade_out(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &score_video::gui::DeleteSelected, _, cx| {
+                    this.score_video.update(cx, |v, cx| v.delete_selected(cx));
+                }),
+            )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                let list: Vec<PathBuf> = paths
-                    .paths()
-                    .iter()
-                    .cloned()
-                    .collect();
+                let list: Vec<PathBuf> = paths.paths().iter().cloned().collect();
                 if this.bg.pick_open {
                     this.apply_drop_as_bg(&list, cx);
                     return;
@@ -917,23 +1088,15 @@ impl Render for ScoreSyncApp {
                             )
                             .when(saving, |d| {
                                 d.child(
-                                    div()
-                                        .w(px(18.))
-                                        .h(px(18.))
-                                        .flex_shrink_0()
-                                        .child(
-                                            canvas(
-                                                |_, _, _| {},
-                                                move |bounds, _, window, _| {
-                                                    paint_save_spinner(
-                                                        window,
-                                                        bounds,
-                                                        spin_phase,
-                                                    );
-                                                },
-                                            )
-                                            .size_full(),
-                                        ),
+                                    div().w(px(18.)).h(px(18.)).flex_shrink_0().child(
+                                        canvas(
+                                            |_, _, _| {},
+                                            move |bounds, _, window, _| {
+                                                paint_save_spinner(window, bounds, spin_phase);
+                                            },
+                                        )
+                                        .size_full(),
+                                    ),
                                 )
                             })
                             .when(!saving && dirty, |d| {
@@ -1029,49 +1192,155 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             KeyBinding::new("e", mask_tool::gui::ExportImage, Some("MaskTool")),
             KeyBinding::new("f", mask_tool::gui::FitView, Some("MaskTool")),
             KeyBinding::new("delete", mask_tool::gui::DeleteSelected, Some("MaskTool")),
-            KeyBinding::new("backspace", mask_tool::gui::DeleteSelected, Some("MaskTool")),
+            KeyBinding::new(
+                "backspace",
+                mask_tool::gui::DeleteSelected,
+                Some("MaskTool"),
+            ),
             KeyBinding::new("b", mask_tool::gui::ToggleDrawMode, Some("MaskTool")),
             KeyBinding::new("l", mask_tool::gui::TogglePolyMode, Some("MaskTool")),
             KeyBinding::new("p", mask_tool::gui::TogglePanMode, Some("MaskTool")),
             KeyBinding::new("escape", mask_tool::gui::CancelPolyDraft, Some("MaskTool")),
+            KeyBinding::new("t", OpenPhotoEdit, Some("MaskTool")),
         ];
         // 分块面板: Ctrl+O 打开图片/PDF. 蒙版/底色/视频不绑, 避免误开文件.
         keys.extend(apply_bg::bind_primary("o", OpenFile, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary(
+            "shift-n",
+            NewProject,
+            Some("ScoreSync"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-o",
+            OpenProject,
+            Some("ScoreSync"),
+        ));
         keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary(
+            "shift-s",
+            SaveProjectAs,
+            Some("ScoreSync"),
+        ));
         // 各面板通用: 保存 / 另存 / 打开工程 / 新建工程.
         keys.extend(apply_bg::bind_primary("s", SaveProject, None));
         keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, None));
         keys.extend(apply_bg::bind_primary("shift-o", OpenProject, None));
         keys.extend(apply_bg::bind_primary("shift-n", NewProject, None));
         keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreVideo")));
-        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreVideo")));
-        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreVideo")));
-        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreVideo")));
-        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreProject")));
-        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("ScoreProject")));
-        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("ScoreProject")));
-        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("ScoreProject")));
-        keys.extend(apply_bg::bind_primary("m", PairUngrouped, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary(
+            "shift-s",
+            SaveProjectAs,
+            Some("ScoreVideo"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-o",
+            OpenProject,
+            Some("ScoreVideo"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-n",
+            NewProject,
+            Some("ScoreVideo"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "s",
+            SaveProject,
+            Some("ScoreProject"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-s",
+            SaveProjectAs,
+            Some("ScoreProject"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-o",
+            OpenProject,
+            Some("ScoreProject"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-n",
+            NewProject,
+            Some("ScoreProject"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "m",
+            PairUngrouped,
+            Some("ScoreSync"),
+        ));
         keys.extend(apply_bg::bind_primary("z", Undo, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("y", Redo, Some("ScoreSync")));
         keys.extend(apply_bg::bind_primary("shift-z", Redo, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary("a", SelectAllPageRegions, Some("ScoreSync")));
+        keys.extend(apply_bg::bind_primary(
+            "a",
+            SelectAllPageRegions,
+            Some("ScoreSync"),
+        ));
         keys.extend(apply_bg::bind_primary("z", Undo, Some("PageOrganize")));
         keys.extend(apply_bg::bind_primary("y", Redo, Some("PageOrganize")));
-        keys.extend(apply_bg::bind_primary("shift-z", Redo, Some("PageOrganize")));
-        keys.extend(apply_bg::bind_primary("a", SelectAllPageRegions, Some("PageOrganize")));
-        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, Some("MaskTool")));
-        keys.extend(apply_bg::bind_primary("shift-n", NewProject, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary(
+            "shift-z",
+            Redo,
+            Some("PageOrganize"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "a",
+            SelectAllPageRegions,
+            Some("PageOrganize"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-o",
+            OpenProject,
+            Some("MaskTool"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-n",
+            NewProject,
+            Some("MaskTool"),
+        ));
         keys.extend(apply_bg::bind_primary("s", SaveProject, Some("MaskTool")));
-        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, Some("MaskTool")));
-        keys.extend(apply_bg::bind_primary("a", mask_tool::gui::SelectAll, Some("MaskTool")));
-        keys.extend(apply_bg::bind_primary("z", mask_tool::gui::Undo, Some("MaskTool")));
-        keys.extend(apply_bg::bind_primary("y", mask_tool::gui::Redo, Some("MaskTool")));
-        keys.extend(apply_bg::bind_primary("shift-z", mask_tool::gui::Redo, Some("MaskTool")));
+        keys.extend(apply_bg::bind_primary(
+            "shift-s",
+            SaveProjectAs,
+            Some("MaskTool"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "a",
+            mask_tool::gui::SelectAll,
+            Some("MaskTool"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "z",
+            mask_tool::gui::Undo,
+            Some("MaskTool"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "y",
+            mask_tool::gui::Redo,
+            Some("MaskTool"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-z",
+            mask_tool::gui::Redo,
+            Some("MaskTool"),
+        ));
         keys.extend(apply_bg::bind_primary("shift-m", DumpMemory, None));
+        photo_edit::gui::bind_keys(cx);
+        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("PhotoEdit")));
+        keys.extend(apply_bg::bind_primary(
+            "shift-s",
+            SaveProjectAs,
+            Some("PhotoEdit"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-o",
+            OpenProject,
+            Some("PhotoEdit"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-n",
+            NewProject,
+            Some("PhotoEdit"),
+        ));
         cx.bind_keys(keys);
         let bounds = default_window_bounds(cx);
         let initial = initial.clone();
@@ -1121,9 +1390,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
 fn paint_save_spinner(window: &mut Window, bounds: Bounds<Pixels>, phase: f32) {
     let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) * 0.5;
     let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5;
-    let radius = f32::from(bounds.size.width)
-        .min(f32::from(bounds.size.height))
-        * 0.36;
+    let radius = f32::from(bounds.size.width).min(f32::from(bounds.size.height)) * 0.36;
     const N: i32 = 14;
     for i in 0..N {
         let t = i as f32 / N as f32;

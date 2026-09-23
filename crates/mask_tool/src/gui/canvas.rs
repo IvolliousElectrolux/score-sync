@@ -99,9 +99,7 @@ impl MaskToolApp {
                 cx.notify();
                 return;
             }
-            self.drag = Some(DragKind::PagePan {
-                last: ev.position,
-            });
+            self.drag = Some(DragKind::PagePan { last: ev.position });
             return;
         }
         if ev.button != MouseButton::Left {
@@ -150,7 +148,7 @@ impl MaskToolApp {
                         }
                         self.poly_cursor = Some((ix, iy));
                         self.status = format!(
-                            "折线 {} 点 · 靠近首点吸附闭环 (右键/Esc 取消)",
+                            "套索 {} 点 · 靠近首点闭环, 或按住拖轨迹 (右键/Esc 取消)",
                             draft.len()
                         )
                         .into();
@@ -158,9 +156,14 @@ impl MaskToolApp {
                     None => {
                         self.poly_draft = Some(vec![(ix, iy)]);
                         self.poly_cursor = Some((ix, iy));
-                        self.status = "折线起点已定 · 继续点击加点".into();
+                        self.status = "套索起点 · 继续点击折线, 或按住拖出轨迹".into();
                     }
                 }
+                self.drag = Some(DragKind::PolyStroke {
+                    start_x: ix,
+                    start_y: iy,
+                    freehand: false,
+                });
             }
             ToolMode::Brush => {
                 if self.img_w < 2 || self.img_h < 2 {
@@ -187,7 +190,11 @@ impl MaskToolApp {
                 });
                 self.selected.clear();
                 self.selected.insert(id.clone());
-                self.drag = Some(DragKind::Brush { id, start_iy: iy, undid: true });
+                self.drag = Some(DragKind::Brush {
+                    id,
+                    start_iy: iy,
+                    undid: true,
+                });
                 self.status = format!("蒙版 {} 个", self.masks.len()).into();
             }
             ToolMode::Eraser => {
@@ -214,9 +221,7 @@ impl MaskToolApp {
                     if !control {
                         self.selected.clear();
                     }
-                    self.drag = Some(DragKind::PagePan {
-                        last: ev.position,
-                    });
+                    self.drag = Some(DragKind::PagePan { last: ev.position });
                 }
             }
             ToolMode::Select => {
@@ -249,9 +254,7 @@ impl MaskToolApp {
                             self.begin_block_resize_bottom(rid, iy)
                         }
                         Some((rid, BlockHitZone::Left)) => self.begin_block_resize_left(rid, ix),
-                        Some((rid, BlockHitZone::Right)) => {
-                            self.begin_block_resize_right(rid, ix)
-                        }
+                        Some((rid, BlockHitZone::Right)) => self.begin_block_resize_right(rid, ix),
                         Some((rid, BlockHitZone::Body)) => {
                             self.begin_block_move(rid, ix, iy, false)
                         }
@@ -366,7 +369,11 @@ impl MaskToolApp {
                 });
                 cx.notify();
             }
-            Some(DragKind::Brush { id, start_iy, undid }) => {
+            Some(DragKind::Brush {
+                id,
+                start_iy,
+                undid,
+            }) => {
                 let xform = self.xform();
                 let (ix, iy) = xform.screen_to_image(sx, sy);
                 self.brush_cursor = Some((ix, iy));
@@ -375,7 +382,11 @@ impl MaskToolApp {
                 } else {
                     cx.notify();
                 }
-                self.drag = Some(DragKind::Brush { id, start_iy, undid });
+                self.drag = Some(DragKind::Brush {
+                    id,
+                    start_iy,
+                    undid,
+                });
             }
             Some(DragKind::PagePan { last }) => {
                 let dx = f32::from(position.x) - f32::from(last.x);
@@ -412,10 +423,7 @@ impl MaskToolApp {
                 cx.notify();
             }
             Some(DragKind::Marquee {
-                x0,
-                y0,
-                additive,
-                ..
+                x0, y0, additive, ..
             }) => {
                 let xform = self.xform();
                 let (ix, iy) = xform.screen_to_image(sx, sy);
@@ -428,17 +436,56 @@ impl MaskToolApp {
                 });
                 cx.notify();
             }
+            Some(DragKind::PolyStroke {
+                start_x,
+                start_y,
+                mut freehand,
+            }) => {
+                let xform = self.xform();
+                let (ix, iy) = xform.screen_to_image(sx, sy);
+                let (psx, psy) = xform.image_to_screen(start_x, start_y);
+                if !freehand && (sx - psx).hypot(sy - psy) >= 5.0 {
+                    freehand = true;
+                }
+                if freehand {
+                    let (ix, iy, snapped) = self.poly_snap_within(ix, iy, POLY_DRAG_SNAP_SCREEN_PX);
+                    if snapped {
+                        self.poly_cursor = Some((ix, iy));
+                        self.status = "套索已贴到起点 · 松手闭环".into();
+                    } else {
+                        if let Some(draft) = &mut self.poly_draft {
+                            if let Some(&(lx, ly)) = draft.last() {
+                                let (lsx, lsy) = xform.image_to_screen(lx, ly);
+                                if (lsx - sx).hypot(lsy - sy) >= 2.5 {
+                                    draft.push((ix, iy));
+                                }
+                            } else {
+                                draft.push((ix, iy));
+                            }
+                        }
+                        self.poly_cursor = Some((ix, iy));
+                        if let Some(n) = self.poly_draft.as_ref().map(|d| d.len()) {
+                            self.status = format!("套索轨迹 {n} 点 · 松手闭环").into();
+                        }
+                    }
+                } else {
+                    let (ix, iy, _) = self.poly_maybe_snap(ix, iy);
+                    self.poly_cursor = Some((ix, iy));
+                }
+                self.drag = Some(DragKind::PolyStroke {
+                    start_x,
+                    start_y,
+                    freehand,
+                });
+                cx.notify();
+            }
             Some(DragKind::PaletteOpacity) => {
                 self.drag = Some(DragKind::PaletteOpacity);
                 self.set_palette_opacity_from_x(f32::from(position.x), cx);
             }
             Some(DragKind::PaletteSb) => {
                 self.drag = Some(DragKind::PaletteSb);
-                self.set_palette_sb_from_pos(
-                    f32::from(position.x),
-                    f32::from(position.y),
-                    cx,
-                );
+                self.set_palette_sb_from_pos(f32::from(position.x), f32::from(position.y), cx);
             }
             Some(DragKind::PaletteHue) => {
                 self.drag = Some(DragKind::PaletteHue);
@@ -667,7 +714,10 @@ impl MaskToolApp {
                     let (ix, iy) = xform.screen_to_image(sx, sy);
                     self.brush_cursor = Some((ix, iy));
                     cx.notify();
-                } else if self.mode == ToolMode::Select && self.selected.is_empty() && self.has_block_pieces() {
+                } else if self.mode == ToolMode::Select
+                    && self.selected.is_empty()
+                    && self.has_block_pieces()
+                {
                     let xform = self.xform();
                     let (ix, iy) = xform.screen_to_image(sx, sy);
                     let tol = xform.edge_tol();
@@ -712,6 +762,13 @@ impl MaskToolApp {
         // 后台合成完再闪到拖后状态. freeze 留到 `update_base_image`.
         let finished = self.drag.take();
         match finished {
+            Some(DragKind::PolyStroke { freehand, .. }) => {
+                if freehand {
+                    self.finalize_poly(cx);
+                } else {
+                    cx.notify();
+                }
+            }
             Some(DragKind::Draw { x0, y0, x1, y1 }) => {
                 if self.img_w < 2 || self.img_h < 2 {
                     cx.notify();
@@ -732,14 +789,10 @@ impl MaskToolApp {
                     let mid = new_id();
                     let bound_block = self.resolve_bound_block(y0, y1);
                     self.ensure_sheet_masks();
-                    let (sx0, sy0) = self.canvas_to_sheet_xy(
-                        clamp(min_x, iw) as f32,
-                        clamp(min_y, ih) as f32,
-                    );
-                    let (sx1, sy1) = self.canvas_to_sheet_xy(
-                        clamp(max_x, iw) as f32,
-                        clamp(max_y, ih) as f32,
-                    );
+                    let (sx0, sy0) =
+                        self.canvas_to_sheet_xy(clamp(min_x, iw) as f32, clamp(min_y, ih) as f32);
+                    let (sx1, sy1) =
+                        self.canvas_to_sheet_xy(clamp(max_x, iw) as f32, clamp(max_y, ih) as f32);
                     self.push_undo();
                     self.masks.push(MaskRect {
                         id: mid.clone(),
@@ -814,7 +867,11 @@ impl MaskToolApp {
                 self.opacity_undid = false;
                 cx.notify();
             }
-            Some(DragKind::BlockMove { region_id, horizontal, .. }) => {
+            Some(DragKind::BlockMove {
+                region_id,
+                horizontal,
+                ..
+            }) => {
                 self.status = if horizontal {
                     format!("已左右移动分块 {region_id}")
                 } else {
@@ -870,7 +927,12 @@ impl MaskToolApp {
         }
     }
 
-    pub(super) fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_scroll(
+        &mut self,
+        ev: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.has_canvas_preview() {
             return;
         }
@@ -882,23 +944,43 @@ impl MaskToolApp {
             if dy.abs() > 0.5 {
                 self.preview_wheel = if dy > 0.0 { -1 } else { 1 };
                 cx.notify();
+                cx.stop_propagation();
             }
             return;
         }
-        // 无模式禁止移动页面; Ctrl+滚轮缩放始终可用
-        if !apply_bg::is_primary_mod(&ev.modifiers) {
-            if self.mode == ToolMode::Select {
-                return;
-            }
-            let delta = match ev.delta {
+        if ev.modifiers.alt && matches!(self.mode, ToolMode::Brush | ToolMode::Eraser) {
+            let (dx, dy) = match ev.delta {
                 ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
                 ScrollDelta::Lines(p) => (p.x * 40.0, p.y * 40.0),
             };
-            self.pan.x += delta.0;
-            self.pan.y += delta.1;
+            let d = if dy.abs() > 0.01 { dy } else { dx };
+            self.bump_brush_size(d > 0.0);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        // 滚轮平移, Shift 只走横向. Ctrl 缩放在下面.
+        if !apply_bg::is_primary_mod(&ev.modifiers) {
+            let (delta_x, delta_y) = match ev.delta {
+                ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+                ScrollDelta::Lines(p) => (p.x * 40.0, p.y * 40.0),
+            };
+            // Shift+滚轮在 Windows 上常把滚动量放进 x; 其它平台仍在 y.
+            if ev.modifiers.shift {
+                let dx = if delta_x.abs() > 0.01 {
+                    delta_x
+                } else {
+                    delta_y
+                };
+                self.pan.x += dx;
+            } else {
+                self.pan.x += delta_x;
+                self.pan.y += delta_y;
+            }
             self.user_zoomed = true;
             self.clamp_pan();
             cx.notify();
+            cx.stop_propagation();
             return;
         }
         let factor = match ev.delta {
@@ -924,15 +1006,13 @@ impl MaskToolApp {
         let vw = f32::from(self.view_bounds.size.width);
         let vh = f32::from(self.view_bounds.size.height);
         let fit = if self.img_w > 0 && self.img_h > 0 && vw > 1.0 && vh > 1.0 {
-            (vw / self.img_w as f32).min(vh / self.img_h as f32).max(0.0001)
+            (vw / self.img_w as f32)
+                .min(vh / self.img_h as f32)
+                .max(0.0001)
         } else {
             1.0
         };
-        let current_zoom = if self.user_zoomed {
-            self.zoom
-        } else {
-            1.0
-        };
+        let current_zoom = if self.user_zoomed { self.zoom } else { 1.0 };
         self.user_zoomed = true;
         self.zoom = (current_zoom * factor).clamp(0.05, 40.0);
         let new_scale = fit * self.zoom;
@@ -941,10 +1021,13 @@ impl MaskToolApp {
         self.pan.y = sy - (vh - self.img_h as f32 * new_scale) * 0.5 - iy * new_scale;
         self.clamp_pan();
         cx.notify();
+        cx.stop_propagation();
     }
-    pub fn image_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn image_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_view_lod(cx);
         let render = self.render_image.clone();
-        let masks = self.masks_for_canvas();
+        let paint_items = self.overlay_paint_items();
+        let brush_blits = self.sync_brush_sprites();
         let selected = self.selected.clone();
         let img_w = self.img_w;
         let img_h = self.img_h;
@@ -962,12 +1045,20 @@ impl MaskToolApp {
         let brush_size = self.brush_size;
         let brush_color = self.brush_color;
         let brush_opacity = self.brush_opacity;
+        let brush_ring = brush_cursor.map(|(bx, by)| {
+            let samples = self.sample_ring_under(bx, by, brush_size * 0.5);
+            ring_style_from_under(&samples, Some(brush_color))
+        });
         let mask_color = self.mask_color;
         let show_blocks = !self.preview_only
             && self.mode == ToolMode::Select
             && self.selected.is_empty()
             && self.has_block_pieces();
-        let block_boxes = if show_blocks { self.block_overlay_boxes() } else { Vec::new() };
+        let block_boxes = if show_blocks {
+            self.block_overlay_boxes()
+        } else {
+            Vec::new()
+        };
         let crop_marks = if show_blocks {
             self.block_shift_crop_marks()
         } else {
@@ -1002,8 +1093,10 @@ impl MaskToolApp {
         let block_voff_paint = self.block_voff;
         let block_shows_bg = self.block_shows_bg;
         let content_scale = self.content_scale;
+        let masks_are_sheet = self.masks_are_sheet;
         let canvas_loading = self.canvas_loading;
         let allow_tile_overflow = !self.preview_only;
+        let view_detail = self.view_detail.clone();
         let cursor = if self.host_pick_armed || self.eyedropper_armed {
             CursorStyle::Crosshair
         } else if self.preview_only {
@@ -1016,14 +1109,18 @@ impl MaskToolApp {
                 ToolMode::Select => {
                     let dragging_h = matches!(
                         self.drag,
-                        Some(DragKind::BlockMove { horizontal: true, .. })
-                            | Some(DragKind::BlockResizeLeft { .. })
+                        Some(DragKind::BlockMove {
+                            horizontal: true,
+                            ..
+                        }) | Some(DragKind::BlockResizeLeft { .. })
                             | Some(DragKind::BlockResizeRight { .. })
                     );
                     let dragging_v = matches!(
                         self.drag,
-                        Some(DragKind::BlockMove { horizontal: false, .. })
-                            | Some(DragKind::BlockResizeTop { .. })
+                        Some(DragKind::BlockMove {
+                            horizontal: false,
+                            ..
+                        }) | Some(DragKind::BlockResizeTop { .. })
                             | Some(DragKind::BlockResizeBottom { .. })
                             | Some(DragKind::GuideMove { .. })
                     );
@@ -1107,15 +1204,8 @@ impl MaskToolApp {
                         // 拖动分块时用锁定尺寸算缩放, 与鼠标坐标换算同一套,
                         // 避免拼合图总高变化把整页重新 fit 造成画面缩放抖动.
                         let (fit_w, fit_h) = freeze.unwrap_or((img_w as f32, img_h as f32));
-                        let xform = ViewXform::compute(
-                            fit_w,
-                            fit_h,
-                            vw,
-                            vh,
-                            zoom,
-                            pan,
-                            user_zoomed,
-                        );
+                        let xform =
+                            ViewXform::compute(fit_w, fit_h, vw, vh, zoom, pan, user_zoomed);
                         let img_bounds = Bounds {
                             origin: point(
                                 bounds.origin.x + px(xform.origin_x),
@@ -1141,6 +1231,7 @@ impl MaskToolApp {
                                 block_shows_bg,
                                 content_scale,
                                 allow_tile_overflow,
+                                &view_detail,
                             );
                         } else if let Some(ref img) = render {
                             let _ = window.paint_image(
@@ -1150,6 +1241,25 @@ impl MaskToolApp {
                                 0,
                                 false,
                             );
+                            for d in view_detail.iter().filter(|d| d.region_id.is_empty()) {
+                                let db = Bounds {
+                                    origin: point(
+                                        img_bounds.origin.x + px(d.x as f32 * xform.scale),
+                                        img_bounds.origin.y + px(d.y as f32 * xform.scale),
+                                    ),
+                                    size: size(
+                                        px((d.w as f32 * xform.scale).max(1.0)),
+                                        px((d.h as f32 * xform.scale).max(1.0)),
+                                    ),
+                                };
+                                let _ = window.paint_image(
+                                    db,
+                                    Corners::default(),
+                                    d.tex.clone(),
+                                    0,
+                                    false,
+                                );
+                            }
                         }
 
                         if show_blocks {
@@ -1158,11 +1268,7 @@ impl MaskToolApp {
                                 // 选中的块不再叠色块 (会遮住原图颜色, 不方便对色),
                                 // 改成更粗的实线边框; 未选中的块只画细虚线示意.
                                 // 框跟着 shift_x / 左右裁扩, 可以画出页面左右.
-                                let line_color = if is_sel {
-                                    rgb(0xf97316)
-                                } else {
-                                    rgb(0x38bdf8)
-                                };
+                                let line_color = if is_sel { rgb(0xf97316) } else { rgb(0x38bdf8) };
                                 let mut b = xform.image_rect_to_screen(
                                     x0.round() as i32,
                                     y0.round() as i32,
@@ -1171,7 +1277,8 @@ impl MaskToolApp {
                                 );
                                 b.origin.x = bounds.origin.x + b.origin.x;
                                 b.origin.y = bounds.origin.y + b.origin.y;
-                                let mut stroke = PathBuilder::stroke(if is_sel { px(2.5) } else { px(1.) });
+                                let mut stroke =
+                                    PathBuilder::stroke(if is_sel { px(2.5) } else { px(1.) });
                                 if !is_sel {
                                     stroke = stroke.dash_array(&[px(6.), px(4.)]);
                                 }
@@ -1221,7 +1328,8 @@ impl MaskToolApp {
                                 rgb(0xa855f7)
                             };
                             let sy = bounds.origin.y + px(xform.origin_y + y as f32 * xform.scale);
-                            let mut line = PathBuilder::stroke(if is_sel { px(2.) } else { px(1.2) });
+                            let mut line =
+                                PathBuilder::stroke(if is_sel { px(2.) } else { px(1.2) });
                             line = line.dash_array(&[px(9.), px(5.)]);
                             line.move_to(point(bounds.origin.x, sy));
                             line.line_to(point(
@@ -1246,49 +1354,51 @@ impl MaskToolApp {
                             ));
                         }
 
-                        for m in &masks {
-                            if m.is_brush() {
-                                let r = m.brush_radius.max(1) as f32;
-                                let diam = (r * 2.0 * xform.scale).max(2.0);
-                                let color_u32 = ((m.color[0] as u32) << 16)
-                                    | ((m.color[1] as u32) << 8)
-                                    | (m.color[2] as u32);
-                                let mut fill_c = rgb(color_u32);
-                                fill_c.a = m.effective_opacity();
-                                let is_sel = selected.contains(&m.id);
-                                let border = if is_sel {
-                                    rgb(0xdc5050)
-                                } else {
-                                    rgb(0xb4b4b4)
-                                };
-                                // 圆章叠画 (与导出一致); 不用整条 stroke, 避免折返畸形
-                                if is_sel {
-                                    paint_brush_stamps(
-                                        window,
-                                        &m.brush_points,
-                                        r,
-                                        xform.scale,
-                                        xform.origin_x,
-                                        xform.origin_y,
-                                        bounds.origin,
-                                        diam + 4.0,
-                                        border,
-                                    );
+                        for item in &paint_items {
+                            let m = match item {
+                                OverlayPaint::Brush(id) => {
+                                    if let Some(blits) = brush_blits.get(id) {
+                                        let (cs, hoff, voff) = if masks_are_sheet {
+                                            (
+                                                if content_scale > 0.0001 {
+                                                    content_scale
+                                                } else {
+                                                    1.0
+                                                },
+                                                block_hoff as f32,
+                                                block_voff_paint as f32,
+                                            )
+                                        } else {
+                                            (1.0, 0.0, 0.0)
+                                        };
+                                        for b in blits {
+                                            let ix = hoff + b.x as f32 * cs;
+                                            let iy = voff + b.y as f32 * cs;
+                                            let db = Bounds {
+                                                origin: point(
+                                                    bounds.origin.x
+                                                        + px(xform.origin_x + ix * xform.scale),
+                                                    bounds.origin.y
+                                                        + px(xform.origin_y + iy * xform.scale),
+                                                ),
+                                                size: size(
+                                                    px((b.w as f32 * cs * xform.scale).max(1.0)),
+                                                    px((b.h as f32 * cs * xform.scale).max(1.0)),
+                                                ),
+                                            };
+                                            let _ = window.paint_image(
+                                                db,
+                                                Corners::default(),
+                                                b.tex.clone(),
+                                                0,
+                                                false,
+                                            );
+                                        }
+                                    }
+                                    continue;
                                 }
-                                paint_brush_stamps(
-                                    window,
-                                    &m.brush_points,
-                                    r,
-                                    xform.scale,
-                                    xform.origin_x,
-                                    xform.origin_y,
-                                    bounds.origin,
-                                    diam,
-                                    fill_c,
-                                );
-                                continue;
-                            }
-
+                                OverlayPaint::Shape(m) => m,
+                            };
                             if m.is_poly() {
                                 let color_u32 = color_rgb_u32(m.color);
                                 let mut fill_c = rgb(color_u32);
@@ -1299,13 +1409,12 @@ impl MaskToolApp {
                                     rgb(0xb4b4b4)
                                 };
                                 let mut fill_builder = PathBuilder::fill();
-                                let mut stroke_builder = PathBuilder::stroke(if selected
-                                    .contains(&m.id)
-                                {
-                                    px(2.)
-                                } else {
-                                    px(1.)
-                                });
+                                let mut stroke_builder =
+                                    PathBuilder::stroke(if selected.contains(&m.id) {
+                                        px(2.)
+                                    } else {
+                                        px(1.)
+                                    });
                                 let mut first = true;
                                 for &(px_i, py_i) in &m.poly_points {
                                     let sx = bounds.origin.x
@@ -1424,7 +1533,6 @@ impl MaskToolApp {
                                 if let Ok(path) = stroke.build() {
                                     window.paint_path(path, rgb(0x38bdf8));
                                 }
-                                // 顶点小方块; 首点在可吸附时加大
                                 let can_snap = draft.len() >= 3
                                     && poly_cursor
                                         .map(|(cx_i, cy_i)| {
@@ -1432,45 +1540,33 @@ impl MaskToolApp {
                                                 && (cy_i - draft[0].1).abs() < 0.01
                                         })
                                         .unwrap_or(false);
-                                for (i, &(ix, iy)) in draft.iter().enumerate() {
-                                    let p = to_screen(ix, iy);
-                                    let sz = if i == 0 && can_snap { 10.0 } else { 6.0 };
-                                    let b = Bounds {
+                                let p = to_screen(draft[0].0, draft[0].1);
+                                let sz = if can_snap { 10.0 } else { 6.0 };
+                                window.paint_quad(quad(
+                                    Bounds {
                                         origin: point(p.x - px(sz * 0.5), p.y - px(sz * 0.5)),
                                         size: size(px(sz), px(sz)),
-                                    };
-                                    let col = if i == 0 {
-                                        rgb(0xf97316)
-                                    } else {
-                                        rgb(0x38bdf8)
-                                    };
-                                    window.paint_quad(quad(
-                                        b,
-                                        px(1.),
-                                        col,
-                                        px(1.),
-                                        rgb(0xffffff),
-                                        Default::default(),
-                                    ));
-                                }
+                                    },
+                                    px(1.),
+                                    rgb(0xf97316),
+                                    px(1.),
+                                    rgb(0xffffff),
+                                    Default::default(),
+                                ));
                             }
                         }
 
-                        // 画笔圆形光标: 填充跟画笔色, 边框用反色 (白笔黑框)
-                        if let Some((bx, by)) = brush_cursor {
+                        // 画笔圆形光标: 填充跟画笔色, 外圈按底下颜色决定是否加反色描边
+                        if let Some(((bx, by), style)) = brush_cursor.zip(brush_ring) {
                             let screen_r = (brush_size * 0.5 * xform.scale).max(1.5);
-                            let cx_s = f32::from(bounds.origin.x) + xform.origin_x + bx * xform.scale;
-                            let cy_s = f32::from(bounds.origin.y) + xform.origin_y + by * xform.scale;
+                            let cx_s =
+                                f32::from(bounds.origin.x) + xform.origin_x + bx * xform.scale;
+                            let cy_s =
+                                f32::from(bounds.origin.y) + xform.origin_y + by * xform.scale;
                             let [cr, cg, cb] = brush_color;
-                            let mut fill = rgb(
-                                ((cr as u32) << 16) | ((cg as u32) << 8) | (cb as u32),
-                            );
+                            let mut fill =
+                                rgb(((cr as u32) << 16) | ((cg as u32) << 8) | (cb as u32));
                             fill.a = (brush_opacity * 0.35).clamp(0.12, 0.55);
-                            let [rr, rg, rb] = opposite_rgb(brush_color);
-                            let mut ring = rgb(
-                                ((rr as u32) << 16) | ((rg as u32) << 8) | (rb as u32),
-                            );
-                            ring.a = 1.0;
                             let ring_w = (screen_r * 0.08).clamp(1.5, 2.5);
                             let b = Bounds {
                                 origin: point(px(cx_s - screen_r), px(cy_s - screen_r)),
@@ -1480,10 +1576,11 @@ impl MaskToolApp {
                                 b,
                                 px(screen_r),
                                 fill,
-                                px(ring_w),
-                                ring,
+                                px(0.),
+                                fill,
                                 Default::default(),
                             ));
+                            paint_contrast_circle(window, cx_s, cy_s, screen_r, ring_w, style);
                         }
                     },
                 )
@@ -1503,6 +1600,51 @@ impl MaskToolApp {
                         .child("加载中…"),
                 )
             })
+    }
+}
+
+fn paint_circle_stroke(
+    window: &mut Window,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    width: f32,
+    color: gpui::Rgba,
+) {
+    let r = r.max(1.0);
+    let mut clear = rgb(0x000000);
+    clear.a = 0.0;
+    window.paint_quad(quad(
+        Bounds {
+            origin: point(px(cx - r), px(cy - r)),
+            size: size(px(r * 2.0), px(r * 2.0)),
+        },
+        px(r),
+        clear,
+        px(width),
+        color,
+        Default::default(),
+    ));
+}
+
+fn paint_contrast_circle(
+    window: &mut Window,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    width: f32,
+    style: RingStyle,
+) {
+    let r = r.max(1.0);
+    let width = width.max(1.0);
+    let to_rgb = |c: [u8; 3]| rgb(((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32));
+    if let Some(halo) = style.halo {
+        let halo_c = to_rgb(halo);
+        paint_circle_stroke(window, cx, cy, r + width, width, halo_c);
+        paint_circle_stroke(window, cx, cy, r, width, to_rgb(style.ring));
+        paint_circle_stroke(window, cx, cy, (r - width).max(1.0), width, halo_c);
+    } else {
+        paint_circle_stroke(window, cx, cy, r, width, to_rgb(style.ring));
     }
 }
 
@@ -1541,12 +1683,17 @@ fn paint_live_block_tiles(
     shows_bg: bool,
     content_scale: f32,
     allow_overflow: bool,
+    details: &[PieceDetail],
 ) {
     if tiles.is_empty() {
         return;
     }
     let scale = xform.scale;
-    let cs = if content_scale > 0.0001 { content_scale } else { 1.0 };
+    let cs = if content_scale > 0.0001 {
+        content_scale
+    } else {
+        1.0
+    };
     let img_rect = |ix: f32, iy: f32, w: f32, h: f32| -> Bounds<Pixels> {
         Bounds {
             origin: point(
@@ -1640,9 +1787,8 @@ fn paint_live_block_tiles(
                 crate::layout::effective_h_metrics(tile.width as i32, &adj);
             let hx_block = canvas_x(adj.shift_x as f32);
             let overlay_x = canvas_x((adj.shift_x - adj.extra_left) as f32);
-            let overlay_w = canvas_s(
-                (tile.width as i32 + adj.extra_left + adj.extra_right).max(1) as f32,
-            );
+            let overlay_w =
+                canvas_s((tile.width as i32 + adj.extra_left + adj.extra_right).max(1) as f32);
             if gap > 0 {
                 if i > 0 {
                     if let Some(prev) = prev_bottom {
@@ -1707,6 +1853,20 @@ fn paint_live_block_tiles(
                         0,
                         false,
                     );
+                    for d in details.iter().filter(|d| d.region_id == tile.region_id) {
+                        let _ = window.paint_image(
+                            img_rect(
+                                hx_block + d.x as f32 * cs,
+                                piece_origin_y + d.y as f32 * cs,
+                                d.w as f32 * cs,
+                                d.h as f32 * cs,
+                            ),
+                            Corners::default(),
+                            d.tex.clone(),
+                            0,
+                            false,
+                        );
+                    }
                 });
             }
             yy += ext_top as i64 + content_h as i64;

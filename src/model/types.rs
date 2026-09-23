@@ -7,8 +7,8 @@ use std::sync::Arc;
 use image::RgbImage;
 
 pub const COLORS: &[&str] = &[
-    "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22",
-    "#2980b9", "#16a085", "#c0392b",
+    "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22", "#2980b9",
+    "#16a085", "#c0392b",
 ];
 
 pub const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"];
@@ -28,9 +28,7 @@ pub struct Region {
 
 impl Region {
     pub fn label(&self, page_no: Option<usize>) -> String {
-        let prefix = page_no
-            .map(|n| format!("P{n} "))
-            .unwrap_or_default();
+        let prefix = page_no.map(|n| format!("P{n} ")).unwrap_or_default();
         format!(
             "{prefix}{}  y={}-{}  h={}",
             self.kind,
@@ -69,11 +67,7 @@ impl Page {
 
     /// 页签短标签用的原页码 (PDF `_p012`) 与「复制」标记.
     pub fn tab_badge(&self, fallback_index1: usize) -> String {
-        let stem = self
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let stem = self.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let src = source_page_no_from_stem(stem)
             .map(|n| n.to_string())
             .unwrap_or_else(|| fallback_index1.to_string());

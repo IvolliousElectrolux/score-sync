@@ -54,7 +54,7 @@ impl ScoreVideoApp {
             .border_color(rgb(0x0f172a))
             .child(self.btn(
                 "sv_play",
-                if playing { "暂停" } else { "播放" },
+                if playing { "暂停 (空格)" } else { "播放 (空格)" },
                 true,
                 |this, _, cx| this.play_pause(cx),
                 cx,

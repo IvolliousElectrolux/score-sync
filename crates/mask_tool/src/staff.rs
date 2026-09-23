@@ -100,7 +100,14 @@ fn cluster_sorted(ys: &[i32], gap: i32) -> Vec<Vec<i32>> {
     groups
 }
 
-fn find_staff_line_ys(rgb: &RgbImage, y0: u32, y1: u32, x0: u32, x1: u32, threshold: i32) -> Vec<i32> {
+fn find_staff_line_ys(
+    rgb: &RgbImage,
+    y0: u32,
+    y1: u32,
+    x0: u32,
+    x1: u32,
+    threshold: i32,
+) -> Vec<i32> {
     let raw: Vec<i32> = (y0..=y1)
         .filter(|&y| is_staff_line_row(rgb, y, x0, x1, threshold))
         .map(|y| y as i32)
@@ -424,10 +431,14 @@ pub fn staff_align_anchor(
     if systems.len() >= 2 {
         return systems_combined_centroid(&systems);
     }
-    let staves = systems.into_iter().next().filter(|s| !s.is_empty()).or_else(|| {
-        let s = first_system_staves(&all);
-        (!s.is_empty()).then_some(s)
-    })?;
+    let staves = systems
+        .into_iter()
+        .next()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let s = first_system_staves(&all);
+            (!s.is_empty()).then_some(s)
+        })?;
     let first = *staves.first()?;
     let last = *staves.last()?;
     let staff = (first.0, last.1);
@@ -669,7 +680,14 @@ mod tests {
     #[test]
     fn blank_region_is_not_staff() {
         let img = blank(400, 200);
-        assert!(!looks_like_staff(&img, 0, 199, 0, 399, DEFAULT_INK_THRESHOLD));
+        assert!(!looks_like_staff(
+            &img,
+            0,
+            199,
+            0,
+            399,
+            DEFAULT_INK_THRESHOLD
+        ));
         assert_eq!(
             staff_align_anchor(&img, 0, 199, 0, 399, DEFAULT_INK_THRESHOLD),
             None
@@ -680,7 +698,14 @@ mod tests {
     fn five_lines_count_as_staff() {
         let mut img = blank(400, 200);
         paint_staff(&mut img, 40, 20, 380, 8);
-        assert!(looks_like_staff(&img, 0, 199, 0, 399, DEFAULT_INK_THRESHOLD));
+        assert!(looks_like_staff(
+            &img,
+            0,
+            199,
+            0,
+            399,
+            DEFAULT_INK_THRESHOLD
+        ));
         // 谱表 40..72, 几何重心 56.
         assert_eq!(
             staff_align_anchor(&img, 0, 199, 0, 399, DEFAULT_INK_THRESHOLD),
@@ -697,7 +722,14 @@ mod tests {
                 img.put_pixel(x, y, Rgb([0, 0, 0]));
             }
         }
-        assert!(!looks_like_staff(&img, 0, 199, 0, 399, DEFAULT_INK_THRESHOLD));
+        assert!(!looks_like_staff(
+            &img,
+            0,
+            199,
+            0,
+            399,
+            DEFAULT_INK_THRESHOLD
+        ));
     }
 
     #[test]
@@ -906,13 +938,7 @@ mod tests {
             },
         ];
         let a = assignments_for_guides(&anchors, &[80, 200]);
-        assert_eq!(
-            a,
-            vec![
-                ("s1".into(), 20, 80),
-                ("s2".into(), 30, 200),
-            ]
-        );
+        assert_eq!(a, vec![("s1".into(), 20, 80), ("s2".into(), 30, 200),]);
     }
 
     #[test]
@@ -930,13 +956,7 @@ mod tests {
             },
         ];
         let a = assignments_for_guides(&anchors, &[50, 150]);
-        assert_eq!(
-            a,
-            vec![
-                ("text".into(), 10, 50),
-                ("s1".into(), 20, 150),
-            ]
-        );
+        assert_eq!(a, vec![("text".into(), 10, 50), ("s1".into(), 20, 150),]);
     }
 
     #[test]

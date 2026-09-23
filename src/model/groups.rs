@@ -132,8 +132,7 @@ impl DocState {
             return;
         }
         let raw_insert = if after { anchor + 1 } else { anchor };
-        let insert_in_remaining =
-            raw_insert - moving.iter().filter(|&&i| i < raw_insert).count();
+        let insert_in_remaining = raw_insert - moving.iter().filter(|&&i| i < raw_insert).count();
 
         let mut remaining = Vec::with_capacity(n - moving.len());
         let mut block = Vec::with_capacity(moving.len());
@@ -197,9 +196,15 @@ impl DocState {
             .pages
             .iter()
             .flat_map(|p| p.regions.keys().cloned())
-            .chain(self.groups.iter().flat_map(|g| g.region_ids.iter().cloned()))
+            .chain(
+                self.groups
+                    .iter()
+                    .flat_map(|g| g.region_ids.iter().cloned()),
+            )
             .collect();
-        self.region_staff_anchors.retain(|k, _| valid_rids.contains(k));
+        self.region_staff_anchors
+            .retain(|k, _| valid_rids.contains(k));
+        self.prune_orphan_edits();
     }
 
     /// 去掉已经找不到 region 的组合和残留 rid.
@@ -273,6 +278,9 @@ impl DocState {
             .collect();
         self.sort_groups();
         self.selected_region_ids.clear();
+        for rid in &ids {
+            self.remove_region_edit(rid);
+        }
         self.ensure_active_group();
         ids.len()
     }

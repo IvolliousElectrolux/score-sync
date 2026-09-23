@@ -22,7 +22,8 @@ impl ScoreSyncApp {
             }
             GuideHostCmd::SetSync(on) => {
                 self.doc.guides_sync_positions = on;
-                self.mask_tool.update(cx, |m, _| m.set_guide_prefs(self.doc.guides_global, on));
+                self.mask_tool
+                    .update(cx, |m, _| m.set_guide_prefs(self.doc.guides_global, on));
                 self.mark_dirty();
                 if on {
                     self.sync_guide_positions_from_current(cx);
@@ -110,7 +111,8 @@ impl ScoreSyncApp {
             self.guide_undo.remove(0);
         }
         self.guide_redo.clear();
-        self.mask_tool.update(cx, |m, _| m.push_undo_with_host_token(token));
+        self.mask_tool
+            .update(cx, |m, _| m.push_undo_with_host_token(token));
         self.mark_dirty();
         self.sync_current_mask_after_guides(cx, refresh_preview);
         self.status = status;
@@ -151,7 +153,8 @@ impl ScoreSyncApp {
         let refresh = entry.refresh_preview;
         self.apply_mask_global_snap(entry.before.clone());
         if token.is_none() {
-            self.mask_tool.update(cx, |m, _| m.purge_host_token(entry.token));
+            self.mask_tool
+                .update(cx, |m, _| m.purge_host_token(entry.token));
         }
         self.guide_redo.push(entry);
         self.mark_dirty();
@@ -177,7 +180,8 @@ impl ScoreSyncApp {
         let refresh = entry.refresh_preview;
         self.apply_mask_global_snap(entry.after.clone());
         if token.is_none() {
-            self.mask_tool.update(cx, |m, _| m.purge_host_token(entry.token));
+            self.mask_tool
+                .update(cx, |m, _| m.purge_host_token(entry.token));
         }
         self.guide_undo.push(entry);
         if self.guide_undo.len() > CROP_HISTORY_LIMIT {
@@ -272,7 +276,8 @@ impl ScoreSyncApp {
         new_voff_target: i64,
     ) -> bool {
         let old_shift = self.doc.get_group_voff_shift(gid);
-        let new_shift = self.resolve_group_voff_shift_for(gid, heights, &new_layout, new_voff_target);
+        let new_shift =
+            self.resolve_group_voff_shift_for(gid, heights, &new_layout, new_voff_target);
         if new_layout == old_layout && new_shift == old_shift {
             return false;
         }
@@ -348,10 +353,7 @@ impl ScoreSyncApp {
                         voff_shift: self.doc.get_group_voff_shift(&g.id),
                         sheet_w: self.doc.group_sheet_width(&g.id),
                         bg: bg.clone(),
-                        live: Some(LiveAlign {
-                            input,
-                            voff_target,
-                        }),
+                        live: Some(LiveAlign { input, voff_target }),
                     });
                     continue;
                 }
@@ -404,12 +406,7 @@ impl ScoreSyncApp {
         }
     }
 
-    fn finish_align_all(
-        &mut self,
-        gen: u64,
-        result: AlignAllResult,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_align_all(&mut self, gen: u64, result: AlignAllResult, cx: &mut Context<Self>) {
         if self.align_all_gen != gen {
             return;
         }
@@ -471,10 +468,7 @@ impl ScoreSyncApp {
                 let mut out = Vec::new();
                 if let Ok(img) = crate::page_cache::load_rgb(&path) {
                     for (rid, y0, y1) in bands {
-                        out.push((
-                            rid,
-                            mask_tool::staff::band_staff_anchor(&img, y0, y1, thr),
-                        ));
+                        out.push((rid, mask_tool::staff::band_staff_anchor(&img, y0, y1, thr)));
                     }
                 }
                 let _ = tx.send_blocking(out);
@@ -584,11 +578,7 @@ impl ScoreSyncApp {
         div().into_any_element()
     }
 
-    fn menu_shell(
-        &self,
-        child: impl IntoElement,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn menu_shell(&self, child: impl IntoElement, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("guide-ctx-backdrop")
             .absolute()
@@ -754,7 +744,11 @@ impl ScoreSyncApp {
         inc: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if enabled { rgb(0x0f172a) } else { rgb(0x94a3b8) };
+        let fg = if enabled {
+            rgb(0x0f172a)
+        } else {
+            rgb(0x94a3b8)
+        };
         let mut el = div()
             .id(id)
             .w(px(22.))
@@ -768,17 +762,24 @@ impl ScoreSyncApp {
             .text_color(fg)
             .child(label);
         if enabled {
-            el = el.cursor_pointer().hover(|s| s.bg(rgb(0xe2e8f0))).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.mask_tool.update(cx, |m, cx| {
-                        let n = m.guide_count() as u32;
-                        let next = if inc { n.saturating_add(1) } else { n.saturating_sub(1) };
-                        m.set_guide_count(next, cx);
-                    });
-                }),
-            );
+            el = el
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0xe2e8f0)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.mask_tool.update(cx, |m, cx| {
+                            let n = m.guide_count() as u32;
+                            let next = if inc {
+                                n.saturating_add(1)
+                            } else {
+                                n.saturating_sub(1)
+                            };
+                            m.set_guide_count(next, cx);
+                        });
+                    }),
+                );
         }
         el
     }
@@ -797,13 +798,16 @@ impl ScoreSyncApp {
             .text_color(global_fg)
             .child("全局对齐");
         if can_global {
-            global_row = global_row.cursor_pointer().hover(|s| s.bg(rgb(0xdbeafe))).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.mask_tool.update(cx, |m, cx| m.request_align_all(cx));
-                }),
-            );
+            global_row = global_row
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0xdbeafe)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.mask_tool.update(cx, |m, cx| m.request_align_all(cx));
+                    }),
+                );
         }
         self.menu_shell(
             div()
