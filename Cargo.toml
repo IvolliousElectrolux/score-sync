@@ -3,7 +3,7 @@ resolver = "2"
 members = [".", "crates/apply_bg", "crates/mask_tool", "crates/score_video", "crates/photo_edit"]
 
 [workspace.package]
-version = "1.4.12"
+version = "1.5.0"
 edition = "2021"
 license = "MIT"
 

@@ -210,7 +210,9 @@ impl ScoreSyncApp {
                     .region_edit_size(rid)
                     .map(|(_, eh)| eh as i32)
                     .unwrap_or(h);
-                let edited = if self.doc.has_region_edit(rid) {
+                let edited = if self.doc.region_edit_detached(rid) {
+                    " 修·脱离"
+                } else if self.doc.has_region_edit(rid) {
                     " 修"
                 } else {
                     ""

@@ -28,7 +28,34 @@ impl DocState {
             && Self::region_edit_dir(region_id).join("flat.png").is_file()
     }
 
+    /// 页与 y0/y1 仍是烘焙时的那一条. 没有指纹的旧工程视为仍匹配.
+    /// 蒙版里事后拖的 `extra_*` 不算源变更.
+    pub fn region_edit_source_current(&self, region_id: &str) -> bool {
+        let Some(meta) = self.region_edits.get(region_id) else {
+            return false;
+        };
+        let Some(src) = meta.source.as_ref() else {
+            return true;
+        };
+        self.find_region(region_id)
+            .is_some_and(|(_, r)| src.page_id == r.page_id && src.y0 == r.y0 && src.y1 == r.y1)
+    }
+
+    /// 覆盖图是否取代当前裁切. 文件还在但裁切已变时为 false, 不删修图.
+    pub fn region_edit_applies(&self, region_id: &str) -> bool {
+        self.has_region_edit(region_id) && self.region_edit_source_current(region_id)
+    }
+
+    /// 修图还在, 但当前页或 y0/y1 已经对不上指纹.
+    pub fn region_edit_detached(&self, region_id: &str) -> bool {
+        self.region_edits.contains_key(region_id) && !self.region_edit_source_current(region_id)
+    }
+
+    /// 仍套用时的画布尺寸. 已脱离则返回 None, 拼合改用当前裁切高度.
     pub fn region_edit_size(&self, region_id: &str) -> Option<(u32, u32)> {
+        if !self.region_edit_source_current(region_id) {
+            return None;
+        }
         self.region_edits
             .get(region_id)
             .map(|e| (e.canvas_w.max(1), e.canvas_h.max(1)))
@@ -59,7 +86,7 @@ impl DocState {
     }
 
     pub fn load_region_flat(&self, region_id: &str) -> Option<RgbImage> {
-        if !self.has_region_edit(region_id) {
+        if !self.region_edit_applies(region_id) {
             return None;
         }
         image::open(Self::region_edit_dir(region_id).join("flat.png"))
@@ -93,6 +120,7 @@ impl DocState {
 }
 
 /// 块高变化后: 完全位于旧块下方的蒙版整体平移 `Δh`.
+/// 与这块纵向相交的遮盖留在原坐标 (不跟着缩放, 也不拦提交).
 pub fn remap_masks_after_height_change(
     masks: &mut [MaskRect],
     block_y0: i64,

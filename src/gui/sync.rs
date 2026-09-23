@@ -109,7 +109,7 @@ fn collect_mask_preview_members(
             if y1 < y0 {
                 return None;
             }
-            let override_path = if doc.has_region_edit(rid) {
+            let override_path = if doc.region_edit_applies(rid) {
                 Some(crate::model::DocState::region_edit_dir(rid).join("flat.png"))
             } else {
                 None

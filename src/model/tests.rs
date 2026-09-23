@@ -704,6 +704,58 @@ fn group_heights_use_region_edit() {
 }
 
 #[test]
+fn region_edit_detaches_when_crop_changes_and_reattaches() {
+    let mut doc = DocState::new();
+    let mut page = stub_page(100);
+    let page_id = page.id.clone();
+    page.regions.insert(
+        "r0".into(),
+        Region {
+            id: "r0".into(),
+            page_id: page_id.clone(),
+            y0: 0,
+            y1: 79,
+            kind: "gap".into(),
+            color: "#e74c3c".into(),
+        },
+    );
+    doc.pages.push(page);
+    doc.groups.push(Group {
+        id: "g0".into(),
+        region_ids: vec!["r0".into()],
+        name: String::new(),
+    });
+    doc.rebuild_rid_index();
+    doc.region_edits.insert(
+        "r0".into(),
+        RegionEditMeta {
+            canvas_w: 40,
+            canvas_h: 22,
+            paper_rgb: [250, 250, 250],
+            source: Some(photo_edit::SourceFingerprint {
+                page_id: page_id.clone(),
+                y0: 0,
+                y1: 79,
+                w: 80,
+                h: 80,
+                extra_top: 4,
+                ..Default::default()
+            }),
+        },
+    );
+    assert!(doc.region_edit_source_current("r0"));
+    assert!(!doc.region_edit_detached("r0"));
+    assert_eq!(doc.group_member_heights("g0")[0].1, 22);
+    doc.get_region_mut("r0").unwrap().y1 = 59;
+    assert!(doc.region_edit_detached("r0"));
+    assert!(!doc.region_edit_applies("r0"));
+    assert_eq!(doc.group_member_heights("g0")[0].1, 60);
+    doc.get_region_mut("r0").unwrap().y1 = 79;
+    assert!(doc.region_edit_source_current("r0"));
+    assert_eq!(doc.group_member_heights("g0")[0].1, 22);
+}
+
+#[test]
 fn shared_footnote_edit_height_applies_to_all_groups() {
     let mut doc = DocState::new();
     let mut page = stub_page(100);

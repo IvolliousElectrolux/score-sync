@@ -1324,7 +1324,7 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             Some("MaskTool"),
         ));
         keys.extend(apply_bg::bind_primary("shift-m", DumpMemory, None));
-        photo_edit::gui::bind_keys(cx);
+        photo_edit::gui::bind_embedded_keys(cx);
         keys.extend(apply_bg::bind_primary("s", SaveProject, Some("PhotoEdit")));
         keys.extend(apply_bg::bind_primary(
             "shift-s",

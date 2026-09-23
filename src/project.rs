@@ -696,14 +696,10 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
                 let image = image::load_from_memory(&png)
                     .map_err(|e| format!("解码底色失败: {e}"))?
                     .to_rgb8();
-                if doc.bg_source_path.is_none() && image.width() > 0 && image.height() > 0 {
-                    let p = image.get_pixel(image.width() / 2, image.height() / 2);
-                    doc.bg_solid = Some([p[0], p[1], p[2]]);
-                    doc.bg_enabled = true;
-                } else {
-                    doc.bg_image = Some(Arc::new(image));
-                    doc.bg_enabled = true;
-                }
+                // 纯色只认 solid_rgb. 没有 source_path 的位图也保留,
+                // 取中心像素会把纹理收成纯色.
+                doc.bg_image = Some(Arc::new(image));
+                doc.bg_enabled = true;
             }
         }
     }
@@ -729,4 +725,150 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
     doc.rebuild_rid_index();
     doc.seed_guide_defaults();
     Ok(doc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+    use std::io::Write;
+
+    fn write_version_zip(path: &Path, version: u32) {
+        let file = File::create(path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file("project.json", opts).unwrap();
+        let json = format!(
+            r#"{{"version":{version},"margin":20,"ink_threshold":200,"mask_opacity":1.0,"current_page_index":0,"active_group_id":null,"selected_region_ids":[],"pages":[],"groups":[],"group_masks":{{}}}}"#
+        );
+        zip.write_all(json.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn rejects_unsupported_project_version() {
+        let dir = std::env::temp_dir().join(format!(
+            "score_sync_proj_ver_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.staffcrop");
+        let future = dir.join("future.staffcrop");
+        write_version_zip(&old, 0);
+        write_version_zip(&future, PROJECT_VERSION + 1);
+        match load_project(&old) {
+            Err(e) => assert!(e.contains("不支持的工程版本"), "{e}"),
+            Ok(_) => panic!("version 0 should be rejected"),
+        }
+        match load_project(&future) {
+            Err(e) => assert!(e.contains("不支持的工程版本"), "{e}"),
+            Ok(_) => panic!("future version should be rejected"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn round_trip_keeps_edits_order_and_textured_bg_without_path() {
+        crate::page_cache::init_session();
+        let dir = std::env::temp_dir().join(format!(
+            "score_sync_proj_rt_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let page_png = dir.join("page.png");
+        RgbImage::from_pixel(8, 20, Rgb([255, 255, 255]))
+            .save(&page_png)
+            .unwrap();
+
+        let page_id = "page-a".to_string();
+        let mut regions = HashMap::new();
+        regions.insert(
+            "r0".into(),
+            Region {
+                id: "r0".into(),
+                page_id: page_id.clone(),
+                y0: 0,
+                y1: 9,
+                kind: "manual".into(),
+                color: "#e74c3c".into(),
+            },
+        );
+        let mut doc = DocState::new();
+        doc.groups_manual_order = false;
+        doc.pages.push(Page {
+            id: page_id.clone(),
+            path: PathBuf::from("page.png"),
+            disk_path: page_png,
+            image: None,
+            img_w: 8,
+            img_h: 20,
+            regions,
+        });
+        doc.groups.push(Group {
+            id: "g-late".into(),
+            region_ids: vec!["r0".into()],
+            name: String::new(),
+        });
+        doc.groups.insert(
+            0,
+            Group {
+                id: "g-early".into(),
+                region_ids: vec!["r0".into()],
+                name: String::new(),
+            },
+        );
+        doc.rebuild_rid_index();
+
+        let mut edit = photo_edit::EditDocument::from_rgb(
+            &RgbImage::from_pixel(8, 10, Rgb([240, 240, 230])),
+            [240, 240, 230],
+        );
+        edit.source = Some(photo_edit::SourceFingerprint {
+            page_id: page_id.clone(),
+            y0: 0,
+            y1: 9,
+            w: 8,
+            h: 10,
+            ..Default::default()
+        });
+        doc.write_region_edit("r0", &edit).unwrap();
+
+        let mut bg = RgbImage::new(4, 2);
+        bg.put_pixel(0, 0, Rgb([10, 20, 30]));
+        bg.put_pixel(3, 1, Rgb([200, 10, 10]));
+        doc.set_project_bg_arc(Arc::new(bg), None, 16, 9).unwrap();
+
+        let path = save_project(&doc, &dir.join("piece")).unwrap();
+        let _ = std::fs::remove_dir_all(DocState::region_edit_dir("r0"));
+        let loaded = load_project(&path).unwrap();
+
+        assert!(loaded.groups_manual_order);
+        assert_eq!(
+            loaded
+                .groups
+                .iter()
+                .map(|g| g.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g-early", "g-late"]
+        );
+        assert!(loaded.region_edit_applies("r0"));
+        assert!(loaded.load_region_flat("r0").is_some());
+        assert!(loaded.bg_solid.is_none());
+        let img = loaded.bg_image.as_ref().unwrap();
+        assert_eq!(img.get_pixel(0, 0).0, [10, 20, 30]);
+        assert!(loaded.bg_source_path.is_none());
+
+        let mut detached = loaded;
+        detached.get_region_mut("r0").unwrap().y1 = 14;
+        assert!(detached.region_edit_detached("r0"));
+        assert!(!detached.region_edit_applies("r0"));
+        assert!(detached.load_region_flat("r0").is_none());
+        assert_eq!(detached.group_member_heights("g-early")[0].1, 15);
+        detached.get_region_mut("r0").unwrap().y1 = 9;
+        assert!(detached.region_edit_applies("r0"));
+        assert!(detached.load_region_flat("r0").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(DocState::region_edit_dir("r0"));
+    }
 }

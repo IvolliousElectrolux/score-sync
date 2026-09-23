@@ -505,7 +505,7 @@ impl DocState {
             if inline.is_none() && !page.disk_path.is_file() {
                 continue;
             }
-            let override_path = if self.has_region_edit(rid) {
+            let override_path = if self.region_edit_applies(rid) {
                 Some(Self::region_edit_dir(rid).join("flat.png"))
             } else {
                 None

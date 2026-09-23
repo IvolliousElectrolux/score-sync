@@ -931,6 +931,12 @@ impl Render for PhotoEditApp {
 }
 
 pub fn bind_keys(cx: &mut App) {
+    bind_embedded_keys(cx);
+    cx.bind_keys(apply_bg::bind_primary("s", ApplyEdit, Some("PhotoEdit")));
+}
+
+/// 嵌入宿主时的键位. Ctrl+S 留给宿主保存工程, 不在这里绑成「应用」.
+pub fn bind_embedded_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("v", ToolSelect, Some("PhotoEdit")),
         KeyBinding::new("m", ToolMove, Some("PhotoEdit")),
@@ -953,7 +959,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", NudgeDown, Some("PhotoEdit")),
     ]);
     cx.bind_keys(apply_bg::bind_primary("o", OpenFile, Some("PhotoEdit")));
-    cx.bind_keys(apply_bg::bind_primary("s", ApplyEdit, Some("PhotoEdit")));
     cx.bind_keys(apply_bg::bind_primary("e", ExportImage, Some("PhotoEdit")));
     cx.bind_keys(apply_bg::bind_primary("z", Undo, Some("PhotoEdit")));
     cx.bind_keys(apply_bg::bind_primary("y", Redo, Some("PhotoEdit")));
