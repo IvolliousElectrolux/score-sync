@@ -94,7 +94,7 @@ impl MaskToolApp {
             x1: 0,
             y1: 0,
             brush_points: Vec::new(),
-            brush_radius: 0,
+            brush_radius: 0.0,
             color: self.mask_color,
             poly_points: dedup,
             opacity: self.mask_opacity,
@@ -191,7 +191,7 @@ impl MaskToolApp {
     pub(super) fn mode_status(mode: ToolMode) -> SharedString {
         match mode {
             ToolMode::Draw => "框选".into(),
-            ToolMode::Poly => "套索: 单击折线, 按住拖轨迹, 靠近首点或松手闭环".into(),
+            ToolMode::Poly => "套索: 单击折线, 按住拖轨迹, 靠近首点点击或拖回起点闭环".into(),
             ToolMode::Brush => "画笔 (拖动画布涂抹; 可改颜色/粗细; Alt+滚轮调大小)".into(),
             ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光; Alt+滚轮调大小".into(),
             ToolMode::Select => format!(
@@ -201,10 +201,6 @@ impl MaskToolApp {
             .into(),
             ToolMode::Pan => "平移".into(),
         }
-    }
-
-    pub(super) fn brush_radius_px(&self) -> i32 {
-        ((self.brush_size * 0.5).round() as i32).max(1)
     }
 
     pub(super) fn brush_size_max(&self) -> f32 {
@@ -236,21 +232,22 @@ impl MaskToolApp {
     pub(super) fn append_brush_point(&mut self, id: &str, ix: f32, iy: f32) -> bool {
         self.ensure_sheet_masks();
         let (sx, sy) = self.canvas_to_sheet_xy(ix, iy);
+        let view = self.xform().scale.max(0.0001);
+        let cs = self.content_scale_or_1();
+        // 屏幕上大约 1.25px 留一个点. 放大时谱面坐标更密, 不再锁在 1 point 的格子上.
+        let min_sheet = (1.25 / view) / cs;
         let Some(m) = self.masks.iter_mut().find(|m| m.id == id) else {
             return false;
         };
-        let px = sx.round() as i32;
-        let py = sy.round() as i32;
         if let Some(&(lx, ly)) = m.brush_points.last() {
-            let dx = (px - lx) as f32;
-            let dy = (py - ly) as f32;
-            // 过密采样没必要, 也减轻撤销快照体积.
-            if dx * dx + dy * dy < 1.5 {
+            let dx = sx - lx;
+            let dy = sy - ly;
+            if dx * dx + dy * dy < min_sheet * min_sheet {
                 return false;
             }
         }
-        m.brush_points.push((px, py));
-        m.include_brush_point(px, py);
+        m.brush_points.push((sx, sy));
+        m.include_brush_point(sx, sy);
         true
     }
 
@@ -359,15 +356,6 @@ impl MaskToolApp {
             if self.selected.contains(&m.id) {
                 m.translate(sdx, sdy);
             }
-        }
-        let nudged: Vec<String> = self
-            .masks
-            .iter()
-            .filter(|m| m.is_brush() && self.selected.contains(&m.id))
-            .map(|m| m.id.clone())
-            .collect();
-        for id in nudged {
-            self.nudge_brush_sprite(&id, sdx, sdy);
         }
         (
             (sdx as f32 * cs).round() as i32,

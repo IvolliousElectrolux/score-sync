@@ -500,6 +500,7 @@ impl ScoreSyncApp {
                 .flex_1()
                 .min_w(px(0.))
                 .min_h(px(0.))
+                .overflow_hidden()
                 .child(
                     div()
                         .w_full()

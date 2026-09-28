@@ -1262,6 +1262,13 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             NewProject,
             Some("ScoreProject"),
         ));
+        keys.extend(apply_bg::bind_primary("z", Undo, Some("ScoreProject")));
+        keys.extend(apply_bg::bind_primary("y", Redo, Some("ScoreProject")));
+        keys.extend(apply_bg::bind_primary(
+            "shift-z",
+            Redo,
+            Some("ScoreProject"),
+        ));
         keys.extend(apply_bg::bind_primary(
             "m",
             PairUngrouped,

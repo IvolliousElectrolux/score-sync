@@ -29,6 +29,7 @@ impl PhotoEditApp {
     }
 
     pub fn export_image_standalone(&mut self, cx: &mut Context<Self>) {
+        self.commit_live_tone();
         let Some(doc) = self.doc.as_ref() else {
             self.status = "没有可导出的图".into();
             self.notify_chrome(cx);

@@ -18,6 +18,7 @@ mod project;
 mod staff_detect;
 mod trace;
 mod update;
+mod vector_page;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

@@ -1,7 +1,7 @@
 //! 组合拼合、预览与终稿渲染.
 
 use super::*;
-use image::RgbImage;
+use image::{RgbImage, Rgba, RgbaImage};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +66,14 @@ struct GroupRenderBg {
     trailing_gap: u32,
 }
 
+/// 矢量成员在成片分辨率下按 point 矩形光栅, 不读整页 PNG.
+struct VectorBand {
+    pdf_path: PathBuf,
+    page_index: u32,
+    page_w_pt: f32,
+    y0: f32,
+}
+
 /// 终稿一条成员: 优先在 [`GroupRenderJob::render`] 里按磁盘原图裁切,
 /// 避免界面线程常驻全分辨率页. 单测没有可用 PNG 时带 `inline`.
 struct GroupRenderPart {
@@ -75,6 +83,7 @@ struct GroupRenderPart {
     height: u32,
     inline: Option<RgbImage>,
     override_path: Option<PathBuf>,
+    vector: Option<VectorBand>,
 }
 
 /// `DocState::render_group_final` 所需只读数据的快照, 由
@@ -134,6 +143,9 @@ impl GroupRenderJob {
 
     /// 纯计算, 不接触 `DocState`, 可安全放到非主线程跑.
     pub fn render(&self) -> Result<RgbImage, String> {
+        if self.members.iter().any(|m| m.vector.is_some()) {
+            return self.render_vector();
+        }
         let parts = self.collect_full_parts()?;
         let mut combined = compose_parts_impl(&parts, &self.block_layout, self.ink_threshold, None)
             .ok_or_else(|| "无成员片段".to_string())?;
@@ -182,6 +194,119 @@ impl GroupRenderJob {
             }
         }
         Ok(combined)
+    }
+
+    /// 矢量组合 (或含矢量块的组合): 按成片像素光栅, 透明处叠底色.
+    fn render_vector(&self) -> Result<RgbImage, String> {
+        let all_vector = self.members.iter().all(|m| m.vector.is_some());
+        let page_w = self
+            .members
+            .iter()
+            .find_map(|m| m.vector.as_ref().map(|v| v.page_w_pt))
+            .unwrap_or(1.0);
+        let px = if all_vector {
+            if let Some(bg) = &self.bg {
+                let sheet_h = self
+                    .members
+                    .iter()
+                    .map(|m| m.height as f32)
+                    .sum::<f32>()
+                    .max(1.0);
+                let tw = bg.aspect_w.max(1) as f32;
+                let th = bg.aspect_h.max(1) as f32;
+                let scale_w = tw / page_w.max(1.0);
+                let px = if sheet_h * scale_w <= th {
+                    scale_w
+                } else {
+                    th / sheet_h
+                };
+                px.clamp(1.0, 32.0)
+            } else {
+                crate::vector_page::export_px_per_pt(page_w)
+            }
+        } else {
+            1.0
+        };
+        let mut parts = Vec::with_capacity(self.members.len());
+        for m in &self.members {
+            let rgba = if let Some(v) = &m.vector {
+                let tex_w = (v.page_w_pt * px).round().max(1.0) as u32;
+                let tex_h = (m.height as f32 * px).round().max(1.0) as u32;
+                crate::pdf::render_vector_rect_rgba(
+                    &v.pdf_path,
+                    v.page_index,
+                    0.0,
+                    v.y0,
+                    v.page_w_pt,
+                    m.height as f32,
+                    tex_w,
+                    tex_h,
+                )?
+            } else {
+                let rgb = self.raster_part_rgb(m)?;
+                rgb_opaque_rgba(&rgb)
+            };
+            parts.push((m.rid.clone(), rgba));
+        }
+        let layout: Vec<BlockAdjust> = if all_vector {
+            self.block_layout
+                .iter()
+                .map(|a| crate::vector_page::scale_adjust(a, px))
+                .collect()
+        } else {
+            self.block_layout.clone()
+        };
+        let mut sheet = crate::vector_page::stitch_rgba(&parts, &layout)
+            .ok_or_else(|| "无成员片段".to_string())?;
+        drop(parts);
+        let masks: Vec<MaskRect> = if all_vector {
+            let cs = if self.content_scale > 0.0001 {
+                self.content_scale
+            } else {
+                1.0
+            };
+            let mask_px = px / cs;
+            self.masks
+                .iter()
+                .map(|m| crate::vector_page::scale_mask(m, mask_px))
+                .collect()
+        } else {
+            self.masks.clone()
+        };
+        crate::vector_page::paint_masks_rgba(&mut sheet, &masks);
+        if self.bg_enabled {
+            if let Some(bg) = &self.bg {
+                let shift = if all_vector {
+                    (bg.voff_shift as f32 * px).round() as i64
+                } else {
+                    bg.voff_shift
+                };
+                return place_vector_on_bg(&sheet, bg, shift);
+            }
+        }
+        let pad = crate::vector_page::polarity_pad(&sheet);
+        Ok(crate::vector_page::flatten_rgba(&sheet, pad))
+    }
+
+    fn raster_part_rgb(&self, m: &GroupRenderPart) -> Result<RgbImage, String> {
+        if let Some(path) = &m.override_path {
+            if path.is_file() {
+                return crate::page_cache::load_rgb(path);
+            }
+        }
+        if let Some(img) = &m.inline {
+            return Ok(img.clone());
+        }
+        if !m.disk_path.is_file() {
+            return Err(format!("缺页图 {}", m.disk_path.display()));
+        }
+        let full = crate::page_cache::load_rgb(&m.disk_path)?;
+        let y0 = m.y0.min(full.height().saturating_sub(1));
+        let y1 = (m.y0 + m.height).min(full.height());
+        if y1 <= y0 {
+            return Err("无成员片段".into());
+        }
+        Ok(crop_band_fast(&full, y0, y1 - y0))
     }
 
     /// 把完整底色换成已按最大谱面宽裁好的一页, 避免每个组合都对超宽扫描图做跨行拷贝.
@@ -502,7 +627,13 @@ impl DocState {
             } else {
                 None
             };
-            if inline.is_none() && !page.disk_path.is_file() {
+            let vector = page.vector.as_ref().map(|src| VectorBand {
+                pdf_path: src.pdf_path.clone(),
+                page_index: src.page_index,
+                page_w_pt: src.w_pt,
+                y0: y0 as f32,
+            });
+            if vector.is_none() && inline.is_none() && !page.disk_path.is_file() {
                 continue;
             }
             let override_path = if self.region_edit_applies(rid) {
@@ -521,11 +652,13 @@ impl DocState {
                     inline
                 },
                 override_path,
+                vector,
             });
         }
         if members.is_empty() {
             return None;
         }
+        let all_vector = members.iter().all(|m| m.vector.is_some());
         let block_layout = self.get_block_layout(group_id).to_vec();
         let masks = self.get_group_masks(group_id).to_vec();
         let content_scale = self
@@ -543,6 +676,17 @@ impl DocState {
             leading_gap: self.group_leading_gap(group_id),
             trailing_gap: self.group_trailing_gap(group_id),
         });
+        let sheet_w = if all_vector {
+            let pw = members
+                .iter()
+                .find_map(|m| m.vector.as_ref().map(|v| v.page_w_pt))
+                .unwrap_or(1.0);
+            (pw * crate::vector_page::export_px_per_pt(pw))
+                .round()
+                .max(1.0) as u32
+        } else {
+            self.group_sheet_width(group_id)
+        };
         Some(GroupRenderJob {
             members,
             block_layout,
@@ -550,9 +694,81 @@ impl DocState {
             masks,
             mask_opacity: self.mask_prefs.mask_opacity,
             content_scale,
-            sheet_w: self.group_sheet_width(group_id),
+            sheet_w,
             bg_enabled: self.bg_enabled,
             bg,
         })
     }
+}
+
+fn rgb_opaque_rgba(rgb: &RgbImage) -> RgbaImage {
+    let mut out = RgbaImage::new(rgb.width(), rgb.height());
+    for (d, s) in out.pixels_mut().zip(rgb.pixels()) {
+        *d = Rgba([s[0], s[1], s[2], 255]);
+    }
+    out
+}
+
+fn place_vector_on_bg(
+    sheet: &RgbaImage,
+    bg: &GroupRenderBg,
+    voff_shift: i64,
+) -> Result<RgbImage, String> {
+    let (sw, sh) = sheet.dimensions();
+    let frame = apply_bg::process::preview_frame(
+        sw,
+        sh,
+        bg.src_w,
+        bg.src_h,
+        bg.aspect_w,
+        bg.aspect_h,
+        voff_shift,
+    );
+    if !frame.shows_bg {
+        let pad = crate::vector_page::polarity_pad(sheet);
+        return Ok(crate::vector_page::flatten_rgba(sheet, pad));
+    }
+    let placed = if (frame.content_scale - 1.0).abs() < 0.0001 {
+        sheet.clone()
+    } else {
+        let dw = ((sw as f32) * frame.content_scale).round().max(1.0) as u32;
+        let dh = ((sh as f32) * frame.content_scale).round().max(1.0) as u32;
+        image::imageops::resize(sheet, dw, dh, image::imageops::FilterType::Triangle)
+    };
+    let mut canvas = if let Some(color) = bg.solid {
+        RgbImage::from_pixel(
+            frame.canvas_w.max(1),
+            frame.canvas_h.max(1),
+            image::Rgb(color),
+        )
+    } else if let Some(img) = bg.image.as_ref() {
+        if img.width() == frame.canvas_w
+            && img.height() == frame.canvas_h
+            && frame.bg_left == 0
+            && frame.bg_top == 0
+        {
+            img.as_ref().clone()
+        } else {
+            crop_rect_rgb(
+                img,
+                frame.bg_left,
+                frame.bg_top,
+                frame.canvas_w,
+                frame.canvas_h,
+            )
+        }
+    } else {
+        let pad = crate::vector_page::polarity_pad(sheet);
+        return Ok(crate::vector_page::flatten_rgba(sheet, pad));
+    };
+    crate::vector_page::blend_rgba_into(&mut canvas, &placed, frame.hoff, frame.voff);
+    Ok(canvas)
+}
+
+fn crop_rect_rgb(src: &RgbImage, x: u32, y: u32, w: u32, h: u32) -> RgbImage {
+    let x = x.min(src.width().saturating_sub(1));
+    let y = y.min(src.height().saturating_sub(1));
+    let w = w.min(src.width().saturating_sub(x)).max(1);
+    let h = h.min(src.height().saturating_sub(y)).max(1);
+    image::imageops::crop_imm(src, x, y, w, h).to_image()
 }

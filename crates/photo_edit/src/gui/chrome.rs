@@ -1,9 +1,11 @@
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, SharedString,
+    canvas, div, prelude::*, px, relative, rgb, DispatchPhase, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, SharedString,
 };
 
+use super::grade::{filter_caption, tone_caption};
 use super::*;
+use crate::process::Look;
 
 impl PhotoEditApp {
     pub fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -182,8 +184,15 @@ impl PhotoEditApp {
             .flex()
             .flex_col()
             .relative()
+            .occlude()
             .bg(rgb(0xf1f5f9))
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
+                // 轨道只有十几像素高. 按住后移到轨道外, 事件不再打在滑条上.
+                if let Some(DragKind::Slider(kind)) = &this.drag {
+                    let kind = *kind;
+                    this.set_slider_from_x(f32::from(ev.position.x), kind, window, cx);
+                    return;
+                }
                 if matches!(this.drag, Some(DragKind::LayerReorder { .. })) {
                     this.update_layer_reorder(
                         f32::from(ev.position.x),
@@ -203,7 +212,14 @@ impl PhotoEditApp {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if matches!(this.drag, Some(DragKind::PaletteSb | DragKind::PaletteHue)) {
+                    if matches!(
+                        this.drag,
+                        Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::Slider(_))
+                    ) {
+                        if matches!(this.drag, Some(DragKind::Slider(kind)) if kind.previews_grade())
+                        {
+                            this.commit_live_tone();
+                        }
                         this.drag = None;
                         this.notify_chrome(cx);
                         return;
@@ -214,7 +230,14 @@ impl PhotoEditApp {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if matches!(this.drag, Some(DragKind::PaletteSb | DragKind::PaletteHue)) {
+                    if matches!(
+                        this.drag,
+                        Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::Slider(_))
+                    ) {
+                        if matches!(this.drag, Some(DragKind::Slider(kind)) if kind.previews_grade())
+                        {
+                            this.commit_live_tone();
+                        }
                         this.drag = None;
                         this.notify_chrome(cx);
                         return;
@@ -234,7 +257,33 @@ impl PhotoEditApp {
                             });
                         }
                     },
-                    |_, _, _, _| {},
+                    {
+                        let entity = cx.entity().clone();
+                        move |_, _, window, cx| {
+                            let kind = entity.update(cx, |this, _| match &this.drag {
+                                Some(DragKind::Slider(kind)) => Some(*kind),
+                                _ => None,
+                            });
+                            let Some(kind) = kind else {
+                                return;
+                            };
+                            // 拖出侧栏后, 侧栏的移动事件不再进来. 按下时窗口已 SetCapture.
+                            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                                // Capture 阶段先改数值, 避免左侧画布挡住后 Bubble 到不了侧栏.
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                let x = f32::from(ev.position.x);
+                                entity.update(cx, |this, cx| {
+                                    if !matches!(&this.drag, Some(DragKind::Slider(k)) if *k == kind)
+                                    {
+                                        return;
+                                    }
+                                    this.set_slider_from_x(x, kind, window, cx);
+                                });
+                            });
+                        }
+                    },
                 )
                 .absolute()
                 .inset_0()
@@ -250,7 +299,8 @@ impl PhotoEditApp {
             )
             .child(self.layer_list(cx))
             .child(self.fit_box(fit))
-            .child(self.tool_opts(cx))
+            .child(self.grade_menu(cx))
+            .child(self.grade_body(cx))
             .child(self.layer_drag_ghost())
             .when(self.color_picker_open, |d| {
                 d.child(self.color_picker_floating(cx))
@@ -755,16 +805,44 @@ impl PhotoEditApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let frac = frac.clamp(0.0, 1.0);
+        let (cap_at, cap_ml) = caption_shift(frac);
         div()
             .relative()
             .w_full()
             .h(px(28.))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    this.drag = Some(DragKind::Slider(kind));
+                    this.set_slider_from_x(f32::from(ev.position.x), kind, window, cx);
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, ev: &gpui::MouseMoveEvent, window, cx| {
+                    if matches!(this.drag, Some(DragKind::Slider(k)) if k == kind) {
+                        this.set_slider_from_x(f32::from(ev.position.x), kind, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    if matches!(this.drag, Some(DragKind::Slider(k)) if k == kind) {
+                        if kind.previews_grade() {
+                            this.commit_live_tone();
+                        }
+                        this.drag = None;
+                        this.notify_chrome(cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .absolute()
-                    .left(relative(frac))
+                    .left(relative(cap_at))
                     .bottom(px(16.))
-                    .ml(px(-14.))
+                    .ml(px(cap_ml))
                     .whitespace_nowrap()
                     .text_xs()
                     .text_color(rgb(0x64748b))
@@ -805,28 +883,227 @@ impl PhotoEditApp {
                             .w(relative(frac))
                             .bg(rgb(0x2563eb))
                             .rounded_full(),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                            this.drag = Some(DragKind::Slider(kind));
-                            this.set_slider_from_x(f32::from(ev.position.x), kind, cx);
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |this, ev: &gpui::MouseMoveEvent, _, cx| {
-                        if matches!(this.drag, Some(DragKind::Slider(k)) if k == kind) {
-                            this.set_slider_from_x(f32::from(ev.position.x), kind, cx);
-                        }
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            if matches!(this.drag, Some(DragKind::Slider(k)) if k == kind) {
-                                this.drag = None;
-                                this.notify_chrome(cx);
-                            }
-                        }),
                     ),
             )
+    }
+
+    fn grade_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .flex_shrink_0()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .child(self.chip(
+                "grade_filters",
+                "滤镜",
+                self.grade_pane == GradePane::Filters,
+                |this, _, cx| this.toggle_grade(GradePane::Filters, cx),
+                cx,
+            ))
+            .child(self.chip(
+                "grade_tone",
+                "调整",
+                self.grade_pane == GradePane::Tone,
+                |this, _, cx| this.toggle_grade(GradePane::Tone, cx),
+                cx,
+            ))
+    }
+
+    fn grade_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = div()
+            .id("photo_grade_body")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        match self.grade_pane {
+            GradePane::Filters => body.child(self.filter_pane(cx)),
+            GradePane::Tone => body.child(self.tone_pane(cx)),
+            GradePane::Off => body.child(self.tool_opts(cx)),
+        }
+    }
+
+    fn filter_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div().flex().flex_row().flex_wrap().gap_1().px_2().pt_1();
+        for look in Look::ONCE {
+            row = row.child(self.chip(
+                look.id(),
+                look.label(),
+                false,
+                move |this, _, cx| this.apply_look(look, cx),
+                cx,
+            ));
+        }
+        let mut col = div().flex().flex_col().px_2().py_1().gap_1().text_xs();
+        for kind in FilterSlider::ALL {
+            col = col.child(self.filter_slider(kind, cx));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(row)
+            .child(col.child(div().text_color(rgb(0x64748b)).child(
+                "0 为原图, 向右加深. 灰度和棕褐到最右即满, 锐化, 模糊, 褪色, 暗角可以比点一下更深. 有选区时只改选区. 自动色阶和反相点一下生效.",
+            )))
+    }
+
+    fn filter_slider(&self, kind: FilterSlider, cx: &mut Context<Self>) -> impl IntoElement {
+        let v = self.filter_amt.slot(kind.index());
+        self.frac_slider(
+            kind.id(),
+            v,
+            filter_caption(kind.index(), v),
+            SliderKind::Filter(kind),
+            cx,
+        )
+    }
+
+    fn tone_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut col = div().flex().flex_col().px_2().py_1().gap_1().text_xs();
+        col = col.child(self.chip(
+            Look::GrayWorld.id(),
+            Look::GrayWorld.label(),
+            false,
+            |this, _, cx| this.apply_look(Look::GrayWorld, cx),
+            cx,
+        ));
+        for kind in ToneSlider::ALL {
+            col = col.child(self.tone_slider(kind, cx));
+        }
+        col.child(div().text_color(rgb(0x64748b)).child(
+            "以 0 为原图, 向右增强, 向左减弱. 色温向右偏暖, 色调向右偏品红. 有选区时只改选区.",
+        ))
+    }
+
+    fn tone_slider(&self, kind: ToneSlider, cx: &mut Context<Self>) -> impl IntoElement {
+        let v = self.tone.slot(kind.index());
+        self.bipolar_slider(
+            kind.id(),
+            v,
+            tone_caption(kind.index(), v),
+            SliderKind::Tone(kind),
+            cx,
+        )
+    }
+
+    fn bipolar_slider(
+        &self,
+        id: &'static str,
+        value: f32,
+        caption: SharedString,
+        kind: SliderKind,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let frac = ((value + 1.0) * 0.5).clamp(0.0, 1.0);
+        let left = frac.min(0.5);
+        let span = (frac - 0.5).abs().max(0.01);
+        let (cap_at, cap_ml) = caption_shift(frac);
+        div()
+            .relative()
+            .w_full()
+            .h(px(28.))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    this.drag = Some(DragKind::Slider(kind));
+                    this.set_slider_from_x(f32::from(ev.position.x), kind, window, cx);
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, ev: &gpui::MouseMoveEvent, window, cx| {
+                    if matches!(this.drag, Some(DragKind::Slider(k)) if k == kind) {
+                        this.set_slider_from_x(f32::from(ev.position.x), kind, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    if matches!(this.drag, Some(DragKind::Slider(k)) if k == kind) {
+                        if kind.previews_grade() {
+                            this.commit_live_tone();
+                        }
+                        this.drag = None;
+                        this.notify_chrome(cx);
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(relative(cap_at))
+                    .bottom(px(16.))
+                    .ml(px(cap_ml))
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child(caption),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(14.))
+                    .rounded_full()
+                    .bg(rgb(0xe2e8f0))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .child(
+                        canvas(
+                            {
+                                let entity = cx.entity().clone();
+                                move |bounds, _, cx| {
+                                    entity.update(cx, |this, _| {
+                                        *this.slider_track_mut(kind) = bounds;
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .size_full()
+                        .absolute(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(relative(left))
+                            .w(relative(span))
+                            .bg(rgb(0x2563eb)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(relative(0.5))
+                            .ml(px(-0.5))
+                            .w(px(1.))
+                            .bg(rgb(0x64748b)),
+                    ),
+            )
+    }
+}
+
+/// 文字跟着拇指走, 靠左时往右长, 靠右时往左收, 避免被滚动容器从边上裁掉.
+fn caption_shift(frac: f32) -> (f32, f32) {
+    let frac = frac.clamp(0.0, 1.0);
+    if frac < 0.42 {
+        (frac, 0.0)
+    } else if frac > 0.7 {
+        (frac, -52.0)
+    } else {
+        (frac, -20.0)
     }
 }

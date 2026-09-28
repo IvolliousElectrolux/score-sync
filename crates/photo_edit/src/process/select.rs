@@ -158,6 +158,100 @@ pub fn mask_bounds(m: &[u8], w: u32, h: u32) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// 画布原点移动后, 选区跟着内容走. `dx`/`dy` 与图层位移相同 (新坐标 = 旧坐标 + dx).
+/// 蒙版按新画布尺寸重排; 完全落在画布外则清空.
+pub fn translate_selection(
+    sel: &Selection,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    dx: i32,
+    dy: i32,
+) -> Selection {
+    match sel {
+        Selection::None => Selection::None,
+        Selection::Rect { x0, y0, x1, y1 } => {
+            let nx0 = *x0 + dx;
+            let ny0 = *y0 + dy;
+            let nx1 = *x1 + dx;
+            let ny1 = *y1 + dy;
+            if rect_overlaps_canvas(nx0, ny0, nx1, ny1, dst_w, dst_h) {
+                Selection::Rect {
+                    x0: nx0,
+                    y0: ny0,
+                    x1: nx1,
+                    y1: ny1,
+                }
+            } else {
+                Selection::None
+            }
+        }
+        Selection::Mask {
+            data,
+            outline,
+            loops,
+            ..
+        } => {
+            let src_n = (src_w as usize).saturating_mul(src_h as usize);
+            if src_w == 0 || src_h == 0 || data.len() != src_n {
+                return Selection::None;
+            }
+            if dx == 0 && dy == 0 && src_w == dst_w && src_h == dst_h {
+                return sel.clone();
+            }
+            let shifted = shift_canvas_mask(data, src_w, src_h, dst_w, dst_h, dx, dy);
+            let outline = shift_pts(outline, dx, dy);
+            let loops = loops.iter().map(|loop_| shift_pts(loop_, dx, dy)).collect();
+            Selection::from_parts(shifted, outline, loops, dst_w, dst_h)
+        }
+    }
+}
+
+fn rect_overlaps_canvas(x0: i32, y0: i32, x1: i32, y1: i32, w: u32, h: u32) -> bool {
+    let a = x0.min(x1);
+    let b = y0.min(y1);
+    let c = x0.max(x1);
+    let d = y0.max(y1);
+    c >= 0 && d >= 0 && a < w as i32 && b < h as i32
+}
+
+fn shift_pts(pts: &[(f32, f32)], dx: i32, dy: i32) -> Vec<(f32, f32)> {
+    let dx = dx as f32;
+    let dy = dy as f32;
+    pts.iter().map(|(x, y)| (*x + dx, *y + dy)).collect()
+}
+
+/// 源像素 `(x, y)` 写到目标 `(x + dx, y + dy)`. 落在新画布外的丢掉.
+fn shift_canvas_mask(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    dx: i32,
+    dy: i32,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; (dst_w as usize).saturating_mul(dst_h as usize)];
+    if dst_w == 0 || dst_h == 0 {
+        return dst;
+    }
+    let x0 = 0.max(-dx);
+    let y0 = 0.max(-dy);
+    let x1 = (src_w as i32).min(dst_w as i32 - dx);
+    let y1 = (src_h as i32).min(dst_h as i32 - dy);
+    if x1 <= x0 || y1 <= y0 {
+        return dst;
+    }
+    let row = (x1 - x0) as usize;
+    for y in y0..y1 {
+        let src_i = (y as usize) * (src_w as usize) + (x0 as usize);
+        let dst_i = ((y + dy) as usize) * (dst_w as usize) + ((x0 + dx) as usize);
+        dst[dst_i..dst_i + row].copy_from_slice(&src[src_i..src_i + row]);
+    }
+    dst
+}
+
 /// 把旧选区蒙版按包围盒缩放到新包围盒 (魔棒拖边).
 pub fn remap_mask_bounds(
     old: &[u8],
@@ -925,6 +1019,52 @@ mod tests {
         let m = flood_mask(&img, 3, 3, 20);
         let n = m.iter().filter(|&&v| v > 0).count();
         assert_eq!(n, 9);
+    }
+
+    #[test]
+    fn translate_selection_follows_canvas_origin() {
+        let rect = Selection::Rect {
+            x0: 10,
+            y0: 20,
+            x1: 40,
+            y1: 50,
+        };
+        let moved = translate_selection(&rect, 100, 80, 120, 80, 20, 0);
+        match moved {
+            Selection::Rect { x0, y0, x1, y1 } => {
+                assert_eq!((x0, y0, x1, y1), (30, 20, 60, 50));
+            }
+            other => panic!("expected rect, got {other:?}"),
+        }
+        let stayed = translate_selection(&rect, 100, 80, 140, 80, 0, 0);
+        match stayed {
+            Selection::Rect { x0, y0, x1, y1 } => {
+                assert_eq!((x0, y0, x1, y1), (10, 20, 40, 50));
+            }
+            other => panic!("expected rect, got {other:?}"),
+        }
+        let gone = translate_selection(&rect, 100, 80, 80, 80, -50, 0);
+        assert!(gone.is_none());
+
+        let mut mask = vec![0u8; 8 * 6];
+        mask[2 * 8 + 3] = 200;
+        let outline = vec![(3.0, 2.0), (4.0, 2.0), (4.0, 3.0)];
+        let sel = Selection::from_poly(mask, outline, 8, 6);
+        let shifted = translate_selection(&sel, 8, 6, 10, 6, 2, -1);
+        match shifted {
+            Selection::Mask {
+                data,
+                bounds,
+                outline,
+                ..
+            } => {
+                assert_eq!(data.len(), 10 * 6);
+                assert_eq!(data[1 * 10 + 5], 200);
+                assert_eq!(bounds, (5, 1, 5, 1));
+                assert_eq!(outline[0], (5.0, 1.0));
+            }
+            other => panic!("expected mask, got {other:?}"),
+        }
     }
 
     #[test]

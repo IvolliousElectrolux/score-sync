@@ -440,6 +440,9 @@ impl ScoreSyncApp {
         let thr = self.doc.ink_threshold;
         let mut jobs: Vec<(PathBuf, Vec<(String, i32, i32)>)> = Vec::new();
         for p in &self.doc.pages {
+            if p.is_vector() {
+                continue;
+            }
             let missing: Vec<(String, i32, i32)> = p
                 .regions
                 .values()
@@ -455,7 +458,7 @@ impl ScoreSyncApp {
             jobs.push((p.disk_path.clone(), missing));
         }
         for i in 0..self.doc.pages.len() {
-            if self.doc.pages[i].image.is_some() {
+            if self.doc.pages[i].is_vector() || self.doc.pages[i].image.is_some() {
                 self.doc.seed_region_anchors_for_page(i);
             }
         }
@@ -975,7 +978,7 @@ fn align_one_group(
         }
         let anchors = mask_tool::staff::anchors_from_piece_ys(&heights, &g.layout, &piece_ys);
         let sh = layout::sheet_height(&heights, &g.layout);
-        let (voff, page_h) = if let Some(bg) = &g.bg {
+        let (voff, page_h, guide_lines) = if let Some(bg) = &g.bg {
             let frame = apply_bg::process::preview_frame(
                 g.sheet_w.max(1),
                 sh.max(1),
@@ -985,15 +988,31 @@ fn align_one_group(
                 bg.aspect_h,
                 g.voff_shift,
             );
-            let voff = frame.voff.max(0).min(i32::MAX as i64) as i32;
-            let page_h = if frame.shows_bg {
-                frame.canvas_h as i32
+            let cs = if frame.content_scale > 0.0001 {
+                frame.content_scale
             } else {
-                0
+                1.0
             };
-            (voff, page_h)
+            if frame.shows_bg && (cs - 1.0).abs() > 0.001 {
+                let lines = g
+                    .guide_lines
+                    .iter()
+                    .map(|y| {
+                        (((*y as f32) - frame.voff as f32) / cs).round() as i32
+                    })
+                    .collect();
+                (0, 0, lines)
+            } else {
+                let voff = frame.voff.max(0).min(i32::MAX as i64) as i32;
+                let page_h = if frame.shows_bg {
+                    frame.canvas_h as i32
+                } else {
+                    0
+                };
+                (voff, page_h, g.guide_lines.clone())
+            }
         } else {
-            (0, 0)
+            (0, 0, g.guide_lines.clone())
         };
         (
             mask_tool::staff::AlignGroupInput {
@@ -1002,7 +1021,7 @@ fn align_one_group(
                 voff,
                 page_h,
                 anchors,
-                guide_lines: g.guide_lines,
+                guide_lines,
             },
             voff as i64,
         )

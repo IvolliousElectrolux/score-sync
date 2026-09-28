@@ -19,7 +19,7 @@ fn host_trace(msg: &str) {
 }
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, relative, size, App, Application, Bounds, Context, Entity,
+    div, prelude::*, px, relative, rgb, rgba, size, App, Application, Bounds, Context, Entity,
     InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
@@ -286,18 +286,13 @@ impl ApplyBgApp {
                     .text_color(rgb(0x334155))
                     .child(label),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .child(input),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .child(self.btn(btn_id, "…", move |this, window, cx| browse(this, window, cx), cx)),
-            )
+            .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(input))
+            .child(div().flex_shrink_0().child(self.btn(
+                btn_id,
+                "…",
+                move |this, window, cx| browse(this, window, cx),
+                cx,
+            )))
     }
 
     fn aspect_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -307,40 +302,13 @@ impl ApplyBgApp {
             .items_center()
             .gap_2()
             .w_full()
-            .child(
-                div()
-                    .w(px(48.))
-                    .text_color(rgb(0x334155))
-                    .child("比例"),
-            )
-            .child(
-                div()
-                    .w(px(96.))
-                    .child(self.aspect_w_input.clone()),
-            )
-            .child(
-                div()
-                    .text_color(rgb(0x64748b))
-                    .child(":"),
-            )
-            .child(
-                div()
-                    .w(px(96.))
-                    .child(self.aspect_h_input.clone()),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x94a3b8))
-                    .child("(宽:高)"),
-            )
+            .child(div().w(px(48.)).text_color(rgb(0x334155)).child("比例"))
+            .child(div().w(px(96.)).child(self.aspect_w_input.clone()))
+            .child(div().text_color(rgb(0x64748b)).child(":"))
+            .child(div().w(px(96.)).child(self.aspect_h_input.clone()))
+            .child(div().text_sm().text_color(rgb(0x94a3b8)).child("(宽:高)"))
             .child(div().flex_1())
-            .child(self.btn(
-                "aspect_reset",
-                "恢复默认",
-                Self::reset_aspect,
-                cx,
-            ))
+            .child(self.btn("aspect_reset", "恢复默认", Self::reset_aspect, cx))
     }
 
     fn btn(
@@ -397,8 +365,16 @@ impl ApplyBgApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if enabled { rgb(0x2563eb) } else { rgb(0x94a3b8) };
-        let hover = if enabled { rgb(0x1d4ed8) } else { rgb(0x94a3b8) };
+        let bg = if enabled {
+            rgb(0x2563eb)
+        } else {
+            rgb(0x94a3b8)
+        };
+        let hover = if enabled {
+            rgb(0x1d4ed8)
+        } else {
+            rgb(0x94a3b8)
+        };
         div()
             .id("run")
             .px_4()
@@ -493,12 +469,10 @@ impl ApplyBgApp {
         Self::spawn_native_dialog(
             cx,
             move || {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("选择底色")
-                    .add_filter(
-                        "Images",
-                        &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
-                    );
+                let mut dialog = rfd::FileDialog::new().set_title("选择底色").add_filter(
+                    "Images",
+                    &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+                );
                 if start.is_file() {
                     dialog = dialog
                         .set_file_name(
@@ -514,9 +488,8 @@ impl ApplyBgApp {
             |this, picked, cx| match picked {
                 Some(p) => {
                     host_trace(&format!("pick_bg: 选中 {}", p.display()));
-                    this.bg_input.update(cx, |input, cx| {
-                        input.set_text(p.display().to_string(), cx)
-                    });
+                    this.bg_input
+                        .update(cx, |input, cx| input.set_text(p.display().to_string(), cx));
                     this.persist(cx);
                     cx.notify();
                 }
@@ -545,9 +518,8 @@ impl ApplyBgApp {
             |this, picked, cx| {
                 if let Some(p) = picked {
                     let out = p.join("加底色").display().to_string();
-                    this.in_input.update(cx, |input, cx| {
-                        input.set_text(p.display().to_string(), cx)
-                    });
+                    this.in_input
+                        .update(cx, |input, cx| input.set_text(p.display().to_string(), cx));
                     this.out_input
                         .update(cx, |input, cx| input.set_text(out, cx));
                     this.persist(cx);
@@ -578,9 +550,8 @@ impl ApplyBgApp {
             },
             |this, picked, cx| {
                 if let Some(p) = picked {
-                    this.out_input.update(cx, |input, cx| {
-                        input.set_text(p.display().to_string(), cx)
-                    });
+                    this.out_input
+                        .update(cx, |input, cx| input.set_text(p.display().to_string(), cx));
                     this.persist(cx);
                     cx.notify();
                 }
@@ -609,7 +580,11 @@ impl ApplyBgApp {
             return;
         }
         if in_dir.as_os_str().is_empty() {
-            self.show_error("无法处理", ProcessError::folder("请先选择谱面输入目录."), cx);
+            self.show_error(
+                "无法处理",
+                ProcessError::folder("请先选择谱面输入目录."),
+                cx,
+            );
             return;
         }
         if !bg.is_file() {
@@ -652,11 +627,7 @@ impl ApplyBgApp {
         }
         self.persist(cx);
         self.running = true;
-        self.status = format!(
-            "处理中… (比例 {})",
-            format_aspect(aspect_w, aspect_h)
-        )
-        .into();
+        self.status = format!("处理中… (比例 {})", format_aspect(aspect_w, aspect_h)).into();
         cx.notify();
 
         let (tx, rx) = async_channel::unbounded::<UiMsg>();
@@ -711,11 +682,7 @@ impl ApplyBgApp {
                                     lines.truncate(SHOW);
                                     lines.push(format!("… 另有 {extra} 条"));
                                 }
-                                view.show_error(
-                                    "部分文件处理失败",
-                                    lines.join("\n"),
-                                    cx,
-                                );
+                                view.show_error("部分文件处理失败", lines.join("\n"), cx);
                             }
                             view.status = text.into();
                         }
@@ -815,12 +782,12 @@ impl ApplyBgApp {
                     .text_color(rgb(0x334155))
                     .child(self.status.clone()),
             )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(self.primary_btn(run_label, can_run, Self::start_run, cx)),
-            )
+            .child(div().flex().justify_end().child(self.primary_btn(
+                run_label,
+                can_run,
+                Self::start_run,
+                cx,
+            )))
     }
 }
 

@@ -9,6 +9,7 @@ use lyon::tessellation::{
 };
 
 pub use lyon::math::Transform;
+pub use lyon::path::{LineCap, LineJoin};
 pub use lyon::tessellation::{FillOptions, FillRule, StrokeOptions};
 
 use crate::{Path, Pixels, Point, point, px};

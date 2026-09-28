@@ -42,6 +42,7 @@ impl ScoreSyncApp {
                 img_w: p.img_w,
                 img_h: p.img_h,
                 regions: p.regions.clone(),
+                vector: p.vector.clone(),
             })
             .collect();
         CropSnap {

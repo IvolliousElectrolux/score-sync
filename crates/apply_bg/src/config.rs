@@ -22,7 +22,6 @@ impl Config {
             parse_aspect(&self.aspect).unwrap_or((DEFAULT_ASPECT_W, DEFAULT_ASPECT_H))
         }
     }
-
 }
 
 pub fn config_dir() -> PathBuf {
@@ -90,14 +89,10 @@ pub fn save(cfg: &Config) {
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let mut body = format!(
-        "bg={}\nin={}\nout={}\n",
-        cfg.bg, cfg.in_dir, cfg.out_dir
-    );
+    let mut body = format!("bg={}\nin={}\nout={}\n", cfg.bg, cfg.in_dir, cfg.out_dir);
     // 仅在用户改过/显式设过后写入比例, 保持"初次不写死"
     if !cfg.aspect.trim().is_empty() {
         body.push_str(&format!("aspect={}\n", cfg.aspect.trim()));
     }
     let _ = fs::write(config_path(), body);
 }
-

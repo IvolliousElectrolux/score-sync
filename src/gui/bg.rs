@@ -301,6 +301,9 @@ impl ScoreSyncApp {
         if [r, g, b] == self.bg.color {
             return;
         }
+        if self.doc.bg_enabled && self.bg.applied_is_solid {
+            self.push_bg_undo();
+        }
         self.set_bg_picker_rgb([r, g, b], false, cx);
         cx.notify();
     }
@@ -332,23 +335,135 @@ impl ScoreSyncApp {
         let (Some(w), Some(h)) = (w, h) else {
             return;
         };
-        if w == self.doc.bg_aspect_w && h == self.doc.bg_aspect_h {
+        self.set_bg_aspect(w, h, cx);
+    }
+
+    fn set_bg_aspect(&mut self, w: u32, h: u32, cx: &mut Context<Self>) {
+        if w == 0 || h == 0 || (w == self.doc.bg_aspect_w && h == self.doc.bg_aspect_h) {
             return;
         }
+        self.push_bg_undo();
+        self.doc.bg_aspect_w = w;
+        self.doc.bg_aspect_h = h;
         if self.doc.bg_enabled {
-            self.push_bg_undo();
-            self.doc.bg_aspect_w = w;
-            self.doc.bg_aspect_h = h;
             if self.bg.applied_is_solid {
                 self.apply_solid_inner(cx);
             } else {
                 self.apply_image_inner(cx);
             }
-        } else {
-            self.doc.bg_aspect_w = w;
-            self.doc.bg_aspect_h = h;
         }
         cx.notify();
+    }
+
+    /// 导入的那张底色文件的宽高. 拉伸盖住之后, 会话里的图短边对齐目标, 长边可能更长,
+    /// 「用底色尺寸」不能去读那张拉伸结果.
+    fn imported_bg_dimensions(&self) -> Option<(u32, u32)> {
+        let path = self
+            .bg
+            .pending_path
+            .as_ref()
+            .or(self.bg.cached_source_path.as_ref())
+            .or(self.doc.bg_source_path.as_ref())?;
+        if !path.is_file() {
+            return None;
+        }
+        crate::page_cache::image_file_dimensions(path)
+            .ok()
+            .filter(|(w, h)| *w > 0 && *h > 0)
+    }
+
+    /// 修图会打开的那张底色的宽高, 不把整图拷出来.
+    fn bg_edit_dimensions(&mut self) -> Option<(u32, u32)> {
+        let session_wh = self.bg.cached_session_path.as_ref().and_then(|p| {
+            if p.is_file() {
+                crate::page_cache::image_file_dimensions(p).ok()
+            } else {
+                None
+            }
+        });
+        let mem = self.bg.cached_image.as_ref().or(self.doc.bg_image.as_ref());
+        match (session_wh, mem) {
+            (Some((sw, sh)), Some(mem)) => {
+                let sp = u64::from(sw) * u64::from(sh);
+                let mp = u64::from(mem.width()) * u64::from(mem.height());
+                if sp >= mp {
+                    Some((sw, sh))
+                } else {
+                    Some(mem.dimensions())
+                }
+            }
+            (Some(wh), None) => Some(wh),
+            (None, Some(mem)) => Some(mem.dimensions()),
+            (None, None) => self.load_cached_bg_image().map(|img| img.dimensions()),
+        }
+    }
+
+    fn use_bg_size_as_target(&mut self, cx: &mut Context<Self>) {
+        let Some((w, h)) = self
+            .imported_bg_dimensions()
+            .or_else(|| self.bg_edit_dimensions())
+        else {
+            self.show_error(
+                "无法读取底色",
+                crate::error::Error::msg("请先点「选择底色」导入一张底色图."),
+                cx,
+            );
+            return;
+        };
+        let w = w.max(1);
+        let h = h.max(1);
+        self.bg.aspect_syncing = true;
+        self.bg.aspect_w.update(cx, |t, cx| {
+            t.set_text(w.to_string(), cx);
+        });
+        self.bg.aspect_h.update(cx, |t, cx| {
+            t.set_text(h.to_string(), cx);
+        });
+        self.bg.aspect_syncing = false;
+        if w == self.doc.bg_aspect_w && h == self.doc.bg_aspect_h {
+            self.status = format!("目标分辨率已是底色的 {w}×{h}.").into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        self.set_bg_aspect(w, h, cx);
+        if self.dialog.is_none() && !self.doc.bg_enabled {
+            self.status = format!("目标分辨率已改为底色的 {w}×{h}.").into();
+            self.hint = self.status.clone();
+            cx.notify();
+        }
+    }
+
+    fn stretch_bg_to_cover(&mut self, cx: &mut Context<Self>) {
+        let Some(img) = self.image_for_bg_edit() else {
+            self.show_error(
+                "无法拉伸底色",
+                crate::error::Error::msg("请先点「选择底色」导入一张底色图."),
+                cx,
+            );
+            return;
+        };
+        let tw = self.doc.bg_aspect_w.max(1);
+        let th = self.doc.bg_aspect_h.max(1);
+        let (nw, nh) = apply_bg::process::cover_target(img.width(), img.height(), tw, th);
+        if nw == img.width() && nh == img.height() {
+            self.status = format!("底色已是 {nw}×{nh}, 短边已对齐目标 {tw}×{th}.").into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        let resized = apply_bg::process::cover_target_resize(&img, tw, th);
+        self.commit_edited_bg(resized, cx);
+        if self.dialog.is_none() {
+            let status = if nw > tw || nh > th {
+                format!("已把底色拉伸到 {nw}×{nh}, 短边对齐目标 {tw}×{th}, 长边超出.")
+            } else {
+                format!("宽高比很接近, 已把底色拉齐到 {nw}×{nh}.")
+            };
+            self.status = status.into();
+            self.hint = self.status.clone();
+            cx.notify();
+        }
     }
 
     pub(super) fn apply_bg_eyedropper(&mut self, rgb: [u8; 3], cx: &mut Context<Self>) {
@@ -453,8 +568,7 @@ impl ScoreSyncApp {
         let path_bg = path.clone();
         std::thread::spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                image::open(&path_bg).map(|im| {
-                    let rgb = im.to_rgb8();
+                crate::page_cache::load_rgb(&path_bg).map(|rgb| {
                     let thumb = thumbnail_rgb(&rgb, BG_THUMB_MAX);
                     (rgb, thumb)
                 })
@@ -465,9 +579,11 @@ impl ScoreSyncApp {
             let r = rx.recv().await.ok();
             this.update(cx, |view, cx| match r {
                 Some(Ok(Ok((rgb, thumb)))) => {
+                    let (w, h) = rgb.dimensions();
                     view.cache_bg_file(path, rgb);
                     view.bg.pending_preview = Some(rgb_to_render_image(&thumb));
-                    view.status = "已选择底色图, 点「应用底色」叠到工程组合.".into();
+                    view.status =
+                        format!("已选择底色图 {w}×{h}, 点「应用底色」叠到工程组合.").into();
                     view.hint = view.status.clone();
                     cx.notify();
                 }
@@ -493,6 +609,7 @@ impl ScoreSyncApp {
     }
 
     fn cache_bg_file(&mut self, path: PathBuf, rgb: image::RgbImage) {
+        self.push_bg_undo();
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -538,6 +655,92 @@ impl ScoreSyncApp {
         }
     }
 
+    /// 修图 / 拉伸 / 应用用的底色像素.
+    /// 磁盘原图, 会话缓存, 内存里的工作图可能不是同一张: 应用时会把底色裁成
+    /// 目标页, 旧逻辑还会按矢量页的 point 宽收成一块很小的图. 取面积最大的那张,
+    /// 避免 1422×800 的原图被 595×335 的工作图盖掉.
+    pub(super) fn image_for_bg_edit(&mut self) -> Option<image::RgbImage> {
+        let area = |w: u32, h: u32| u64::from(w) * u64::from(h);
+        let source_dims = self.imported_bg_dimensions();
+        let session_dims = self.bg.cached_session_path.as_ref().and_then(|p| {
+            if p.is_file() {
+                crate::page_cache::image_file_dimensions(p).ok()
+            } else {
+                None
+            }
+        });
+        let mem = self
+            .bg
+            .cached_image
+            .clone()
+            .or_else(|| self.doc.bg_image.clone());
+        let mem_area = mem
+            .as_ref()
+            .map(|img| area(img.width(), img.height()))
+            .unwrap_or(0);
+        let source_area = source_dims
+            .map(|(w, h)| area(w, h))
+            .unwrap_or(0);
+        let session_area = session_dims.map(|(w, h)| area(w, h)).unwrap_or(0);
+        let best = mem_area.max(source_area).max(session_area);
+        if best == 0 {
+            return self.load_cached_bg_image().map(|img| (*img).clone());
+        }
+        if source_area == best {
+            let path = self
+                .bg
+                .pending_path
+                .clone()
+                .or_else(|| self.bg.cached_source_path.clone())
+                .or_else(|| self.doc.bg_source_path.clone());
+            if let Some(p) = path {
+                if let Ok(img) = crate::page_cache::load_rgb(&p) {
+                    return Some(img);
+                }
+            }
+        }
+        if session_area == best {
+            if let Some(p) = self.bg.cached_session_path.clone() {
+                if let Ok(img) = crate::page_cache::load_rgb(&p) {
+                    return Some(img);
+                }
+            }
+        }
+        mem.map(|img| (*img).clone())
+            .or_else(|| self.load_cached_bg_image().map(|img| (*img).clone()))
+    }
+
+    /// 把修图结果写回底色缓存. 底色层已经启用时重新裁进各页.
+    pub(super) fn commit_edited_bg(&mut self, rgb: image::RgbImage, cx: &mut Context<Self>) {
+        let applied =
+            self.doc.bg_enabled && !self.bg.applied_is_solid && !self.doc.groups.is_empty();
+        self.push_bg_undo();
+        if let Ok(path) = crate::page_cache::write_rgb_png(&rgb, "bg_edit") {
+            self.bg.cached_session_path = Some(path);
+        }
+        let arc = Arc::new(rgb);
+        let thumb = thumbnail_rgb(&arc, BG_THUMB_MAX);
+        self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
+        self.bg.cached_image = Some(arc.clone());
+        if applied {
+            let source = self
+                .bg
+                .cached_source_path
+                .clone()
+                .or_else(|| self.doc.bg_source_path.clone());
+            let gen = self.doc.bg_gen;
+            self.apply_project_bg_image(arc, source, cx);
+            if self.doc.bg_gen != gen {
+                self.status = "已把修图写回底色.".into();
+                self.hint = self.status.clone();
+            }
+        } else {
+            self.status = "已更新底色图, 点「应用底色」叠到组合.".into();
+            self.hint = self.status.clone();
+        }
+        cx.notify();
+    }
+
     fn load_cached_bg_image(&mut self) -> Option<Arc<image::RgbImage>> {
         if let Some(img) = self.bg.cached_image.clone() {
             return Some(img);
@@ -554,9 +757,9 @@ impl ScoreSyncApp {
             .pending_path
             .clone()
             .or_else(|| self.bg.cached_source_path.clone())?;
-        match image::open(&path) {
-            Ok(im) => {
-                let img = Arc::new(im.to_rgb8());
+        match crate::page_cache::load_rgb(&path) {
+            Ok(rgb) => {
+                let img = Arc::new(rgb);
                 self.bg.cached_image = Some(img.clone());
                 Some(img)
             }
@@ -634,7 +837,9 @@ impl ScoreSyncApp {
     }
 
     fn apply_image_inner(&mut self, cx: &mut Context<Self>) {
-        let Some(img) = self.load_cached_bg_image() else {
+        // 已应用过的工作图可能只是按旧页面裁过的一小块. 修图/拉伸用的是
+        // 磁盘上更大的那张, 应用也要走同一张, 不能拿裁小的缓存去跟目标分辨率比.
+        let Some(img) = self.image_for_bg_edit() else {
             self.show_error(
                 "无法应用底色",
                 crate::error::Error::msg("请先点「选择底色」导入一张底色图."),
@@ -642,7 +847,7 @@ impl ScoreSyncApp {
             );
             return;
         };
-        self.apply_project_bg_image(img, self.bg.cached_source_path.clone(), cx);
+        self.apply_project_bg_image(Arc::new(img), self.bg.cached_source_path.clone(), cx);
     }
 
     fn apply_solid_inner(&mut self, cx: &mut Context<Self>) {
@@ -696,22 +901,36 @@ impl ScoreSyncApp {
         }
         let aw = self.doc.bg_aspect_w.max(1);
         let ah = self.doc.bg_aspect_h.max(1);
-        if let Some(gid) = self.doc.groups.first().map(|g| g.id.clone()) {
-            let sheet_w = self.doc.group_sheet_width(&gid);
-            if apply_bg::process::bg_page_rect(rgb.width(), rgb.height(), aw, ah, sheet_w).is_none()
-            {
+        let sheet_w = self
+            .doc
+            .groups
+            .first()
+            .map(|g| self.doc.group_sheet_width(&g.id))
+            .unwrap_or(1)
+            .max(1);
+        let (src_w, src_h) = rgb.dimensions();
+        // 比目标小的图按「拉伸盖住」同一套等比放大后再裁页. 矢量页的逻辑宽
+        // 只是 point, 不能拿它当底色像素, 也不能因此拒绝一张盖得住目标的原图.
+        let rgb = if apply_bg::process::bg_page_rect(src_w, src_h, aw, ah, sheet_w).is_some() {
+            rgb
+        } else {
+            let covered = apply_bg::process::cover_target_resize(&rgb, aw, ah);
+            let (cw, ch) = covered.dimensions();
+            if apply_bg::process::bg_page_rect(cw, ch, aw, ah, sheet_w).is_none() {
                 self.show_error(
                     "底色不适用",
                     crate::error::Error::msg(format!(
-                        "底色 ({}x{}) 无法完全盖住页面.\n请换更大底色 (总谱按高度定画布时左右也要盖住) 或检查谱面尺寸.",
-                        rgb.width(),
-                        rgb.height()
+                        "底色 ({src_w}×{src_h}) 无法盖住目标分辨率 ({aw}×{ah})."
                     )),
                     cx,
                 );
                 return;
             }
-        }
+            if let Ok(path) = crate::page_cache::write_rgb_png(&covered, "bg_cover") {
+                self.bg.cached_session_path = Some(path);
+            }
+            Arc::new(covered)
+        };
         self.ensure_bg_session_cache();
         let max_sw = self
             .doc
@@ -835,6 +1054,8 @@ impl ScoreSyncApp {
         self.doc.bg_aspect_h = snap.aspect_h.max(1);
         self.set_bg_picker_rgb(snap.color, true, cx);
         self.sync_bg_aspect_inputs(cx);
+        self.bg.cached_image = None;
+        self.bg.pending_preview = None;
         if let Some(p) = snap.session_path.as_ref() {
             if let Ok(img) = crate::page_cache::load_rgb(p) {
                 let img = Arc::new(img);
@@ -964,7 +1185,10 @@ impl ScoreSyncApp {
                                         image_label,
                                         image_on,
                                         can_image,
-                                        |this, _, cx| this.toggle_project_bg(cx),
+                                        |this, window, cx| {
+                                            this.focus_handle.focus(window);
+                                            this.toggle_project_bg(cx);
+                                        },
                                         cx,
                                     ))
                                     .child(self.bg_flex_btn(
@@ -975,6 +1199,43 @@ impl ScoreSyncApp {
                                         |this, _, cx| {
                                             this.bg.batch_open = true;
                                             cx.notify();
+                                        },
+                                        cx,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .w_full()
+                                    .child(self.bg_flex_btn(
+                                        "bg_photo",
+                                        "底色修图".into(),
+                                        false,
+                                        can_image,
+                                        |this, window, cx| this.try_open_bg_photo(window, cx),
+                                        cx,
+                                    ))
+                                    .child(self.bg_flex_btn(
+                                        "bg_use_size",
+                                        "用底色尺寸".into(),
+                                        false,
+                                        can_image,
+                                        |this, window, cx| {
+                                            this.focus_handle.focus(window);
+                                            this.use_bg_size_as_target(cx);
+                                        },
+                                        cx,
+                                    ))
+                                    .child(self.bg_flex_btn(
+                                        "bg_cover",
+                                        "拉伸盖住".into(),
+                                        false,
+                                        can_image,
+                                        |this, window, cx| {
+                                            this.focus_handle.focus(window);
+                                            this.stretch_bg_to_cover(cx);
                                         },
                                         cx,
                                     )),
@@ -1037,7 +1298,10 @@ impl ScoreSyncApp {
                                         solid_label,
                                         solid_on,
                                         true,
-                                        |this, _, cx| this.toggle_solid_project_bg(cx),
+                                        |this, window, cx| {
+                                            this.focus_handle.focus(window);
+                                            this.toggle_solid_project_bg(cx);
+                                        },
                                         cx,
                                     )),
                             )

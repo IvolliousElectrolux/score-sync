@@ -33,8 +33,8 @@ fn default_mask_opacity() -> f32 {
     DEFAULT_MASK_OPACITY
 }
 
-fn is_zero_i32(v: &i32) -> bool {
-    *v == 0
+fn is_zero_f32(v: &f32) -> bool {
+    v.abs() < 1e-6
 }
 
 /// 轴对齐矩形 / 折线多边形 / 画笔描边.
@@ -47,12 +47,12 @@ pub struct MaskRect {
     pub y0: i32,
     pub x1: i32,
     pub y1: i32,
-    /// 非空时为本条画笔描边的中心点折线 (图像坐标).
+    /// 非空时为本条画笔描边的中心点折线 (谱面坐标, 可小于 1 像素).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub brush_points: Vec<(i32, i32)>,
-    /// 画笔半径 (图像像素); 仅画笔有效.
-    #[serde(default, skip_serializing_if = "is_zero_i32")]
-    pub brush_radius: i32,
+    pub brush_points: Vec<(f32, f32)>,
+    /// 画笔半径 (谱面坐标); 仅画笔有效. 矢量页 1 单位是 1 point, 不必是整数.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub brush_radius: f32,
     /// 画笔 RGB; 矩形/多边形忽略, 始终按白色 + 本项不透明度合成.
     #[serde(default = "default_brush_color")]
     pub color: [u8; 3],
@@ -89,37 +89,41 @@ impl MaskRect {
         if self.brush_points.is_empty() {
             return;
         }
-        let r = self.brush_radius.max(1);
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut max_y = i32::MIN;
+        let r = self.brush_radius.max(0.0);
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
         for &(x, y) in &self.brush_points {
             min_x = min_x.min(x - r);
             min_y = min_y.min(y - r);
             max_x = max_x.max(x + r);
             max_y = max_y.max(y + r);
         }
-        self.x0 = min_x;
-        self.y0 = min_y;
-        self.x1 = max_x;
-        self.y1 = max_y;
+        self.x0 = min_x.floor() as i32;
+        self.y0 = min_y.floor() as i32;
+        self.x1 = max_x.ceil() as i32;
+        self.y1 = max_y.ceil() as i32;
     }
 
     /// 新点只扩张包围盒. 点数已经包含这个点.
-    pub fn include_brush_point(&mut self, x: i32, y: i32) {
-        let r = self.brush_radius.max(1);
+    pub fn include_brush_point(&mut self, x: f32, y: f32) {
+        let r = self.brush_radius.max(0.0);
+        let x0 = (x - r).floor() as i32;
+        let y0 = (y - r).floor() as i32;
+        let x1 = (x + r).ceil() as i32;
+        let y1 = (y + r).ceil() as i32;
         if self.brush_points.len() <= 1 {
-            self.x0 = x - r;
-            self.y0 = y - r;
-            self.x1 = x + r;
-            self.y1 = y + r;
+            self.x0 = x0;
+            self.y0 = y0;
+            self.x1 = x1;
+            self.y1 = y1;
             return;
         }
-        self.x0 = self.x0.min(x - r);
-        self.y0 = self.y0.min(y - r);
-        self.x1 = self.x1.max(x + r);
-        self.y1 = self.y1.max(y + r);
+        self.x0 = self.x0.min(x0);
+        self.y0 = self.y0.min(y0);
+        self.x1 = self.x1.max(x1);
+        self.y1 = self.y1.max(y1);
     }
 
     pub fn refresh_poly_bounds(&mut self) {
@@ -160,7 +164,7 @@ impl MaskRect {
             x1: self.x0.max(self.x1),
             y1: self.y0.max(self.y1),
             brush_points: Vec::new(),
-            brush_radius: 0,
+            brush_radius: 0.0,
             color: self.color,
             poly_points: Vec::new(),
             opacity: self.opacity,
@@ -170,9 +174,9 @@ impl MaskRect {
 
     pub fn label(&self) -> String {
         if self.is_brush() {
-            let r = self.brush_radius.max(1);
+            let r = self.brush_radius.max(0.0);
             return format!(
-                "画笔 r={r}  {}点  α={:.0}%",
+                "画笔 r={r:.1}  {}点  α={:.0}%",
                 self.brush_points.len(),
                 self.effective_opacity() * 100.0
             );
@@ -199,22 +203,22 @@ impl MaskRect {
 
     pub fn contains(&self, x: f32, y: f32) -> bool {
         if self.is_brush() {
-            let r = self.brush_radius.max(1) as f32;
+            let r = self.brush_radius.max(0.05);
             let r2 = r * r;
             let pts = &self.brush_points;
             if pts.is_empty() {
                 return false;
             }
             for &(px, py) in pts {
-                let dx = x - px as f32;
-                let dy = y - py as f32;
+                let dx = x - px;
+                let dy = y - py;
                 if dx * dx + dy * dy <= r2 {
                     return true;
                 }
             }
             for w in pts.windows(2) {
-                let (x0, y0) = (w[0].0 as f32, w[0].1 as f32);
-                let (x1, y1) = (w[1].0 as f32, w[1].1 as f32);
+                let (x0, y0) = (w[0].0, w[0].1);
+                let (x1, y1) = (w[1].0, w[1].1);
                 if dist2_point_segment(x, y, x0, y0, x1, y1) <= r2 {
                     return true;
                 }
@@ -246,8 +250,8 @@ impl MaskRect {
         self.y0 += dy;
         self.y1 += dy;
         for p in &mut self.brush_points {
-            p.0 += dx;
-            p.1 += dy;
+            p.0 += dx as f32;
+            p.1 += dy as f32;
         }
         for p in &mut self.poly_points {
             p.0 += dx;
@@ -259,14 +263,14 @@ impl MaskRect {
         self.y0 += dy;
         self.y1 += dy;
         for p in &mut self.brush_points {
-            p.1 += dy;
+            p.1 += dy as f32;
         }
         for p in &mut self.poly_points {
             p.1 += dy;
         }
     }
 
-    /// 把所有坐标按 `f` 映射 (画布缩放/平移时用来整组换算蒙版).
+    /// 矩形和折线按 `f` 映射. 画笔点列是小数, 只走 [`Self::map_scale`].
     pub fn map_xy(&mut self, mut f: impl FnMut(i32, i32) -> (i32, i32)) {
         let (x0, y0) = f(self.x0, self.y0);
         let (x1, y1) = f(self.x1, self.y1);
@@ -274,9 +278,6 @@ impl MaskRect {
         self.y0 = y0;
         self.x1 = x1;
         self.y1 = y1;
-        for p in &mut self.brush_points {
-            *p = f(p.0, p.1);
-        }
         for p in &mut self.poly_points {
             *p = f(p.0, p.1);
         }
@@ -291,7 +292,11 @@ impl MaskRect {
     /// 谱面 ↔ 画布只在边界上走这一次, 不要对同一份整数坐标反复 round-trip.
     pub fn map_scale(&mut self, k: f32, dx: f32, dy: f32) {
         if self.is_brush() {
-            self.brush_radius = ((self.brush_radius as f32) * k.abs()).round().max(1.0) as i32;
+            self.brush_radius = (self.brush_radius * k.abs()).max(0.0);
+            for p in &mut self.brush_points {
+                p.0 = p.0 * k + dx;
+                p.1 = p.1 * k + dy;
+            }
         }
         self.map_xy(|x, y| {
             (
@@ -379,27 +384,28 @@ fn stamp_disk(
 
 fn stamp_polyline(
     rgb: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
-    points: &[(i32, i32)],
-    radius: i32,
+    points: &[(f32, f32)],
+    radius: f32,
     color: [u8; 3],
     a: f32,
 ) {
     if points.is_empty() {
         return;
     }
-    let r = radius.max(1);
+    let r = radius.round().max(1.0) as i32;
     let step = (r as f32 * 0.5).max(1.0);
-    stamp_disk(rgb, points[0].0, points[0].1, r, color, a);
+    let stamp_at = |rgb: &mut ImageBuffer<Rgb<u8>, Vec<u8>>, x: f32, y: f32| {
+        stamp_disk(rgb, x.round() as i32, y.round() as i32, r, color, a);
+    };
+    stamp_at(rgb, points[0].0, points[0].1);
     for w in points.windows(2) {
-        let (x0, y0) = (w[0].0 as f32, w[0].1 as f32);
-        let (x1, y1) = (w[1].0 as f32, w[1].1 as f32);
+        let (x0, y0) = (w[0].0, w[0].1);
+        let (x1, y1) = (w[1].0, w[1].1);
         let dist = ((x1 - x0).hypot(y1 - y0)).max(0.001);
         let n = (dist / step).ceil() as i32;
         for i in 1..=n {
             let t = i as f32 / n as f32;
-            let x = (x0 + (x1 - x0) * t).round() as i32;
-            let y = (y0 + (y1 - y0) * t).round() as i32;
-            stamp_disk(rgb, x, y, r, color, a);
+            stamp_at(rgb, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
         }
     }
 }
@@ -468,15 +474,7 @@ pub fn apply_masks_to_sheet(
         .iter()
         .cloned()
         .map(|mut m| {
-            if m.is_brush() {
-                m.brush_radius = ((m.brush_radius as f32) * inv).round().max(1.0) as i32;
-            }
-            m.map_xy(|x, y| {
-                (
-                    (x as f32 * inv).round() as i32,
-                    (y as f32 * inv).round() as i32,
-                )
-            });
+            m.map_scale(inv, 0.0, 0.0);
             m
         })
         .collect();
@@ -564,7 +562,7 @@ mod tests {
             x1,
             y1,
             brush_points: Vec::new(),
-            brush_radius: 0,
+            brush_radius: 0.0,
             color,
             poly_points: Vec::new(),
             opacity: 1.0,
@@ -582,7 +580,7 @@ mod tests {
         assert_eq!(*sheet.get_pixel(5, 6), Rgb([10, 20, 30]));
     }
 
-    fn brush_mask(points: Vec<(i32, i32)>, radius: i32) -> MaskRect {
+    fn brush_mask(points: Vec<(f32, f32)>, radius: f32) -> MaskRect {
         let mut m = MaskRect {
             id: "b".into(),
             x0: 0,
@@ -618,12 +616,12 @@ mod tests {
 
     #[test]
     fn map_scale_sheet_to_canvas_and_back_keeps_points_if_scale_nice() {
-        let mut m = brush_mask(vec![(100, 200)], 10);
+        let mut m = brush_mask(vec![(100.0, 200.0)], 10.0);
         m.map_scale(0.5, 12.0, 34.0);
-        assert_eq!(m.brush_points, vec![(62, 134)]);
-        assert_eq!(m.brush_radius, 5);
+        assert_eq!(m.brush_points, vec![(62.0, 134.0)]);
+        assert_eq!(m.brush_radius, 5.0);
         m.map_scale(2.0, -24.0, -68.0);
-        assert_eq!(m.brush_points, vec![(100, 200)]);
-        assert_eq!(m.brush_radius, 10);
+        assert_eq!(m.brush_points, vec![(100.0, 200.0)]);
+        assert_eq!(m.brush_radius, 10.0);
     }
 }

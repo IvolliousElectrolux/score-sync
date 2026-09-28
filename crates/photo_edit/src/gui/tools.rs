@@ -582,9 +582,13 @@ impl PhotoEditApp {
                     }
                     let local = Self::layer_local_points(&doc.layers[i], points);
                     let hits = EraserHits::new(&local, er);
-                    let Some(si) = doc.layers[i].strokes.iter().enumerate().rev().find_map(
-                        |(si, s)| hits.hits_stroke(s).then_some(si),
-                    ) else {
+                    let Some(si) = doc.layers[i]
+                        .strokes
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(si, s)| hits.hits_stroke(s).then_some(si))
+                    else {
                         continue;
                     };
                     let removed = doc.layers[i].strokes.remove(si);
@@ -629,11 +633,7 @@ impl PhotoEditApp {
         any
     }
 
-    fn finish_ink_uploads(
-        &mut self,
-        any: bool,
-        uploads: Vec<(usize, Option<Vec<(u32, u32)>>)>,
-    ) {
+    fn finish_ink_uploads(&mut self, any: bool, uploads: Vec<(usize, Option<Vec<(u32, u32)>>)>) {
         if any {
             self.dirty = true;
         }
@@ -761,23 +761,25 @@ impl PhotoEditApp {
             .map(|d| (d.canvas_w as f32, d.canvas_h as f32))
             .unwrap_or((1.0, 1.0));
         let tol = (EDGE_SNAP_SCREEN_PX / self.view_xform().scale.max(0.0001)).max(1.0);
-        let xs = [0.0, (cw - 1.0).max(0.0), x0 as f32, x1 as f32];
-        let ys = [0.0, (ch - 1.0).max(0.0), y0 as f32, y1 as f32];
+        let mut xs = [0.0, (cw - 1.0).max(0.0), x0 as f32, x1 as f32, 0.0, 0.0];
+        let mut ys = [0.0, (ch - 1.0).max(0.0), y0 as f32, y1 as f32, 0.0, 0.0];
+        let nx = push_frame_edges(&mut xs, 4, cw as u32, self.fit_hint.snap_w);
+        let ny = push_frame_edges(&mut ys, 4, ch as u32, self.fit_hint.snap_h);
         match handle {
             BoxHandle::E | BoxHandle::NE | BoxHandle::SE => {
-                c = snap_to_targets(c, &xs, tol);
+                c = snap_to_targets(c, &xs[..nx], tol);
             }
             BoxHandle::W | BoxHandle::NW | BoxHandle::SW => {
-                a = snap_to_targets(a, &xs, tol);
+                a = snap_to_targets(a, &xs[..nx], tol);
             }
             _ => {}
         }
         match handle {
             BoxHandle::N | BoxHandle::NE | BoxHandle::NW => {
-                b = snap_to_targets(b, &ys, tol);
+                b = snap_to_targets(b, &ys[..ny], tol);
             }
             BoxHandle::S | BoxHandle::SE | BoxHandle::SW => {
-                d = snap_to_targets(d, &ys, tol);
+                d = snap_to_targets(d, &ys[..ny], tol);
             }
             _ => {}
         }
@@ -1219,6 +1221,10 @@ impl PhotoEditApp {
     }
 
     pub(crate) fn select_layer(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let changed = self.doc.as_ref().map(|d| d.active) != Some(idx);
+        if changed {
+            self.finish_tone();
+        }
         if let Some(doc) = self.doc.as_mut() {
             doc.set_active(idx);
         }
@@ -1259,27 +1265,66 @@ impl PhotoEditApp {
             SliderKind::BrushSize => &mut self.brush_size_track,
             SliderKind::Hardness => &mut self.hardness_track,
             SliderKind::WandTol => &mut self.wand_tol_track,
+            SliderKind::Tone(kind) => &mut self.tone_tracks[kind.index()],
+            SliderKind::Filter(kind) => &mut self.filter_tracks[kind.index()],
         }
     }
 
-    pub(crate) fn set_slider_from_x(&mut self, x: f32, kind: SliderKind, cx: &mut Context<Self>) {
+    pub(crate) fn set_slider_from_x(
+        &mut self,
+        x: f32,
+        kind: SliderKind,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         let track = match kind {
             SliderKind::BrushSize => self.brush_size_track,
             SliderKind::Hardness => self.hardness_track,
             SliderKind::WandTol => self.wand_tol_track,
+            SliderKind::Tone(kind) => self.tone_tracks[kind.index()],
+            SliderKind::Filter(kind) => self.filter_tracks[kind.index()],
         };
         let left = f32::from(track.origin.x);
         let width = f32::from(track.size.width).max(1.0);
         let t = ((x - left) / width).clamp(0.0, 1.0);
         match kind {
             SliderKind::BrushSize => {
-                self.brush = brush_size_from_t(t, BRUSH_MIN, self.brush_size_max());
+                let next = brush_size_from_t(t, BRUSH_MIN, self.brush_size_max());
+                if self.brush == next {
+                    return;
+                }
+                self.brush = next;
             }
             SliderKind::Hardness => {
+                if self.brush_hardness == t {
+                    return;
+                }
                 self.brush_hardness = t;
             }
             SliderKind::WandTol => {
-                self.wand_tol = (t * WAND_TOL_MAX as f32).round() as i32;
+                let next = (t * WAND_TOL_MAX as f32).round() as i32;
+                if self.wand_tol == next {
+                    return;
+                }
+                self.wand_tol = next;
+            }
+            SliderKind::Tone(kind) => {
+                let next = (t * 2.0 - 1.0).clamp(-1.0, 1.0);
+                if (self.tone.slot(kind.index()) - next).abs() < 1.0e-5 {
+                    return;
+                }
+                self.tone.set_slot(kind.index(), next);
+                self.schedule_tone_preview(window, cx);
+                return;
+            }
+            SliderKind::Filter(kind) => {
+                let next = t.clamp(0.0, 1.0);
+                if (self.filter_amt.slot(kind.index()) - next).abs() < 1.0e-5 {
+                    return;
+                }
+                self.filter_amt.set_slot(kind.index(), next);
+                self.schedule_tone_preview(window, cx);
+                return;
             }
         }
         self.notify_chrome(cx);

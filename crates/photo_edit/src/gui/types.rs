@@ -8,6 +8,8 @@ pub(crate) struct HistorySnap {
     pub pan: Point<f32>,
     pub zoom: f32,
     pub user_zoomed: bool,
+    /// 画布改边时记下选区. 撤销/重做才恢复; 其它操作留着 `None`, 不碰当前选区.
+    pub selection: Option<crate::process::Selection>,
 }
 pub(crate) const GPU_TEX_MAX_SIDE: u32 = 2048;
 pub(crate) const BRUSH_MIN: f32 = 2.0;
@@ -296,6 +298,7 @@ pub(crate) enum DragKind {
         orig_h: u32,
         orig_pos: Vec<(i32, i32)>,
         orig_pan: Point<f32>,
+        orig_sel: crate::process::Selection,
     },
     Brush,
     /// 橡皮: `wiping` 为 true 表示已进入拖擦; 否则松开时只动最上层.
@@ -352,6 +355,102 @@ pub(crate) enum SliderKind {
     BrushSize,
     Hardness,
     WandTol,
+    Tone(ToneSlider),
+    Filter(FilterSlider),
+}
+
+impl SliderKind {
+    /// 拖动时要出预览, 松手再写回整张图.
+    pub(crate) fn previews_grade(self) -> bool {
+        matches!(self, SliderKind::Tone(_) | SliderKind::Filter(_))
+    }
+}
+
+/// 右侧「滤镜 / 调整」当前展开的一页. 关掉时仍显示当前工具的选项.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GradePane {
+    Off,
+    Filters,
+    Tone,
+}
+
+/// 与 `process::TONE_LABELS` 下标一致.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub(crate) enum ToneSlider {
+    Brightness = 0,
+    Contrast = 1,
+    Saturation = 2,
+    Temperature = 3,
+    Tint = 4,
+    Highlights = 5,
+    Shadows = 6,
+}
+
+impl ToneSlider {
+    pub const ALL: [ToneSlider; 7] = [
+        ToneSlider::Brightness,
+        ToneSlider::Contrast,
+        ToneSlider::Saturation,
+        ToneSlider::Temperature,
+        ToneSlider::Tint,
+        ToneSlider::Highlights,
+        ToneSlider::Shadows,
+    ];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ToneSlider::Brightness => "tone-bri",
+            ToneSlider::Contrast => "tone-con",
+            ToneSlider::Saturation => "tone-sat",
+            ToneSlider::Temperature => "tone-temp",
+            ToneSlider::Tint => "tone-tint",
+            ToneSlider::Highlights => "tone-hi",
+            ToneSlider::Shadows => "tone-sh",
+        }
+    }
+}
+
+/// 与 `process::FILTER_LABELS` 下标一致. 0 在左侧, 向右加深.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub(crate) enum FilterSlider {
+    Grayscale = 0,
+    Sepia = 1,
+    Sharpen = 2,
+    Blur = 3,
+    Fade = 4,
+    Vignette = 5,
+}
+
+impl FilterSlider {
+    pub const ALL: [FilterSlider; 6] = [
+        FilterSlider::Grayscale,
+        FilterSlider::Sepia,
+        FilterSlider::Sharpen,
+        FilterSlider::Blur,
+        FilterSlider::Fade,
+        FilterSlider::Vignette,
+    ];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            FilterSlider::Grayscale => "look-gray",
+            FilterSlider::Sepia => "look-sepia",
+            FilterSlider::Sharpen => "look-sharp",
+            FilterSlider::Blur => "look-blur",
+            FilterSlider::Fade => "look-fade",
+            FilterSlider::Vignette => "look-vignette",
+        }
+    }
 }
 
 pub(crate) const WAND_TOL_MAX: i32 = 255;
@@ -687,7 +786,8 @@ pub(crate) fn snap_to_targets(v: f32, targets: &[f32], tol: f32) -> f32 {
     best
 }
 
-/// 画布拖边: 吸附到拖开始尺寸 (`orig_w/h`, 上一次位置) 和内容包围盒 (原来的边界).
+/// 画布拖边: 吸附到拖开始尺寸 (`orig_w/h`, 上一次位置), 内容包围盒, 以及居中的目标分辨率边.
+/// `frame` 是 `(目标宽, 目标高)`, 某一边为 0 或已经不小于画布时不吸附那一边.
 pub(crate) fn snap_canvas_resize(
     edge: CanvasEdge,
     orig_w: u32,
@@ -696,6 +796,7 @@ pub(crate) fn snap_canvas_resize(
     ix: f32,
     iy: f32,
     content: Option<(f32, f32, f32, f32)>,
+    frame: (u32, u32),
     tol: f32,
 ) -> (i32, i32, i32, i32) {
     let (sx, sy) = start;
@@ -706,56 +807,97 @@ pub(crate) fn snap_canvas_resize(
     match edge {
         CanvasEdge::Right => {
             let mut right = orig_w as f32 + (ix - sx);
-            let mut xs = [orig_w as f32, 0.0];
-            let n = if let Some((_, _, mx, _)) = content {
+            let mut xs = [orig_w as f32, 0.0, 0.0, 0.0];
+            let mut n = if let Some((_, _, mx, _)) = content {
                 xs[1] = mx;
                 2
             } else {
                 1
             };
+            n = push_frame_edges(&mut xs, n, orig_w, frame.0);
             right = snap_to_targets(right, &xs[..n], tol);
             w = right.round() as i32;
         }
         CanvasEdge::Left => {
             let mut left = ix - sx;
-            let mut xs = [0.0, 0.0];
-            let n = if let Some((mn, _, _, _)) = content {
+            let mut xs = [0.0, 0.0, 0.0, 0.0];
+            let mut n = if let Some((mn, _, _, _)) = content {
                 xs[1] = mn;
                 2
             } else {
                 1
             };
+            n = push_frame_edges(&mut xs, n, orig_w, frame.0);
             left = snap_to_targets(left, &xs[..n], tol);
             ox = left.round() as i32;
             w = orig_w as i32 - ox;
         }
         CanvasEdge::Bottom => {
             let mut bottom = orig_h as f32 + (iy - sy);
-            let mut ys = [orig_h as f32, 0.0];
-            let n = if let Some((_, _, _, my)) = content {
+            let mut ys = [orig_h as f32, 0.0, 0.0, 0.0];
+            let mut n = if let Some((_, _, _, my)) = content {
                 ys[1] = my;
                 2
             } else {
                 1
             };
+            n = push_frame_edges(&mut ys, n, orig_h, frame.1);
             bottom = snap_to_targets(bottom, &ys[..n], tol);
             h = bottom.round() as i32;
         }
         CanvasEdge::Top => {
             let mut top = iy - sy;
-            let mut ys = [0.0, 0.0];
-            let n = if let Some((_, mn, _, _)) = content {
+            let mut ys = [0.0, 0.0, 0.0, 0.0];
+            let mut n = if let Some((_, mn, _, _)) = content {
                 ys[1] = mn;
                 2
             } else {
                 1
             };
+            n = push_frame_edges(&mut ys, n, orig_h, frame.1);
             top = snap_to_targets(top, &ys[..n], tol);
             oy = top.round() as i32;
             h = orig_h as i32 - oy;
         }
     }
     (w.max(1), h.max(1), ox, oy)
+}
+
+pub(crate) fn snap_axis_targets(base: [f32; 3], frame: Option<(f32, f32)>) -> ([f32; 5], usize) {
+    let mut xs = [base[0], base[1], base[2], 0.0, 0.0];
+    let n = if let Some((a, b)) = frame {
+        xs[3] = a;
+        xs[4] = b;
+        5
+    } else {
+        3
+    };
+    (xs, n)
+}
+
+pub(crate) fn push_frame_edges(xs: &mut [f32], n: usize, canvas: u32, target: u32) -> usize {
+    let Some((a, b)) = target_frame_edges(canvas, target) else {
+        return n;
+    };
+    let mut n = n;
+    if n < xs.len() {
+        xs[n] = a;
+        n += 1;
+    }
+    if n < xs.len() {
+        xs[n] = b;
+        n += 1;
+    }
+    n
+}
+
+/// 画布里居中的目标分辨率左右 (或上下) 边界. 目标不比画布小则没有可吸附的内侧边.
+pub(crate) fn target_frame_edges(canvas: u32, target: u32) -> Option<(f32, f32)> {
+    if target == 0 || canvas <= target {
+        return None;
+    }
+    let a = (canvas as f32 - target as f32) * 0.5;
+    Some((a, a + target as f32))
 }
 
 pub(crate) fn opposite_handle_point(
@@ -844,6 +986,9 @@ pub struct FitHint {
     pub aspect_w: u32,
     pub aspect_h: u32,
     pub bg_enabled: bool,
+    /// 画布大于这一圈时, 拖边和选区吸附到居中的目标分辨率边界. 0 表示这一边不吸附.
+    pub snap_w: u32,
+    pub snap_h: u32,
 }
 
 impl FitHint {
@@ -1079,6 +1224,7 @@ mod tests {
             102.0,
             25.0,
             content,
+            (0, 0),
             4.0,
         );
         assert_eq!((w, h, ox, oy), (100, 50, 0, 0));
@@ -1090,6 +1236,7 @@ mod tests {
             88.0,
             25.0,
             content,
+            (0, 0),
             4.0,
         );
         assert_eq!(w, 90);
@@ -1101,6 +1248,7 @@ mod tests {
             2.0,
             25.0,
             content,
+            (0, 0),
             4.0,
         );
         assert_eq!((ox, w), (0, 100));
@@ -1112,9 +1260,41 @@ mod tests {
             11.0,
             25.0,
             content,
+            (0, 0),
             4.0,
         );
         assert_eq!(ox, 10);
+    }
+
+    #[test]
+    fn canvas_snaps_to_centered_target_frame() {
+        // 2880×1440 里居中的 2560×1440: 左 160, 右 2720.
+        assert_eq!(target_frame_edges(2880, 2560), Some((160.0, 2720.0)));
+        assert_eq!(target_frame_edges(1440, 1440), None);
+        let (w, _, _, _) = snap_canvas_resize(
+            CanvasEdge::Right,
+            2880,
+            1440,
+            (2880.0, 720.0),
+            2722.0,
+            720.0,
+            None,
+            (2560, 0),
+            8.0,
+        );
+        assert_eq!(w, 2720);
+        let (_, _, ox, _) = snap_canvas_resize(
+            CanvasEdge::Left,
+            2880,
+            1440,
+            (0.0, 720.0),
+            158.0,
+            720.0,
+            None,
+            (2560, 0),
+            8.0,
+        );
+        assert_eq!(ox, 160);
     }
 
     #[test]

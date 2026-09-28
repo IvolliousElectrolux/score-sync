@@ -88,6 +88,10 @@ impl DocState {
         let Some(page) = self.pages.get(page_idx) else {
             return;
         };
+        if page.is_vector() {
+            self.seed_vector_anchors_for_page(page_idx);
+            return;
+        }
         let Some(img) = page.image.as_ref() else {
             return;
         };
@@ -123,6 +127,51 @@ impl DocState {
                     }
                 });
                 (id, a)
+            })
+            .collect();
+        self.ingest_region_staff_anchors(computed);
+    }
+
+    /// 矢量页锚点来自路径几何, 不光栅、不反色. 按条带重叠对上已检出的谱行.
+    fn seed_vector_anchors_for_page(&mut self, page_idx: usize) {
+        let (scene, margin, bands) = {
+            let Some(page) = self.pages.get(page_idx) else {
+                return;
+            };
+            let Some(src) = page.vector.as_ref() else {
+                return;
+            };
+            let bands: Vec<(String, i32, i32)> = page
+                .regions
+                .values()
+                .map(|r| (r.id.clone(), r.y0, r.y1))
+                .collect();
+            (src.scene.clone(), self.margin, bands)
+        };
+        if bands.is_empty() {
+            return;
+        }
+        let found = crate::vector_page::detect_vector_bands(&scene, margin);
+        let computed: Vec<(String, Option<i32>)> = bands
+            .into_iter()
+            .map(|(id, y0, y1)| {
+                let y = found
+                    .iter()
+                    .find(|b| b.y0 == y0 && b.y1 == y1)
+                    .or_else(|| {
+                        found.iter().max_by_key(|b| {
+                            let lo = b.y0.max(y0);
+                            let hi = b.y1.min(y1);
+                            hi.saturating_sub(lo)
+                        })
+                    })
+                    .filter(|b| {
+                        let lo = b.y0.max(y0);
+                        let hi = b.y1.min(y1);
+                        hi > lo
+                    })
+                    .and_then(|b| b.anchor);
+                (id, y)
             })
             .collect();
         self.ingest_region_staff_anchors(computed);

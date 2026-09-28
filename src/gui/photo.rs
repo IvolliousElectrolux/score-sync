@@ -6,9 +6,15 @@ use photo_edit::{
 };
 
 #[derive(Clone)]
-pub(super) struct PhotoSession {
-    pub group_id: String,
-    pub region_id: String,
+pub(super) enum PhotoSession {
+    Block {
+        group_id: String,
+        region_id: String,
+    },
+    /// `original` 是进入修图时的底色图, 还原用, 不写回工程.
+    Background {
+        original: std::sync::Arc<image::RgbImage>,
+    },
 }
 
 impl ScoreSyncApp {
@@ -47,6 +53,18 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        if self
+            .doc
+            .find_region(&rid)
+            .and_then(|(pi, _)| self.doc.pages.get(pi))
+            .map(|p| p.is_vector())
+            .unwrap_or(false)
+        {
+            self.status = "矢量页的修图还没做".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
         match self.load_block_for_photo(&gid, &rid) {
             Ok((img, paper, source, existing)) => {
                 self.flush_mask_to_doc(cx);
@@ -63,7 +81,7 @@ impl ScoreSyncApp {
                     p.set_import_options(imports, cx);
                 });
                 let mask_warn = self.block_has_intersecting_masks(&gid, &rid);
-                self.photo_session = Some(PhotoSession {
+                self.photo_session = Some(PhotoSession::Block {
                     group_id: gid,
                     region_id: rid,
                 });
@@ -81,6 +99,43 @@ impl ScoreSyncApp {
             }
             Err(e) => self.show_error("打开修图失败", e, cx),
         }
+        cx.notify();
+    }
+
+    pub(super) fn try_open_bg_photo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.photo_open() {
+            return;
+        }
+        let Some(img) = self.image_for_bg_edit() else {
+            self.status = "先选择一张底色图再修图.".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        };
+        let (w, h) = img.dimensions();
+        let tw = self.doc.bg_aspect_w.max(1);
+        let th = self.doc.bg_aspect_h.max(1);
+        let original = std::sync::Arc::new(img);
+        self.photo_edit.update(cx, |p, cx| {
+            p.open_rgb((*original).clone(), None, cx);
+            p.set_fit_hint(
+                FitHint {
+                    snap_w: if w > tw { tw } else { 0 },
+                    snap_h: if h > th { th } else { 0 },
+                    ..FitHint::default()
+                },
+                cx,
+            );
+            p.set_import_options(Vec::new(), cx);
+        });
+        self.photo_session = Some(PhotoSession::Background { original });
+        self.photo_edit
+            .read(cx)
+            .focus_handle_ref()
+            .clone()
+            .focus(window);
+        self.status = format!("底色修图 {w}×{h}").into();
+        self.hint = self.status.clone();
         cx.notify();
     }
 
@@ -159,6 +214,8 @@ impl ScoreSyncApp {
             aspect_w: self.doc.bg_aspect_w.max(1),
             aspect_h: self.doc.bg_aspect_h.max(1),
             bg_enabled: self.doc.bg_enabled,
+            snap_w: 0,
+            snap_h: 0,
         }
     }
 
@@ -218,26 +275,32 @@ impl ScoreSyncApp {
             self.close_photo_session(cx);
             return;
         };
-        let using = crate::model::groups_using_region(&self.doc.groups, &sess.region_id);
+        let region_id = match sess {
+            PhotoSession::Background { .. } => {
+                self.commit_edited_bg(commit.flat, cx);
+                self.close_photo_session(cx);
+                cx.notify();
+                return;
+            }
+            PhotoSession::Block { region_id, .. } => region_id,
+        };
+        let using = crate::model::groups_using_region(&self.doc.groups, &region_id);
         let old_spans: Vec<(String, i64, i64)> = using
             .iter()
             .filter_map(|gid| {
                 let spans = self.doc.group_member_spans(gid);
                 spans
                     .iter()
-                    .find(|(id, ..)| id == &sess.region_id)
+                    .find(|(id, ..)| id == &region_id)
                     .map(|(_, y0, y1)| (gid.clone(), *y0, *y1 - *y0 + 1))
             })
             .collect();
-        if let Err(e) = self
-            .doc
-            .write_region_edit(&sess.region_id, &commit.document)
-        {
+        if let Err(e) = self.doc.write_region_edit(&region_id, &commit.document) {
             self.show_error("保存修图失败", e, cx);
             return;
         }
         for gid in &using {
-            self.clear_block_edge_adjust(gid, &sess.region_id);
+            self.clear_block_edge_adjust(gid, &region_id);
         }
         let new_h = commit.flat.height() as i64;
         for (gid, y0, old_h) in old_spans {
@@ -263,23 +326,38 @@ impl ScoreSyncApp {
         let Some(sess) = self.photo_session.clone() else {
             return;
         };
-        let using = crate::model::groups_using_region(&self.doc.groups, &sess.region_id);
+        let (group_id, region_id) = match sess {
+            PhotoSession::Background { original } => {
+                self.photo_edit.update(cx, |p, cx| {
+                    p.open_rgb((*original).clone(), None, cx);
+                });
+                self.status = "已还原到进入修图时的底色.".into();
+                self.hint = self.status.clone();
+                cx.notify();
+                return;
+            }
+            PhotoSession::Block {
+                group_id,
+                region_id,
+            } => (group_id, region_id),
+        };
+        let using = crate::model::groups_using_region(&self.doc.groups, &region_id);
         let old_spans: Vec<(String, i64, i64)> = using
             .iter()
             .filter_map(|gid| {
                 let spans = self.doc.group_member_spans(gid);
                 spans
                     .iter()
-                    .find(|(id, ..)| id == &sess.region_id)
+                    .find(|(id, ..)| id == &region_id)
                     .map(|(_, y0, y1)| (gid.clone(), *y0, *y1 - *y0 + 1))
             })
             .collect();
         let orig_h = self
             .doc
-            .find_region(&sess.region_id)
+            .find_region(&region_id)
             .map(|(_, r)| (r.y1 - r.y0 + 1).max(0) as i64)
             .unwrap_or(0);
-        self.doc.remove_region_edit(&sess.region_id);
+        self.doc.remove_region_edit(&region_id);
         for (gid, y0, old_h) in old_spans {
             if let Some(masks) = self.doc.group_masks.get_mut(&gid) {
                 crate::model::remap_masks_after_height_change(masks, y0, old_h, orig_h);
@@ -289,10 +367,10 @@ impl ScoreSyncApp {
             self.mark_video_pool_dirty_group(&gid);
         }
         self.dirty = true;
-        match self.load_block_for_photo(&sess.group_id, &sess.region_id) {
+        match self.load_block_for_photo(&group_id, &region_id) {
             Ok((img, paper, source, existing)) => {
-                let hint = self.photo_fit_hint(&sess.group_id, &sess.region_id, img.width());
-                let imports = self.photo_import_options(&sess.group_id, &sess.region_id);
+                let hint = self.photo_fit_hint(&group_id, &region_id, img.width());
+                let imports = self.photo_import_options(&group_id, &region_id);
                 self.photo_edit.update(cx, |p, cx| {
                     if let Some(doc) = existing {
                         p.open_document(doc, cx);
@@ -347,11 +425,11 @@ impl ScoreSyncApp {
     }
 
     fn import_block_into_photo(&mut self, rid: &str, cx: &mut Context<Self>) {
-        let gid = self
-            .photo_session
-            .as_ref()
-            .map(|s| s.group_id.clone())
-            .or_else(|| self.doc.active_group_id.clone());
+        let gid = match self.photo_session.as_ref() {
+            Some(PhotoSession::Block { group_id, .. }) => Some(group_id.clone()),
+            _ => None,
+        }
+        .or_else(|| self.doc.active_group_id.clone());
         let Some(gid) = gid else {
             return;
         };

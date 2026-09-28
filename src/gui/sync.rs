@@ -66,6 +66,21 @@ fn precrop_pool_bg_pages(entries: &mut [VideoPoolRebuildEntry]) {
     }
 }
 
+fn rgb_to_opaque_rgba(rgb: &image::RgbImage) -> image::RgbaImage {
+    let mut out = image::RgbaImage::new(rgb.width(), rgb.height());
+    for (d, s) in out.pixels_mut().zip(rgb.pixels()) {
+        *d = image::Rgba([s[0], s[1], s[2], 255]);
+    }
+    out
+}
+
+struct PageWindowJob {
+    idx: usize,
+    path: PathBuf,
+    need_detect: bool,
+    vector: Option<crate::vector_page::VectorSource>,
+}
+
 /// 蒙版/底色预览后台任务的一条成员: 已在内存的页图只带 `Arc` (不拷像素),
 /// 未加载的只带磁盘路径, 解码和裁切都在工作线程做.
 struct MaskPreviewMemberSnap {
@@ -78,6 +93,8 @@ struct MaskPreviewMemberSnap {
     image: Option<Arc<image::RgbImage>>,
     disk_path: PathBuf,
     override_path: Option<PathBuf>,
+    vector: Option<crate::vector_page::VectorSource>,
+    anchor: Option<i32>,
 }
 
 struct MaskPreviewBuilt {
@@ -124,6 +141,8 @@ fn collect_mask_preview_members(
                 image: page.image.clone(),
                 disk_path: page.disk_path.clone(),
                 override_path,
+                vector: page.vector.clone(),
+                anchor: doc.region_staff_anchors.get(rid).copied().flatten(),
             })
         })
         .collect()
@@ -150,7 +169,80 @@ fn build_mask_preview(
     let mut loaded_pages = Vec::new();
     let mut pieces: Vec<(String, image::RgbImage, Option<mask_tool::gui::PieceDisk>)> = Vec::new();
     let mut orig_sizes: Vec<(u32, u32)> = Vec::new();
+    let mut vector_rgba: Vec<Option<image::RgbaImage>> = Vec::new();
+    let mut vector_anchor: Vec<Option<Option<i32>>> = Vec::new();
     for m in members {
+        if let Some(src) = m.vector.clone() {
+            if m.override_path.is_none() {
+                let logical_w = m.img_w.max(1);
+                let logical_h = m.height.max(1);
+                let px = crate::vector_page::export_px_per_pt(src.w_pt).min(4.0);
+                let mut tex_w = (src.w_pt * px).round().max(1.0) as u32;
+                let mut tex_h = (logical_h as f32 * px).round().max(1.0) as u32;
+                let side = tex_w.max(tex_h);
+                if side > 1400 {
+                    let s = 1400.0 / side as f32;
+                    tex_w = (tex_w as f32 * s).round().max(1.0) as u32;
+                    tex_h = (tex_h as f32 * s).round().max(1.0) as u32;
+                }
+                let rgba = crate::pdf::render_vector_rect_rgba(
+                    &src.pdf_path,
+                    src.page_index,
+                    0.0,
+                    m.y0 as f32,
+                    src.w_pt,
+                    logical_h as f32,
+                    tex_w,
+                    tex_h,
+                )?;
+                let pad = crate::vector_page::polarity_pad(&rgba);
+                let rgb = crate::vector_page::flatten_rgba(&rgba, pad);
+                let y0_pt = m.y0 as f32;
+                let page_w = src.w_pt;
+                let band_h = logical_h as f32;
+                let pdf_path = src.pdf_path.clone();
+                let page_index = src.page_index;
+                let keep_alpha = bg_enabled;
+                let raster: mask_tool::gui::PieceRaster =
+                    std::sync::Arc::new(move |x, y, w, h, tw, th| {
+                        let lw = logical_w as f32;
+                        let lh = logical_h as f32;
+                        let x_pt = x as f32 / lw * page_w;
+                        let w_pt = (w as f32 / lw * page_w).max(0.5);
+                        let y_pt = y0_pt + y as f32 / lh * band_h;
+                        let h_pt = (h as f32 / lh * band_h).max(0.5);
+                        let rgba = crate::pdf::render_vector_rect_rgba(
+                            &pdf_path, page_index, x_pt, y_pt, w_pt, h_pt, tw, th,
+                        )
+                        .ok()?;
+                        if keep_alpha {
+                            Some(rgba)
+                        } else {
+                            let pad = crate::vector_page::polarity_pad(&rgba);
+                            Some(rgb_to_opaque_rgba(&crate::vector_page::flatten_rgba(
+                                &rgba, pad,
+                            )))
+                        }
+                    });
+                orig_sizes.push((logical_w, logical_h));
+                vector_rgba.push(if keep_alpha { Some(rgba) } else { None });
+                vector_anchor.push(Some(m.anchor));
+                pieces.push((
+                    m.rid,
+                    rgb,
+                    Some(mask_tool::gui::PieceDisk {
+                        path: m.disk_path.clone(),
+                        flat: true,
+                        page_w: logical_w,
+                        page_h: logical_h,
+                        band_y: 0,
+                        band_h: logical_h,
+                        raster: Some(raster),
+                    }),
+                ));
+                continue;
+            }
+        }
         if let Some(path) = m.override_path.as_ref().filter(|p| p.is_file()) {
             let rgb = crate::page_cache::load_rgb(path)?;
             let (w, h) = rgb.dimensions();
@@ -167,11 +259,16 @@ fn build_mask_preview(
                     page_h: h,
                     band_y: 0,
                     band_h: h,
+                    raster: None,
                 }),
             ));
+            vector_rgba.push(None);
+            vector_anchor.push(None);
             continue;
         }
         orig_sizes.push((m.img_w, m.height));
+        vector_rgba.push(None);
+        vector_anchor.push(None);
         let img = if let Some(existing) = m.image {
             existing
         } else {
@@ -198,6 +295,7 @@ fn build_mask_preview(
                 page_h: m.img_h.max(1),
                 band_y: m.y0,
                 band_h: m.height.max(1),
+                raster: None,
             }),
         ));
     }
@@ -205,11 +303,13 @@ fn build_mask_preview(
         return Err("无法拼合该组合".into());
     }
     let mut stats = HashMap::new();
-    for (rid, img, _) in &pieces {
-        stats.insert(
-            rid.clone(),
-            mask_tool::layout::compute_piece_stats(img, ink_threshold),
-        );
+    for ((rid, img, _), rgba) in pieces.iter().zip(vector_rgba.iter()) {
+        let st = if rgba.is_some() {
+            mask_tool::layout::PieceStats::default()
+        } else {
+            mask_tool::layout::compute_piece_stats(img, ink_threshold)
+        };
+        stats.insert(rid.clone(), st);
     }
     let heights: Vec<(String, u32)> = pieces
         .iter()
@@ -235,7 +335,11 @@ fn build_mask_preview(
     let piece_ys: HashMap<String, Option<i32>> = pieces
         .iter()
         .zip(orig_sizes.iter())
-        .map(|((rid, img, _), &(_, orig_h))| {
+        .zip(vector_anchor.iter())
+        .map(|(((rid, img, _), &(_, orig_h)), stored)| {
+            if let Some(a) = stored {
+                return (rid.clone(), *a);
+            }
             let y1 = img.height().saturating_sub(1) as i32;
             let a = mask_tool::staff::band_staff_anchor(img, 0, y1, ink_threshold);
             let a = a.map(|v| {
@@ -252,16 +356,31 @@ fn build_mask_preview(
     let tiles: Vec<mask_tool::gui::BlockTile> = pieces
         .iter()
         .zip(orig_sizes.iter())
-        .map(|((rid, img, source), &(orig_w, orig_h))| {
+        .zip(vector_rgba.iter())
+        .map(|(((rid, img, source), &(orig_w, orig_h)), rgba)| {
             let st = stats.get(rid).copied().unwrap_or_default();
-            mask_tool::gui::BlockTile::from_piece_sized(
-                rid.clone(),
-                img,
-                orig_w,
-                orig_h,
-                st,
-                source.clone(),
-            )
+            if let Some(rgba) = rgba {
+                let pad = crate::vector_page::polarity_pad(rgba);
+                mask_tool::gui::BlockTile::from_rgba_piece(
+                    rid.clone(),
+                    rgba,
+                    orig_w,
+                    orig_h,
+                    st,
+                    source.clone(),
+                    true,
+                    pad,
+                )
+            } else {
+                mask_tool::gui::BlockTile::from_piece_sized(
+                    rid.clone(),
+                    img,
+                    orig_w,
+                    orig_h,
+                    st,
+                    source.clone(),
+                )
+            }
         })
         .collect();
     let bg_tile = if compute_bg_tile {
@@ -333,8 +452,22 @@ impl ScoreSyncApp {
 
     /// 只换底色层, 不 `clear_view` / 不重解码谱面. 纯色在界面线程即时完成;
     /// 图片底色缩略图仍丢到后台.
+    ///
+    /// 矢量块在有底色时保留 alpha, 取消后要按墨色垫成不透明图. 只摘掉底色层
+    /// 会把透明处露在白底上 (白墨几乎看不见). 这种组合整页重光栅.
     pub(super) fn refresh_bg_preview_layer(&mut self, cx: &mut Context<Self>) {
         if !self.uses_mask_canvas() {
+            return;
+        }
+        if self.preview_group_has_vector() {
+            self.bg_tile_cache = None;
+            if !self.doc.bg_enabled {
+                self.mask_tool.update(cx, |m, cx| {
+                    m.apply_host_bg_tile(None, 0, false);
+                    cx.notify();
+                });
+            }
+            self.refresh_vector_mask_preview(cx);
             return;
         }
         let loading = self.mask_tool.read(cx).is_canvas_loading();
@@ -428,6 +561,40 @@ impl ScoreSyncApp {
         .detach();
     }
 
+    /// 当前预览组合里有矢量页. 底色开关会改这些块是透明叠底还是垫色.
+    fn preview_group_has_vector(&self) -> bool {
+        let Some(gid) = self.mask_target.as_ref() else {
+            return false;
+        };
+        let Some(g) = self.doc.groups.iter().find(|g| &g.id == gid) else {
+            return false;
+        };
+        g.region_ids.iter().any(|rid| {
+            self.doc
+                .find_region(rid)
+                .and_then(|(pi, _)| self.doc.pages.get(pi))
+                .is_some_and(|p| p.vector.is_some())
+        })
+    }
+
+    /// 底色开关后重光栅矢量预览, 不 `clear_view`, 免得闪一下空画布.
+    fn refresh_vector_mask_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(gid) = self.mask_target.clone() else {
+            self.sync_mask_image(cx);
+            return;
+        };
+        let label = self
+            .doc
+            .groups
+            .iter()
+            .position(|g| g.id == gid)
+            .map(|i| self.doc.group_crop_label(i))
+            .unwrap_or_else(|| "组合".into());
+        self.mask_sync_gen = self.mask_sync_gen.wrapping_add(1);
+        let gen = self.mask_sync_gen;
+        self.spawn_mask_preview(gen, gid, label, true, cx);
+    }
+
     pub(super) fn retire_current_render_image(&mut self) {
         let a = self.render_image.take();
         let b = self.fit_render_image.take();
@@ -469,15 +636,24 @@ impl ScoreSyncApp {
     /// 转换挪到后台线程, 界面线程只在结果送回来时换一次贴图指针;
     /// `render_gen` 保证连续切页时旧结果不会晚到覆盖新页面.
     pub(super) fn refresh_render(&mut self, cx: &mut Context<Self>) {
-        let Some(page) = self.doc.current_page() else {
+        let idx = self.doc.current_page_index;
+        let Some(page) = self.doc.pages.get(idx) else {
             self.retire_current_render_image();
             self.img_w = 0;
             self.img_h = 0;
             cx.notify();
             return;
         };
-        let (w, h) = (page.width(), page.height());
-        let Some(img) = page.image.clone() else {
+        let logical = page.vector.as_ref().map(|s| s.logical_size());
+        let (w, h) = logical.unwrap_or((page.width(), page.height()));
+        let img = page.image.clone();
+        if let Some((lw, lh)) = logical {
+            if let Some(page) = self.doc.pages.get_mut(idx) {
+                page.img_w = lw;
+                page.img_h = lh;
+            }
+        }
+        let Some(img) = img else {
             // 占位: 尺寸已知但像素未到, 触发异步窗口加载
             self.retire_current_render_image();
             self.img_w = w;
@@ -578,6 +754,10 @@ impl ScoreSyncApp {
         let Some(page) = self.doc.current_page() else {
             return;
         };
+        if page.is_vector() {
+            self.sync_vector_view_lod(cx);
+            return;
+        }
         let Some(proxy) = page.image.clone() else {
             return;
         };
@@ -662,6 +842,90 @@ impl ScoreSyncApp {
         .detach();
     }
 
+    /// 矢量页放大后按视口 point 矩形重新光栅, 不裁预览位图.
+    fn sync_vector_view_lod(&mut self, cx: &mut Context<Self>) {
+        let vw = f32::from(self.view_bounds.size.width);
+        let vh = f32::from(self.view_bounds.size.height);
+        let Some(page) = self.doc.current_page() else {
+            return;
+        };
+        let Some(source) = page.vector.clone() else {
+            return;
+        };
+        let Some(proxy) = page.image.clone() else {
+            return;
+        };
+        let orig_w = page.width().max(1);
+        let orig_h = page.height().max(1);
+        let xform = self.xform();
+        let proxy_scale = (proxy.width() as f32 / orig_w as f32)
+            .max(proxy.height() as f32 / orig_h as f32)
+            .max(0.0001);
+        if xform.scale <= proxy_scale * 1.02 {
+            self.restore_fit_lod();
+            return;
+        }
+        let vis = super::canvas::ViewLod::compute_sharp(&xform, vw, vh, orig_w, orig_h, 0.0);
+        if let Some(cur) = self.view_lod {
+            if !self.lod_is_fit && cur.covers(&vis) && self.render_image.is_some() {
+                return;
+            }
+        }
+        if let Some(pending) = self.lod_pending {
+            if pending.covers(&vis) {
+                return;
+            }
+        }
+        let need = super::canvas::ViewLod::compute_sharp(&xform, vw, vh, orig_w, orig_h, 0.22);
+        self.lod_gen = self.lod_gen.wrapping_add(1);
+        let gen = self.lod_gen;
+        self.lod_pending = Some(need);
+        let (tx, rx) =
+            async_channel::bounded::<(super::canvas::ViewLod, Arc<gpui::RenderImage>)>(1);
+        std::thread::spawn(move || {
+            let Ok(rgb) = crate::pdf::render_vector_rect_rgb(
+                &source.pdf_path,
+                source.page_index,
+                need.x as f32,
+                need.y as f32,
+                need.w as f32,
+                need.h as f32,
+                need.tex_w,
+                need.tex_h,
+            ) else {
+                return;
+            };
+            let tex = mask_tool::gui::rgb_to_render_image_capped(&rgb, need.tex_w.max(need.tex_h));
+            let _ = tx.send_blocking((need, tex));
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok((lod, tex)) = rx.recv().await {
+                this.update(cx, |view, cx| {
+                    if view.lod_gen != gen {
+                        return;
+                    }
+                    if let Some(old) = view.render_image.take() {
+                        if view
+                            .fit_render_image
+                            .as_ref()
+                            .map(|f| !Arc::ptr_eq(f, &old))
+                            .unwrap_or(true)
+                        {
+                            view.gpu_drop.push(old);
+                        }
+                    }
+                    view.render_image = Some(tex);
+                    view.view_lod = Some(lod);
+                    view.lod_is_fit = false;
+                    view.lod_pending = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// 异步加载当前页附近窗口并释放窗外页图.
     pub(super) fn request_page_window(&mut self, cx: &mut Context<Self>) {
         self.page_load_gen = self.page_load_gen.wrapping_add(1);
@@ -674,19 +938,23 @@ impl ScoreSyncApp {
         }
         let lo = center.saturating_sub(radius);
         let hi = (center + radius).min(n - 1);
-        let mut jobs: Vec<(usize, PathBuf, bool)> = Vec::new();
+        let mut jobs: Vec<PageWindowJob> = Vec::new();
         for i in lo..=hi {
-            if self.doc.pages[i].regions.is_empty() {
+            if self.doc.pages[i].is_vector() && self.doc.pages[i].regions.is_empty() {
+                self.doc.detect_vector_page(i, true);
+            } else if self.doc.pages[i].regions.is_empty() {
                 if self.doc.load_detect_sidecar(i) {
                     self.doc.ensure_page_groups(i);
                 }
             }
             if self.doc.pages[i].image.is_none() {
-                jobs.push((
-                    i,
-                    self.doc.pages[i].disk_path.clone(),
-                    self.doc.pages[i].regions.is_empty(),
-                ));
+                jobs.push(PageWindowJob {
+                    idx: i,
+                    path: self.doc.pages[i].disk_path.clone(),
+                    need_detect: self.doc.pages[i].regions.is_empty()
+                        && !self.doc.pages[i].is_vector(),
+                    vector: self.doc.pages[i].vector.clone(),
+                });
             }
         }
         // 窗外立刻卸掉
@@ -723,7 +991,32 @@ impl ScoreSyncApp {
             Option<crate::detect_cache::PageDetectFile>,
         )>();
         std::thread::spawn(move || {
-            for (idx, path, need_detect) in jobs {
+            for job in jobs {
+                let PageWindowJob {
+                    idx,
+                    path,
+                    need_detect,
+                    vector,
+                } = job;
+                if let Some(src) = vector.as_ref().filter(|_| !path.is_file()) {
+                    let cap = max_side.max(64) as f32;
+                    let scale = (cap / src.w_pt).min(cap / src.h_pt).clamp(0.05, 8.0);
+                    let tw = (src.w_pt * scale).round().max(1.0) as u32;
+                    let th = (src.h_pt * scale).round().max(1.0) as u32;
+                    let display = crate::pdf::render_vector_rect_rgb(
+                        &src.pdf_path,
+                        src.page_index,
+                        0.0,
+                        0.0,
+                        src.w_pt,
+                        src.h_pt,
+                        tw,
+                        th,
+                    )
+                    .map(|img| (img.width(), img.height(), img));
+                    let _ = tx.send_blocking((idx, display, None));
+                    continue;
+                }
                 if need_detect {
                     let r = crate::page_cache::load_rgb(&path);
                     let detect = match &r {
@@ -767,8 +1060,10 @@ impl ScoreSyncApp {
                     }
                     if let Ok((w, h, img)) = result {
                         if let Some(page) = view.doc.pages.get_mut(idx) {
-                            page.img_w = w;
-                            page.img_h = h;
+                            if !page.is_vector() {
+                                page.img_w = w;
+                                page.img_h = h;
+                            }
                             page.image = Some(Arc::new(img));
                         }
                         view.doc.seed_region_anchors_for_page(idx);
@@ -802,12 +1097,17 @@ impl ScoreSyncApp {
     pub(super) fn start_hydrate_all(&mut self, detect_missing: bool, cx: &mut Context<Self>) {
         self.hydrate_gen = self.hydrate_gen.wrapping_add(1);
         let gen = self.hydrate_gen;
+        for i in 0..self.doc.pages.len() {
+            if self.doc.pages[i].is_vector() && self.doc.pages[i].regions.is_empty() {
+                self.doc.detect_vector_page(i, true);
+            }
+        }
         let jobs: Vec<(usize, PathBuf)> = self
             .doc
             .pages
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.regions.is_empty())
+            .filter(|(_, p)| p.regions.is_empty() && !p.is_vector())
             .map(|(i, p)| (i, p.disk_path.clone()))
             .collect();
         if jobs.is_empty() {
@@ -887,12 +1187,17 @@ impl ScoreSyncApp {
 
     /// 仍无 regions 的页在后台识别 (只补组合, 不重置已有合并/调序).
     pub(super) fn start_detect_missing_pages(&mut self, cx: &mut Context<Self>) {
+        for i in 0..self.doc.pages.len() {
+            if self.doc.pages[i].is_vector() && self.doc.pages[i].regions.is_empty() {
+                self.doc.detect_vector_page(i, true);
+            }
+        }
         let jobs: Vec<(usize, PathBuf)> = self
             .doc
             .pages
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.regions.is_empty())
+            .filter(|(_, p)| p.regions.is_empty() && !p.is_vector())
             .map(|(i, p)| (i, p.disk_path.clone()))
             .collect();
         if jobs.is_empty() {
@@ -1192,8 +1497,14 @@ impl ScoreSyncApp {
                 };
                 for (idx, orig_w, orig_h, img) in built.loaded_pages {
                     if let Some(page) = view.doc.pages.get_mut(idx) {
-                        page.img_w = orig_w;
-                        page.img_h = orig_h;
+                        if let Some(src) = page.vector.as_ref() {
+                            let (lw, lh) = src.logical_size();
+                            page.img_w = lw;
+                            page.img_h = lh;
+                        } else {
+                            page.img_w = orig_w;
+                            page.img_h = orig_h;
+                        }
                         if page.image.is_none() {
                             page.image = Some(img);
                         }
@@ -2296,6 +2607,8 @@ mod mask_preview_wait_probe {
             image: Some(Arc::new(page)),
             disk_path: PathBuf::from("unused"),
             override_path: None,
+            vector: None,
+            anchor: None,
         }];
         let bg_arc = Arc::new(bg);
         let t0 = Instant::now();

@@ -21,9 +21,10 @@ mod types;
 
 pub(crate) use blocks::BlockHitZone;
 pub use blocks::{
-    rgb_to_render_image, rgb_to_render_image_capped, BlockBgTile, BlockTile, PieceDisk,
+    rgb_to_render_image, rgb_to_render_image_capped, rgba_to_render_image_capped, BlockBgTile,
+    BlockTile, PieceDisk, PieceRaster,
 };
-pub(crate) use brush_sprite::OverlayPaint;
+pub(crate) use brush_sprite::{paint_brush_vector, OverlayPaint};
 pub use guides::GuideHostCmd;
 pub(crate) use lod::PieceDetail;
 pub(crate) use types::*;
@@ -69,7 +70,8 @@ pub(crate) use gpui::{
     actions, canvas, div, point, prelude::*, px, quad, relative, rgb, size, App, Application,
     Bounds, ContentMask, Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle,
     Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, RenderImage, ScrollDelta,
+    LineCap, LineJoin, MouseMoveEvent, MouseUpEvent, PathBuilder, PathStyle, Pixels, Point,
+    Render, RenderImage, ScrollDelta, StrokeOptions,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, Window, WindowBounds,
     WindowOptions,
 };
@@ -171,8 +173,6 @@ pub struct MaskToolApp {
     poly_cursor: Option<(f32, f32)>,
     /// 画笔圆形光标中心 (图像坐标); 仅 Brush 模式跟踪.
     brush_cursor: Option<(f32, f32)>,
-    /// 画笔显示缓存. 不进撤销栈; 点列仍是导出和命中的来源.
-    brush_sprites: HashMap<String, brush_sprite::BrushSprite>,
     /// 透明度拖动时是否已为「改选中项」压过撤销栈.
     opacity_undid: bool,
     drag: Option<DragKind>,
@@ -340,7 +340,6 @@ impl MaskToolApp {
             poly_draft: None,
             poly_cursor: None,
             brush_cursor: None,
-            brush_sprites: HashMap::new(),
             opacity_undid: false,
             drag: None,
             status: "就绪".into(),
@@ -448,9 +447,6 @@ impl MaskToolApp {
         }
         for d in &self.view_detail {
             mem.tiles_gpu += gpu_tex_bytes(&d.tex);
-        }
-        for sprite in self.brush_sprites.values() {
-            mem.tiles_gpu += sprite.gpu_bytes();
         }
         for img in self.lod_cache.values() {
             mem.tiles_rgb += img.width() as u64 * img.height() as u64 * 3;

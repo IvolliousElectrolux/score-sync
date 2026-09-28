@@ -163,6 +163,7 @@ impl MaskToolApp {
                     start_x: ix,
                     start_y: iy,
                     freehand: false,
+                    snapped: false,
                 });
             }
             ToolMode::Brush => {
@@ -170,18 +171,16 @@ impl MaskToolApp {
                     return;
                 }
                 let id = new_id();
-                let r = self.canvas_radius_to_sheet(self.brush_radius_px());
+                let r = self.canvas_radius_to_sheet(self.brush_size * 0.5);
                 let (sx, sy) = self.canvas_to_sheet_xy(ix, iy);
-                let px = sx.round() as i32;
-                let py = sy.round() as i32;
                 self.push_undo();
                 self.masks.push(MaskRect {
                     id: id.clone(),
-                    x0: px - r,
-                    y0: py - r,
-                    x1: px + r,
-                    y1: py + r,
-                    brush_points: vec![(px, py)],
+                    x0: (sx - r).floor() as i32,
+                    y0: (sy - r).floor() as i32,
+                    x1: (sx + r).ceil() as i32,
+                    y1: (sy + r).ceil() as i32,
+                    brush_points: vec![(sx, sy)],
                     brush_radius: r,
                     color: self.brush_color,
                     poly_points: Vec::new(),
@@ -440,6 +439,7 @@ impl MaskToolApp {
                 start_x,
                 start_y,
                 mut freehand,
+                ..
             }) => {
                 let xform = self.xform();
                 let (ix, iy) = xform.screen_to_image(sx, sy);
@@ -447,8 +447,11 @@ impl MaskToolApp {
                 if !freehand && (sx - psx).hypot(sy - psy) >= 5.0 {
                     freehand = true;
                 }
+                let mut snapped = false;
                 if freehand {
-                    let (ix, iy, snapped) = self.poly_snap_within(ix, iy, POLY_DRAG_SNAP_SCREEN_PX);
+                    let (ix, iy, did_snap) =
+                        self.poly_snap_within(ix, iy, POLY_DRAG_SNAP_SCREEN_PX);
+                    snapped = did_snap;
                     if snapped {
                         self.poly_cursor = Some((ix, iy));
                         self.status = "套索已贴到起点 · 松手闭环".into();
@@ -465,7 +468,8 @@ impl MaskToolApp {
                         }
                         self.poly_cursor = Some((ix, iy));
                         if let Some(n) = self.poly_draft.as_ref().map(|d| d.len()) {
-                            self.status = format!("套索轨迹 {n} 点 · 松手闭环").into();
+                            self.status =
+                                format!("套索轨迹 {n} 点 · 松手继续, 拖回起点闭环").into();
                         }
                     }
                 } else {
@@ -476,6 +480,7 @@ impl MaskToolApp {
                     start_x,
                     start_y,
                     freehand,
+                    snapped,
                 });
                 cx.notify();
             }
@@ -762,10 +767,20 @@ impl MaskToolApp {
         // 后台合成完再闪到拖后状态. freeze 留到 `update_base_image`.
         let finished = self.drag.take();
         match finished {
-            Some(DragKind::PolyStroke { freehand, .. }) => {
-                if freehand {
+            Some(DragKind::PolyStroke {
+                freehand, snapped, ..
+            }) => {
+                if freehand && snapped {
                     self.finalize_poly(cx);
                 } else {
+                    if freehand {
+                        if let Some(n) = self.poly_draft.as_ref().map(|d| d.len()) {
+                            self.status = format!(
+                                "套索 {n} 点 · 靠近首点闭环, 或按住拖轨迹 (右键/Esc 取消)"
+                            )
+                            .into();
+                        }
+                    }
                     cx.notify();
                 }
             }
@@ -801,7 +816,7 @@ impl MaskToolApp {
                         x1: sx1.round() as i32,
                         y1: sy1.round() as i32,
                         brush_points: Vec::new(),
-                        brush_radius: 0,
+                        brush_radius: 0.0,
                         color: self.mask_color,
                         poly_points: Vec::new(),
                         opacity: self.mask_opacity,
@@ -824,7 +839,7 @@ impl MaskToolApp {
                     .and_then(|m| m.brush_points.last())
                     .map(|&(_, y)| y);
                 let end_iy = end_sheet_y
-                    .map(|y| self.sheet_to_canvas_xy(0.0, y as f32).1)
+                    .map(|y| self.sheet_to_canvas_xy(0.0, y).1)
                     .unwrap_or(start_iy);
                 let bound_block = self.resolve_bound_block(start_iy, end_iy);
                 if let Some(m) = self.masks.iter_mut().find(|m| m.id == id) {
@@ -1027,7 +1042,6 @@ impl MaskToolApp {
         self.sync_view_lod(cx);
         let render = self.render_image.clone();
         let paint_items = self.overlay_paint_items();
-        let brush_blits = self.sync_brush_sprites();
         let selected = self.selected.clone();
         let img_w = self.img_w;
         let img_h = self.img_h;
@@ -1199,6 +1213,7 @@ impl MaskToolApp {
                         }
                     },
                     move |bounds, _, window, _cx| {
+                        let device_scale = window.scale_factor();
                         let vw = f32::from(bounds.size.width);
                         let vh = f32::from(bounds.size.height);
                         // 拖动分块时用锁定尺寸算缩放, 与鼠标坐标换算同一套,
@@ -1232,6 +1247,7 @@ impl MaskToolApp {
                                 content_scale,
                                 allow_tile_overflow,
                                 &view_detail,
+                                device_scale,
                             );
                         } else if let Some(ref img) = render {
                             let _ = window.paint_image(
@@ -1252,6 +1268,7 @@ impl MaskToolApp {
                                         px((d.h as f32 * xform.scale).max(1.0)),
                                     ),
                                 };
+                                let db = snap_device_bounds(db, device_scale);
                                 let _ = window.paint_image(
                                     db,
                                     Corners::default(),
@@ -1356,45 +1373,23 @@ impl MaskToolApp {
 
                         for item in &paint_items {
                             let m = match item {
-                                OverlayPaint::Brush(id) => {
-                                    if let Some(blits) = brush_blits.get(id) {
-                                        let (cs, hoff, voff) = if masks_are_sheet {
-                                            (
-                                                if content_scale > 0.0001 {
-                                                    content_scale
-                                                } else {
-                                                    1.0
-                                                },
-                                                block_hoff as f32,
-                                                block_voff_paint as f32,
-                                            )
-                                        } else {
-                                            (1.0, 0.0, 0.0)
-                                        };
-                                        for b in blits {
-                                            let ix = hoff + b.x as f32 * cs;
-                                            let iy = voff + b.y as f32 * cs;
-                                            let db = Bounds {
-                                                origin: point(
-                                                    bounds.origin.x
-                                                        + px(xform.origin_x + ix * xform.scale),
-                                                    bounds.origin.y
-                                                        + px(xform.origin_y + iy * xform.scale),
-                                                ),
-                                                size: size(
-                                                    px((b.w as f32 * cs * xform.scale).max(1.0)),
-                                                    px((b.h as f32 * cs * xform.scale).max(1.0)),
-                                                ),
-                                            };
-                                            let _ = window.paint_image(
-                                                db,
-                                                Corners::default(),
-                                                b.tex.clone(),
-                                                0,
-                                                false,
-                                            );
-                                        }
-                                    }
+                                OverlayPaint::Brush(brush) => {
+                                    let (cs, hoff, voff) = if masks_are_sheet {
+                                        (content_scale, block_hoff as f32, block_voff_paint as f32)
+                                    } else {
+                                        (1.0, 0.0, 0.0)
+                                    };
+                                    paint_brush_vector(
+                                        window,
+                                        brush,
+                                        bounds.origin,
+                                        xform.origin_x,
+                                        xform.origin_y,
+                                        xform.scale,
+                                        cs,
+                                        hoff,
+                                        voff,
+                                    );
                                     continue;
                                 }
                                 OverlayPaint::Shape(m) => m,
@@ -1648,6 +1643,25 @@ fn paint_contrast_circle(
     }
 }
 
+fn snap_device_bounds(b: Bounds<Pixels>, device_scale: f32) -> Bounds<Pixels> {
+    let sf = device_scale.max(0.0001);
+    let x0 = f32::from(b.origin.x);
+    let y0 = f32::from(b.origin.y);
+    let x1 = x0 + f32::from(b.size.width);
+    let y1 = y0 + f32::from(b.size.height);
+    let sx0 = (x0 * sf).round() / sf;
+    let sy0 = (y0 * sf).round() / sf;
+    let sx1 = (x1 * sf).round() / sf;
+    let sy1 = (y1 * sf).round() / sf;
+    Bounds {
+        origin: point(px(sx0), px(sy0)),
+        size: size(
+            px((sx1 - sx0).max(1.0 / sf)),
+            px((sy1 - sy0).max(1.0 / sf)),
+        ),
+    }
+}
+
 fn intersect_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>) -> Bounds<Pixels> {
     let x0 = a.origin.x.max(b.origin.x);
     let y0 = a.origin.y.max(b.origin.y);
@@ -1684,6 +1698,7 @@ fn paint_live_block_tiles(
     content_scale: f32,
     allow_overflow: bool,
     details: &[PieceDetail],
+    device_scale: f32,
 ) {
     if tiles.is_empty() {
         return;
@@ -1746,7 +1761,9 @@ fn paint_live_block_tiles(
                     );
                 }
             }
-        } else {
+        } else if !tiles.iter().any(|t| t.transparent_edges) {
+            // 不透明谱面 (扫描件, 或已按墨色垫过的矢量) 的间隙垫白.
+            // 带 alpha 的矢量块没有纸色, 垫白会把透明处画成白底.
             let white = rgb(0xffffff);
             window.paint_quad(quad(
                 img_bounds,
@@ -1790,7 +1807,7 @@ fn paint_live_block_tiles(
             let overlay_w =
                 canvas_s((tile.width as i32 + adj.extra_left + adj.extra_right).max(1) as f32);
             if gap > 0 {
-                if i > 0 {
+                if i > 0 && !tile.transparent_edges {
                     if let Some(prev) = prev_bottom {
                         let top_half = gap / 2;
                         if top_half > 0 {
@@ -1820,7 +1837,7 @@ fn paint_live_block_tiles(
             }
             let span_y = canvas_y(yy as f32);
             let span_h = canvas_s((ext_top + content_h + ext_bottom) as f32);
-            if ext_top > 0 {
+            if ext_top > 0 && !tile.transparent_edges {
                 fill_rect(
                     window,
                     overlay_x,
@@ -1855,11 +1872,14 @@ fn paint_live_block_tiles(
                     );
                     for d in details.iter().filter(|d| d.region_id == tile.region_id) {
                         let _ = window.paint_image(
-                            img_rect(
-                                hx_block + d.x as f32 * cs,
-                                piece_origin_y + d.y as f32 * cs,
-                                d.w as f32 * cs,
-                                d.h as f32 * cs,
+                            snap_device_bounds(
+                                img_rect(
+                                    hx_block + d.x as f32 * cs,
+                                    piece_origin_y + d.y as f32 * cs,
+                                    d.w as f32 * cs,
+                                    d.h as f32 * cs,
+                                ),
+                                device_scale,
                             ),
                             Corners::default(),
                             d.tex.clone(),
@@ -1870,7 +1890,7 @@ fn paint_live_block_tiles(
                 });
             }
             yy += ext_top as i64 + content_h as i64;
-            if ext_bottom > 0 {
+            if ext_bottom > 0 && !tile.transparent_edges {
                 fill_rect(
                     window,
                     overlay_x,
@@ -1881,7 +1901,7 @@ fn paint_live_block_tiles(
                 );
                 yy += ext_bottom as i64;
             }
-            if span_h > 0.5 {
+            if span_h > 0.5 && !tile.transparent_edges {
                 let left_w = ext_l + trim_l;
                 if left_w > 0 {
                     fill_rect(
@@ -1905,7 +1925,11 @@ fn paint_live_block_tiles(
                     );
                 }
             }
-            prev_bottom = Some(tile.bottom_fill);
+            prev_bottom = if tile.transparent_edges {
+                None
+            } else {
+                Some(tile.bottom_fill)
+            };
         }
     });
 }

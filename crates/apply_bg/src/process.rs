@@ -131,19 +131,77 @@ pub fn frame_size(sw: u32, sh: u32, aspect_w: u32, aspect_h: u32) -> (u32, u32) 
     }
 }
 
-/// 底色页面尺寸: 始终按谱面宽度定高 (`宽=谱面宽, 高=宽×比例`).
-/// 谱面再高也不放大页面, 只缩小内部块装进去, 见 [`preview_frame`].
-pub fn page_size(sw: u32, aspect_w: u32, aspect_h: u32) -> (u32, u32) {
-    let sw = sw.max(1);
-    if aspect_w == 0 || aspect_h == 0 {
-        return (sw, 1);
+/// 等比缩放到刚好盖住 `tw×th`. 较短的一边对齐目标, 较长的一边可以超出.
+/// 相对目标更宽时锁高, 更高时锁宽.
+/// 例: 底色 2×1, 目标 20×16 → 32×16 (高对齐, 宽超出).
+pub fn cover_size(bw: u32, bh: u32, tw: u32, th: u32) -> (u32, u32) {
+    let bw = u64::from(bw.max(1));
+    let bh = u64::from(bh.max(1));
+    let tw = u64::from(tw.max(1));
+    let th = u64::from(th.max(1));
+    let ceil_div = |n: u64, d: u64| n.div_ceil(d);
+    if bw * th >= tw * bh {
+        let new_w = ceil_div(bw * th, bh).max(tw);
+        (new_w.min(u64::from(u32::MAX)) as u32, th as u32)
+    } else {
+        let new_h = ceil_div(bh * tw, bw).max(th);
+        (tw as u32, new_h.min(u64::from(u32::MAX)) as u32)
     }
-    let h = ((sw as f64) * (aspect_h as f64) / (aspect_w as f64)).round() as u32;
-    (sw, h.max(1))
 }
 
-/// 完整底色上、按谱面宽与纵横比定下的目标页矩形 `(left, top, w, h)`.
-/// 画布大小只跟谱面宽有关, 跟谱面高无关. 底色装不下该页时返回 `None`.
+/// 把整张底色等比缩放到刚好盖住 `tw×th`. 短边对齐, 长边超出的部分保留.
+pub fn cover_resize(src: &RgbImage, tw: u32, th: u32) -> RgbImage {
+    let (nw, nh) = cover_size(src.width(), src.height(), tw, th);
+    if src.width() == nw && src.height() == nh {
+        return src.clone();
+    }
+    image::imageops::resize(src, nw, nh, image::imageops::FilterType::Lanczos3)
+}
+
+/// 长边超出不超过这么多像素, 就当成宽高比几乎一样, 直接拉齐.
+pub const COVER_ALIGN_PX: u32 = 10;
+/// 长边超出不超过目标边的这个比例, 也直接拉齐. 和 [`COVER_ALIGN_PX`] 取更宽的那个.
+pub const COVER_ALIGN_RATIO: f64 = 0.005;
+
+pub fn cover_align_limit(target_side: u32) -> u32 {
+    let pct = (f64::from(target_side.max(1)) * COVER_ALIGN_RATIO).round() as u32;
+    COVER_ALIGN_PX.max(pct)
+}
+
+/// 等比盖住 `tw×th`. 长边超出在 [`cover_align_limit`] 以内时改成精确的 `tw×th`,
+/// 否则短边对齐, 长边保留超出.
+pub fn cover_target(bw: u32, bh: u32, tw: u32, th: u32) -> (u32, u32) {
+    let tw = tw.max(1);
+    let th = th.max(1);
+    let (nw, nh) = cover_size(bw, bh, tw, th);
+    let over_w = nw.saturating_sub(tw);
+    let over_h = nh.saturating_sub(th);
+    if over_w <= cover_align_limit(tw) && over_h <= cover_align_limit(th) {
+        (tw, th)
+    } else {
+        (nw, nh)
+    }
+}
+
+pub fn cover_target_resize(src: &RgbImage, tw: u32, th: u32) -> RgbImage {
+    let (nw, nh) = cover_target(src.width(), src.height(), tw, th);
+    if src.width() == nw && src.height() == nh {
+        return src.clone();
+    }
+    image::imageops::resize(src, nw, nh, image::imageops::FilterType::Lanczos3)
+}
+
+/// 底色页面就是目标分辨率本身 (`aspect_w×aspect_h`), 不是谱面像素.
+/// 谱面再小也放大到这一页上对齐, 见 [`preview_frame`].
+pub fn page_size(_sw: u32, aspect_w: u32, aspect_h: u32) -> (u32, u32) {
+    if aspect_w == 0 || aspect_h == 0 {
+        return (1, 1);
+    }
+    (aspect_w.max(1), aspect_h.max(1))
+}
+
+/// 完整底色上、按目标分辨率定下的页面矩形 `(left, top, w, h)`.
+/// 画布就是目标分辨率, 跟谱面像素无关. 底色装不下该页时返回 `None`.
 pub fn bg_page_rect(
     bw: u32,
     bh: u32,
@@ -168,12 +226,7 @@ pub fn bg_page_rect(
 }
 
 /// 从完整底色裁出当前谱面宽对应的一页. 盖不住则原样返回.
-pub fn working_bg_copy(
-    bg: RgbImage,
-    aspect_w: u32,
-    aspect_h: u32,
-    sheet_w: u32,
-) -> RgbImage {
+pub fn working_bg_copy(bg: RgbImage, aspect_w: u32, aspect_h: u32, sheet_w: u32) -> RgbImage {
     if sheet_w == 0 {
         return bg;
     }
@@ -254,7 +307,14 @@ fn crop_fast(src: &RgbImage, left: u32, top: u32, w: u32, h: u32) -> RgbImage {
 /// `skip_top_rows`: `src` 最上面这么多行不贴 (让 `dst` 本身在这段的像素
 /// 保留可见), 用于"谱面最前端人为拖出来的留白, 没有真实内容可言, 直接
 /// 露出底色而不是贴一块自己的颜色"的场景, 见 [`composite_preview`]。
-fn overlay_fast(dst: &mut RgbImage, src: &RgbImage, dx: i64, dy: i64, skip_top_rows: u32, skip_bottom_rows: u32) {
+fn overlay_fast(
+    dst: &mut RgbImage,
+    src: &RgbImage,
+    dx: i64,
+    dy: i64,
+    skip_top_rows: u32,
+    skip_bottom_rows: u32,
+) {
     let (dw, dh) = (dst.width() as i64, dst.height() as i64);
     let (sw, sh) = (src.width() as i64, src.height() as i64);
     let skip = (skip_top_rows as i64).min(sh);
@@ -307,25 +367,17 @@ fn overlay_sheet(
     overlay_fast(canvas, &scaled, hoff, dy, 0, 0);
 }
 
-/// 谱面居中叠底色时不含任何手动偏移的"自然"纵向留白 (像素), 即
-/// `composite_and_crop`/`composite_preview` 在 `voff_shift=0` 时会得到的
-/// `voff`. 只依赖谱面/底色尺寸, 不需要像素数据, 可以在每次「组合分块」
-/// 布局 (谱面高度) 变化时重新精确计算, 用来推导应该写入的
-/// `voff_shift`: 按 [`page_size`] 重算. 谱面高于页面时不再放大画布,
-/// 自然留白归零, 内容改为缩小装进页面.
+/// 谱面盖住目标页时, 不含手动偏移的纵向起点 (像素).
+/// 宽对齐且谱面更矮时是垂直居中的上沿; 更高时装进页高, 起点为 0.
 pub fn natural_voff(sw: u32, sh: u32, bw: u32, bh: u32, aspect_w: u32, aspect_h: u32) -> i64 {
     if aspect_w == 0 || aspect_h == 0 {
         return 0;
     }
-    let sw = sw.max(1);
-    let sh = sh.max(1);
-    let (page_w, page_h) = page_size(sw, aspect_w, aspect_h);
-    if bw < page_w || bh < page_h || sh >= page_h {
+    let frame = preview_frame(sw, sh, bw, bh, aspect_w, aspect_h, 0);
+    if !frame.shows_bg {
         return 0;
     }
-    let oy = ((bh - sh) / 2) as i64;
-    let (_, top, _, bottom) = clamp_centered_rect(bw, bh, page_w, page_h);
-    (oy - top).clamp(0, (bottom - top - sh as i64).max(0))
+    frame.voff
 }
 
 /// 蒙版预览画布的几何 (不含任何像素合成).
@@ -342,13 +394,14 @@ pub struct PreviewFrame {
     pub bg_top: u32,
     /// 是否真的叠了底色 (false 时画布就是谱面本身, 不要画底色贴图).
     pub shows_bg: bool,
-    /// 谱面相对页面的缩放. 谱面高于 [`page_size`] 时 < 1, 只缩小内部块,
-    /// 不放大底色页面.
+    /// 谱面相对页面的缩放. 宽对齐目标分辨率; 按宽放大后高出页面时改为装进高度.
+    /// 整段谱都留在画面里. 谱面比目标窄时大于 1.
     pub content_scale: f32,
 }
 
 /// 与 [`composite_preview`] / [`composite_and_crop`] 同一套页面几何,
-/// 只算数字, 不碰像素. 画布始终按 [`page_size`] 定形.
+/// 只算数字, 不碰像素. 画布就是目标分辨率. 和蒙版一样按宽对齐:
+/// 谱面宽拉到页面宽, 矮于页面时垂直居中; 更高时缩小装进页高, 不裁谱.
 pub fn preview_frame(
     sw: u32,
     sh: u32,
@@ -373,28 +426,21 @@ pub fn preview_frame(
     if aspect_w == 0 || aspect_h == 0 {
         return fallback;
     }
-    let Some((bg_left, bg_top, canvas_w, canvas_h)) =
-        bg_page_rect(bw, bh, aspect_w, aspect_h, sw)
+    let Some((bg_left, bg_top, canvas_w, canvas_h)) = bg_page_rect(bw, bh, aspect_w, aspect_h, sw)
     else {
         return fallback;
     };
-    let content_scale = if sh > canvas_h {
-        canvas_h as f32 / sh as f32
+    let scale_w = canvas_w as f32 / sw as f32;
+    let content_scale = if (sh as f32) * scale_w <= canvas_h as f32 {
+        scale_w
     } else {
-        1.0
+        canvas_h as f32 / sh as f32
     };
     let disp_w = ((sw as f32) * content_scale).round() as i64;
     let disp_h = ((sh as f32) * content_scale).round() as i64;
-    let hoff = ((canvas_w as i64 - disp_w) / 2).max(0);
-    let vmax = (canvas_h as i64 - disp_h).max(0);
-    let voff = if content_scale < 1.0 {
-        // 缩小后的谱面刚好装满页面高度; 顶端/底端留白靠透明区露出底色,
-        // 不再用负 voff 把内容推出页面裁掉.
-        0
-    } else {
-        let oy = ((bh as i64) - sh as i64) / 2;
-        (oy - bg_top as i64 + voff_shift).clamp(0, vmax)
-    };
+    let hoff = (canvas_w as i64 - disp_w) / 2;
+    let span = canvas_h as i64 - disp_h;
+    let voff = (span / 2 + voff_shift).clamp(span.min(0), span.max(0));
     PreviewFrame {
         canvas_w,
         canvas_h,
@@ -432,7 +478,9 @@ pub fn composite_and_crop(
     let (bw, bh) = bg.dimensions();
     let (page_w, page_h) = page_size(sw, aspect_w, aspect_h);
     if bw < page_w || bh < page_h {
-        return Err(format!("底色 ({bw}x{bh}) 无法完全盖住页面 ({page_w}x{page_h})"));
+        return Err(format!(
+            "底色 ({bw}x{bh}) 无法完全盖住页面 ({page_w}x{page_h})"
+        ));
     }
 
     let frame = preview_frame(sw, sh, bw, bh, aspect_w, aspect_h, voff_shift);
@@ -446,7 +494,13 @@ pub fn composite_and_crop(
     {
         bg.clone()
     } else {
-        crop_fast(bg, frame.bg_left, frame.bg_top, frame.canvas_w, frame.canvas_h)
+        crop_fast(
+            bg,
+            frame.bg_left,
+            frame.bg_top,
+            frame.canvas_w,
+            frame.canvas_h,
+        )
     };
     overlay_sheet(
         &mut canvas,
@@ -482,7 +536,13 @@ pub fn composite_preview(
         return Ok((sheet.clone(), 0, 0));
     }
 
-    let mut canvas = crop_fast(bg, frame.bg_left, frame.bg_top, frame.canvas_w, frame.canvas_h);
+    let mut canvas = crop_fast(
+        bg,
+        frame.bg_left,
+        frame.bg_top,
+        frame.canvas_w,
+        frame.canvas_h,
+    );
     overlay_sheet(
         &mut canvas,
         sheet,
@@ -618,8 +678,8 @@ pub fn process_folder(
         )));
     }
 
-    let files = list_images(in_dir)
-        .map_err(|e| ProcessError::folder(format!("无法读取目录: {e}")))?;
+    let files =
+        list_images(in_dir).map_err(|e| ProcessError::folder(format!("无法读取目录: {e}")))?;
     if files.is_empty() {
         return Err(ProcessError::folder("输入目录没有图片."));
     }
@@ -697,37 +757,53 @@ mod tests {
     }
 
     #[test]
-    fn page_size_is_width_based() {
-        assert_eq!(page_size(2000, 16, 9), (2000, 1125));
-        assert_eq!(page_size(2000, 2560, 1440), (2000, 1125));
-        assert_eq!(page_size(1920, 16, 9), (1920, 1080));
+    fn page_size_is_the_target_resolution() {
+        assert_eq!(page_size(2000, 2560, 1440), (2560, 1440));
+        assert_eq!(page_size(595, 2560, 1440), (2560, 1440));
+        assert_eq!(page_size(1920, 1920, 1080), (1920, 1080));
     }
 
     #[test]
-    fn composite_contain_matches_page_size() {
+    fn short_sheet_width_aligns_to_the_target() {
+        let bg = solid(2560, 1440, 10, 20, 30);
+        let sheet = solid(1600, 400, 200, 200, 200);
+        let frame = preview_frame(1600, 400, 2560, 1440, 2560, 1440, 0);
+        assert_eq!((frame.canvas_w, frame.canvas_h), (2560, 1440));
+        assert!((frame.content_scale - 2560.0 / 1600.0).abs() < 1e-4);
+        assert_eq!(frame.hoff, 0);
+        assert!(frame.voff > 0);
+        let out = composite_and_crop(&sheet, &bg, 2560, 1440, 0, 0, 0).unwrap();
+        assert_eq!(out.dimensions(), (2560, 1440));
+        assert_eq!(*out.get_pixel(0, 0), Rgb([10, 20, 30]));
+        assert_eq!(*out.get_pixel(0, frame.voff as u32), Rgb([200, 200, 200]));
+        assert_eq!(*out.get_pixel(2559, frame.voff as u32), Rgb([200, 200, 200]));
+    }
+
+    #[test]
+    fn composite_width_align_matches_page_size() {
         let bg = solid(8000, 8000, 10, 20, 30);
         let wide = solid(2000, 400, 200, 200, 200);
         let tall = solid(2000, 2500, 200, 200, 200);
-        let out_w = composite_and_crop(&wide, &bg, 16, 9, 0, 0, 0).unwrap();
-        let out_t = composite_and_crop(&tall, &bg, 16, 9, 0, 0, 0).unwrap();
-        assert_eq!(out_w.dimensions(), (2000, 1125));
-        // 高谱不再放大页面, 画布锁在按宽定高的尺寸, 内部块缩小装进去.
-        assert_eq!(out_t.dimensions(), (2000, 1125));
-        let (pw, hoff_w, voff_w) = composite_preview(&wide, &bg, 16, 9, 0, 0, 0).unwrap();
-        let (pt, hoff_t, voff_t) = composite_preview(&tall, &bg, 16, 9, 0, 0, 0).unwrap();
+        let out_w = composite_and_crop(&wide, &bg, 2560, 1440, 0, 0, 0).unwrap();
+        let out_t = composite_and_crop(&tall, &bg, 2560, 1440, 0, 0, 0).unwrap();
+        assert_eq!(out_w.dimensions(), (2560, 1440));
+        assert_eq!(out_t.dimensions(), (2560, 1440));
+        let (pw, hoff_w, voff_w) = composite_preview(&wide, &bg, 2560, 1440, 0, 0, 0).unwrap();
+        let (pt, hoff_t, voff_t) = composite_preview(&tall, &bg, 2560, 1440, 0, 0, 0).unwrap();
         assert_eq!(pw.dimensions(), out_w.dimensions());
         assert_eq!(pt.dimensions(), out_t.dimensions());
         assert_eq!(hoff_w, 0);
         assert!(voff_w > 0);
         assert!(hoff_t > 0);
         assert_eq!(voff_t, 0);
-        // 页面四角仍是底色; 缩小后的谱面水平居中, 从顶端贴齐.
+        assert_eq!(*pw.get_pixel(0, 0), Rgb([10, 20, 30]));
+        assert_eq!(*pw.get_pixel(0, voff_w as u32), Rgb([200, 200, 200]));
         assert_eq!(*pt.get_pixel(0, 0), Rgb([10, 20, 30]));
         assert_eq!(*pt.get_pixel(hoff_t as u32, 0), Rgb([200, 200, 200]));
-        let frame_t = preview_frame(2000, 2500, 8000, 8000, 16, 9, 0);
-        assert!(frame_t.content_scale < 1.0);
-        assert!((frame_t.content_scale - 1125.0 / 2500.0).abs() < 1e-6);
-        assert_eq!((frame_t.canvas_w, frame_t.canvas_h), (2000, 1125));
+        let frame_w = preview_frame(2000, 400, 8000, 8000, 2560, 1440, 0);
+        assert!((frame_w.content_scale - 2560.0 / 2000.0).abs() < 1e-6);
+        let frame_t = preview_frame(2000, 2500, 8000, 8000, 2560, 1440, 0);
+        assert!((frame_t.content_scale - 1440.0 / 2500.0).abs() < 1e-6);
     }
 
     #[test]
@@ -747,19 +823,18 @@ mod tests {
     }
 
     #[test]
-    fn voff_shift_moves_sheet_up_past_padding() {
+    fn voff_shift_moves_sheet_up_within_the_page() {
         let bg = solid(8000, 8000, 10, 20, 30);
         let wide = solid(2000, 400, 200, 200, 200);
-        let (_, _, voff0) = composite_preview(&wide, &bg, 16, 9, 0, 0, 0).unwrap();
+        let (_, _, voff0) = composite_preview(&wide, &bg, 2560, 1440, 0, 0, 0).unwrap();
         assert!(voff0 > 0);
-        // 负偏移把谱面往上挪, 在合理范围内应该精确生效.
-        let (_, _, voff_up) = composite_preview(&wide, &bg, 16, 9, -10, 0, 0).unwrap();
+        let (_, _, voff_up) = composite_preview(&wide, &bg, 2560, 1440, -10, 0, 0).unwrap();
         assert_eq!(voff_up, voff0 - 10);
-        // 超过居中留白后钳制在 0, 不再把内容推出页面顶端.
-        let (_, _, voff_past) = composite_preview(&wide, &bg, 16, 9, -(voff0 + 100), 0, 0).unwrap();
+        let (_, _, voff_past) =
+            composite_preview(&wide, &bg, 2560, 1440, -(voff0 + 100), 0, 0).unwrap();
         assert_eq!(voff_past, 0);
-        let out = composite_and_crop(&wide, &bg, 16, 9, -(voff0 + 100), 0, 0).unwrap();
-        assert_eq!(out.dimensions(), composite_and_crop(&wide, &bg, 16, 9, 0, 0, 0).unwrap().dimensions());
+        let out = composite_and_crop(&wide, &bg, 2560, 1440, -(voff0 + 100), 0, 0).unwrap();
+        assert_eq!(out.dimensions(), (2560, 1440));
     }
 
     #[test]
@@ -798,26 +873,38 @@ mod tests {
                 wide.put_pixel(x, y, image::Rgb([255, 255, 255]));
             }
         }
-        let (with_skip, _, voff) = composite_preview(&wide, &bg, 16, 9, 0, 20, 0).unwrap();
-        assert_eq!(*with_skip.get_pixel(0, voff as u32), image::Rgb([10, 20, 30]));
-        assert_eq!(*with_skip.get_pixel(0, voff as u32 + 19), image::Rgb([10, 20, 30]));
+        let (with_skip, _, voff) = composite_preview(&wide, &bg, 2000, 400, 0, 20, 0).unwrap();
+        assert_eq!(
+            *with_skip.get_pixel(0, voff as u32),
+            image::Rgb([10, 20, 30])
+        );
+        assert_eq!(
+            *with_skip.get_pixel(0, voff as u32 + 19),
+            image::Rgb([10, 20, 30])
+        );
         // 跳过的行数之后, 谱面自己的内容 (200,200,200) 照常显示.
-        assert_eq!(*with_skip.get_pixel(0, voff as u32 + 20), image::Rgb([200, 200, 200]));
+        assert_eq!(
+            *with_skip.get_pixel(0, voff as u32 + 20),
+            image::Rgb([200, 200, 200])
+        );
         // 不跳过时该处仍是谱面自带的纯白.
-        let (no_skip, _, voff2) = composite_preview(&wide, &bg, 16, 9, 0, 0, 0).unwrap();
+        let (no_skip, _, voff2) = composite_preview(&wide, &bg, 2000, 400, 0, 0, 0).unwrap();
         assert_eq!(voff2, voff);
-        assert_eq!(*no_skip.get_pixel(0, voff2 as u32), image::Rgb([255, 255, 255]));
+        assert_eq!(
+            *no_skip.get_pixel(0, voff2 as u32),
+            image::Rgb([255, 255, 255])
+        );
     }
 
     #[test]
     fn natural_voff_handles_aspect_regime_crossing_exactly() {
-        // sw 固定, sh 跨越 page_h 分界点前后: 越过分界点后不再放大页面,
-        // 自然留白归零, 内容改为缩小装进页面.
+        // 宽对齐后仍矮于页面时有留白; 刚好顶满或更高时留白归零, 改为缩小.
         let sw = 2000u32;
-        let h_from_w = ((sw as f64) * 9.0 / 16.0).round() as u32;
-        let just_before = natural_voff(sw, h_from_w - 10, 8000, 8000, 16, 9);
-        let at_boundary = natural_voff(sw, h_from_w, 8000, 8000, 16, 9);
-        let just_after = natural_voff(sw, h_from_w + 10, 8000, 8000, 16, 9);
+        let page_h = 1440u32;
+        let fit_h = ((page_h as f64) * (sw as f64) / 2560.0).round() as u32;
+        let just_before = natural_voff(sw, fit_h - 10, 8000, 8000, 2560, 1440);
+        let at_boundary = natural_voff(sw, fit_h, 8000, 8000, 2560, 1440);
+        let just_after = natural_voff(sw, fit_h + 10, 8000, 8000, 2560, 1440);
         assert!(just_before > 0);
         assert_eq!(at_boundary, 0);
         assert_eq!(just_after, 0);
@@ -842,9 +929,67 @@ mod tests {
     }
 
     #[test]
+    fn cover_size_locks_the_shorter_side_so_the_image_covers() {
+        assert_eq!(cover_size(2, 1, 20, 16), (32, 16));
+        assert_eq!(cover_size(1, 2, 20, 16), (20, 40));
+        assert_eq!(cover_size(20, 16, 20, 16), (20, 16));
+        assert_eq!(cover_size(2000, 1000, 2560, 1440), (2880, 1440));
+    }
+
+    #[test]
+    fn cover_aligns_the_short_side_and_lets_the_long_side_overflow() {
+        // 月光下的德累斯顿.png 是 1422×800, 比 2560×1440 略高. 等比只高出 1 像素, 直接拉齐.
+        assert_eq!(cover_size(1422, 800, 2560, 1440), (2560, 1441));
+        assert_eq!(cover_target(1422, 800, 2560, 1440), (2560, 1440));
+        let almost = cover_target_resize(&solid(1422, 800, 8, 16, 24), 2560, 1440);
+        assert_eq!(almost.dimensions(), (2560, 1440));
+        // 更宽的图: 高对齐 1440, 宽超出 320, 留下.
+        assert_eq!(cover_target(2000, 1000, 2560, 1440), (2880, 1440));
+        // 高出 10 像素仍拉齐; 高出 11 像素留下.
+        assert_eq!(cover_target(2560, 1450, 2560, 1440), (2560, 1440));
+        assert_eq!(cover_target(2560, 1451, 2560, 1440), (2560, 1451));
+        // 大目标上 0.5% 比 10 像素宽: 超出 15 拉齐, 超出 25 留下.
+        assert_eq!(cover_target(4015, 2000, 4000, 2000), (4000, 2000));
+        assert_eq!(cover_target(4025, 2000, 4000, 2000), (4025, 2000));
+        // 反色.pdf 的页面像素不再决定成片. 成片就是目标分辨率.
+        assert_eq!(page_size(1785, 2560, 1440), (2560, 1440));
+    }
+
+    #[test]
+    fn dresden_png_covers_default_target() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../月光下的德累斯顿.png");
+        if !path.is_file() {
+            return;
+        }
+        let file = std::fs::File::open(&path).unwrap();
+        let img = image::ImageReader::new(std::io::BufReader::new(file))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
+            .into_rgb8();
+        assert_eq!(img.dimensions(), (1422, 800));
+        assert_eq!(
+            cover_target_resize(&img, 2560, 1440).dimensions(),
+            (2560, 1440)
+        );
+        let (w, h) = cover_target(img.width(), img.height(), 2560, 1440);
+        assert!(bg_page_rect(w, h, 2560, 1440, 595).is_some());
+        assert!(bg_page_rect(img.width(), img.height(), 2560, 1440, 595).is_none());
+    }
+
+    #[test]
+    fn small_widescreen_covers_the_page_instead_of_the_aspect_numbers() {
+        let (nw, nh) = cover_target(1422, 800, 2560, 1440);
+        assert_eq!((nw, nh), (2560, 1440));
+        let scaled = cover_target_resize(&solid(1422, 800, 8, 16, 24), 2560, 1440);
+        assert_eq!(scaled.dimensions(), (nw, nh));
+    }
+
+    #[test]
     fn crop_bg_to_page_rejects_undersized_bg() {
         let bg = solid(100, 50, 10, 20, 30);
-        assert!(crop_bg_to_page(&bg, 16, 9, 200).is_none());
-        assert!(bg_page_rect(100, 50, 16, 9, 200).is_none());
+        assert!(crop_bg_to_page(&bg, 2560, 1440, 200).is_none());
+        assert!(bg_page_rect(100, 50, 2560, 1440, 200).is_none());
     }
 }

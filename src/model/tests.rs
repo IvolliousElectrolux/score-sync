@@ -14,6 +14,7 @@ fn stub_page(h: u32) -> Page {
         img_w: 80,
         img_h: h,
         regions: HashMap::new(),
+        vector: None,
     }
 }
 
@@ -551,14 +552,14 @@ fn global_guides_switch_uses_precomputed_defaults_and_can_turn_off() {
 
 #[test]
 fn render_final_mask_stays_on_scaled_stain() {
-    // 高谱面会缩小装进 16:9 页面. 蒙版按编辑器习惯存在「预览画布 − 偏移」
+    // 小谱面要放大盖住目标页. 蒙版按编辑器习惯存在「预览画布 − 偏移」
     // 坐标系; 终稿先除以 content_scale 盖到未缩放拼合图, 再等比合成.
     let mut doc = DocState::new();
-    doc.bg_aspect_w = 16;
-    doc.bg_aspect_h = 9;
+    doc.bg_aspect_w = 2560;
+    doc.bg_aspect_h = 1440;
     let sw = 200u32;
     let sh = 250u32;
-    let stain = (100u32, 200u32);
+    let stain = (100u32, 100u32);
     let mut sheet = image::RgbImage::from_pixel(sw, sh, image::Rgb([180, 180, 180]));
     sheet.put_pixel(stain.0, stain.1, image::Rgb([255, 0, 0]));
     let mut page = stub_page(sh);
@@ -585,13 +586,13 @@ fn render_final_mask_stays_on_scaled_stain() {
     });
     doc.bg_enabled = true;
     doc.bg_image = Some(Arc::new(image::RgbImage::from_pixel(
-        800,
-        800,
+        2560,
+        1440,
         image::Rgb([10, 20, 30]),
     )));
 
     let frame = doc.group_preview_frame("g1").unwrap();
-    assert!(frame.content_scale < 1.0);
+    assert!(frame.content_scale > 1.0);
     let stored_x = ((stain.0 as f32) * frame.content_scale).round() as i32;
     let stored_y = ((stain.1 as f32) * frame.content_scale).round() as i32;
     doc.set_group_masks(
@@ -603,7 +604,7 @@ fn render_final_mask_stays_on_scaled_stain() {
             x1: stored_x + 2,
             y1: stored_y + 2,
             brush_points: Vec::new(),
-            brush_radius: 0,
+            brush_radius: 0.0,
             color: [255, 255, 255],
             poly_points: Vec::new(),
             opacity: 1.0,
@@ -621,10 +622,15 @@ fn render_final_mask_stays_on_scaled_stain() {
     );
     // 旧实现会把蒙版打在未缩放拼合图的 (stored_x, stored_y), 缩小后
     // 出现在更靠近原点处; 那里应仍是谱面灰, 不是白块.
-    let ghost_x = (frame.hoff as f32 + stored_x as f32 * frame.content_scale).round() as u32;
-    let ghost_y = (frame.voff as f32 + stored_y as f32 * frame.content_scale).round() as u32;
-    if ghost_x != cx || ghost_y != cy {
-        let ghost = out.get_pixel(ghost_x, ghost_y);
+    let ghost_x = (frame.hoff as f32 + stored_x as f32 * frame.content_scale).round() as i64;
+    let ghost_y = (frame.voff as f32 + stored_y as f32 * frame.content_scale).round() as i64;
+    if ghost_x >= 0
+        && ghost_y >= 0
+        && (ghost_x as u32) < out.width()
+        && (ghost_y as u32) < out.height()
+        && (ghost_x as u32 != cx || ghost_y as u32 != cy)
+    {
+        let ghost = out.get_pixel(ghost_x as u32, ghost_y as u32);
         assert!(
             ghost[0] < 220,
             "旧偏移位置不该被蒙上, 得到 {ghost:?} at ({ghost_x},{ghost_y})"
@@ -642,7 +648,7 @@ fn remap_masks_shifts_only_below_block() {
             x1: 4,
             y1: 20,
             brush_points: vec![],
-            brush_radius: 0,
+            brush_radius: 0.0,
             color: [255, 255, 255],
             poly_points: vec![],
             opacity: 1.0,
@@ -655,7 +661,7 @@ fn remap_masks_shifts_only_below_block() {
             x1: 4,
             y1: 90,
             brush_points: vec![],
-            brush_radius: 0,
+            brush_radius: 0.0,
             color: [255, 255, 255],
             poly_points: vec![],
             opacity: 1.0,

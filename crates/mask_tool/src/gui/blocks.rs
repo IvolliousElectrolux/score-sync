@@ -29,10 +29,19 @@ pub struct BlockTile {
     pub top_fill: [u8; 3],
     pub bottom_fill: [u8; 3],
     pub source: Option<PieceDisk>,
+    /// 间隙和左右补边不铺色, 让底下的底色透出来.
+    pub transparent_edges: bool,
 }
+
+/// 分块局部 `(x, y, w, h)` 按逻辑尺寸光栅成 `tex_w × tex_h` 的 RGBA.
+/// 矢量页用它按视口重渲, 不从磁盘位图裁.
+pub type PieceRaster = std::sync::Arc<
+    dyn Fn(u32, u32, u32, u32, u32, u32) -> Option<image::RgbaImage> + Send + Sync,
+>;
 
 /// 分块原图像素在磁盘上的位置. `flat` 时文件本身就是这块;
 /// 否则是整页, 条带为 `[band_y, band_y+band_h)`.
+/// `raster` 有值时放大不再受 1 逻辑像素 = 1 贴图像素限制.
 #[derive(Clone)]
 pub struct PieceDisk {
     pub path: std::path::PathBuf,
@@ -41,6 +50,7 @@ pub struct PieceDisk {
     pub page_h: u32,
     pub band_y: u32,
     pub band_h: u32,
+    pub raster: Option<PieceRaster>,
 }
 
 impl BlockTile {
@@ -72,6 +82,32 @@ impl BlockTile {
             top_fill: mean_to_u8(stats.top.0),
             bottom_fill: mean_to_u8(stats.bottom.0),
             source,
+            transparent_edges: false,
+        }
+    }
+
+    /// 带 alpha 的分块. `thumb_pad` 只给滴管用的不透明缩略图, 不进 GPU 贴图.
+    pub fn from_rgba_piece(
+        region_id: String,
+        rgba: &image::RgbaImage,
+        logical_w: u32,
+        logical_h: u32,
+        stats: crate::layout::PieceStats,
+        source: Option<PieceDisk>,
+        transparent_edges: bool,
+        thumb_pad: [u8; 3],
+    ) -> Self {
+        let (thumb, image) = rgba_to_thumb_and_render(rgba, thumb_pad);
+        Self {
+            region_id,
+            image,
+            thumb,
+            width: logical_w.max(1),
+            height: logical_h.max(1),
+            top_fill: mean_to_u8(stats.top.0),
+            bottom_fill: mean_to_u8(stats.bottom.0),
+            source,
+            transparent_edges,
         }
     }
 }
@@ -329,6 +365,59 @@ fn area_average(
         }
     }
     out
+}
+
+pub fn rgba_to_render_image_capped(rgba: &image::RgbaImage, max_side: u32) -> Arc<RenderImage> {
+    let (w, h) = rgba.dimensions();
+    if max_side > 0 && w.max(h) > max_side {
+        let (tw, th) = gpu_scaled_dims(w, h, max_side);
+        let scaled = image::imageops::thumbnail(rgba, tw, th);
+        return rgba_to_render_image_raw(&scaled);
+    }
+    rgba_to_render_image_raw(rgba)
+}
+
+fn rgba_to_thumb_and_render(
+    rgba: &image::RgbaImage,
+    pad: [u8; 3],
+) -> (Arc<image::RgbImage>, Arc<RenderImage>) {
+    let (w, h) = rgba.dimensions();
+    let src = if w.max(h) > GPU_TEX_MAX_SIDE {
+        let (tw, th) = gpu_scaled_dims(w, h, GPU_TEX_MAX_SIDE);
+        image::imageops::thumbnail(rgba, tw, th)
+    } else {
+        rgba.clone()
+    };
+    let thumb = Arc::new(flatten_rgba_pad(&src, pad));
+    let image = rgba_to_render_image_raw(&src);
+    (thumb, image)
+}
+
+fn flatten_rgba_pad(src: &image::RgbaImage, pad: [u8; 3]) -> image::RgbImage {
+    let mut out = image::RgbImage::new(src.width(), src.height());
+    for (d, s) in out.pixels_mut().zip(src.pixels()) {
+        let a = s[3] as f32 / 255.0;
+        *d = image::Rgb([
+            (s[0] as f32 * a + pad[0] as f32 * (1.0 - a)).round() as u8,
+            (s[1] as f32 * a + pad[1] as f32 * (1.0 - a)).round() as u8,
+            (s[2] as f32 * a + pad[2] as f32 * (1.0 - a)).round() as u8,
+        ]);
+    }
+    out
+}
+
+fn rgba_to_render_image_raw(rgba: &image::RgbaImage) -> Arc<RenderImage> {
+    let (w, h) = rgba.dimensions();
+    let src = rgba.as_raw();
+    let mut buf = vec![0u8; src.len()];
+    for (s, d) in src.chunks_exact(4).zip(buf.chunks_exact_mut(4)) {
+        d[0] = s[2];
+        d[1] = s[1];
+        d[2] = s[0];
+        d[3] = s[3];
+    }
+    let img = image::RgbaImage::from_raw(w, h, buf).expect("rgba buffer size matches w*h*4");
+    Arc::new(RenderImage::new(smallvec![Frame::new(img)]))
 }
 
 fn rgb_to_render_image_raw(rgb: &image::RgbImage) -> Arc<RenderImage> {
@@ -738,7 +827,7 @@ impl MaskToolApp {
         }
     }
 
-    /// 底色页在谱面坐标里的高度; 无底色 / 无比例时为 0 (没有页面锁).
+    /// 底色页在谱面坐标里的高度 (宽对齐时刚好顶满页高). 无底色时为 0.
     fn page_lock_height(&self) -> i32 {
         let Some(bg) = self.block_bg.as_ref() else {
             return 0;
@@ -746,8 +835,15 @@ impl MaskToolApp {
         if bg.aspect_w == 0 || bg.aspect_h == 0 {
             return 0;
         }
-        let sw = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1);
-        apply_bg::process::page_size(sw, bg.aspect_w, bg.aspect_h).1 as i32
+        let sw = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1).max(1) as i64;
+        let aw = bg.aspect_w.max(1) as i64;
+        let ah = bg.aspect_h.max(1) as i64;
+        ((ah * sw + aw / 2) / aw).max(1) as i32
+    }
+
+    fn sheet_from_canvas(&self, canvas: i64) -> i32 {
+        let cs = self.content_scale_or_1();
+        ((canvas as f32) / cs).round() as i32
     }
 
     /// 谱面在画布上的横向范围 (已叠加 `block_hoff` / `content_scale`).
@@ -825,12 +921,12 @@ impl MaskToolApp {
         )
     }
 
-    pub(super) fn canvas_radius_to_sheet(&self, r: i32) -> i32 {
+    pub(super) fn canvas_radius_to_sheet(&self, r: f32) -> f32 {
         if !self.masks_are_sheet {
-            return r.max(1);
+            return r.max(0.05);
         }
         let cs = self.content_scale_or_1();
-        ((r as f32) / cs).round().max(1.0) as i32
+        (r / cs).max(0.05)
     }
 
     /// 拖动分块导致拼合图总高 (罕见情况下总宽) 变化时, 底色合成居中的
@@ -850,7 +946,6 @@ impl MaskToolApp {
         for m in &mut self.masks {
             m.translate(sdx, sdy);
         }
-        self.nudge_brush_sprites(sdx, sdy);
     }
 
     /// 组内各块在当前画布坐标系下 (已叠加 `block_voff` / `content_scale`)
@@ -908,7 +1003,6 @@ impl MaskToolApp {
             return;
         }
         let old_spans = layout::compute_spans(&self.block_heights, old_layout);
-        let mut nudges = Vec::new();
         for m in &mut self.masks {
             let target = m
                 .bound_block
@@ -925,14 +1019,8 @@ impl MaskToolApp {
             if let Some(rid) = target {
                 if let Some(&(dx, dy)) = deltas.get(&rid) {
                     m.translate(dx, dy);
-                    if m.is_brush() {
-                        nudges.push((m.id.clone(), dx, dy));
-                    }
                 }
             }
-        }
-        for (id, dx, dy) in nudges {
-            self.nudge_brush_sprite(&id, dx, dy);
         }
     }
 
@@ -1085,7 +1173,7 @@ impl MaskToolApp {
             start_ix: ix,
             start_iy: iy,
             start_layout: self.block_layout.clone(),
-            start_voff: self.block_voff.max(0).min(i32::MAX as i64) as i32,
+            start_voff: self.sheet_from_canvas(self.block_voff),
             horizontal,
             undid: false,
         });
@@ -1102,7 +1190,7 @@ impl MaskToolApp {
             region_id,
             start_iy: iy,
             start_layout: self.block_layout.clone(),
-            start_voff: self.block_voff.max(0).min(i32::MAX as i64) as i32,
+            start_voff: self.sheet_from_canvas(self.block_voff),
             max_trim: (orig_h as i32 - 1).max(0),
             undid: false,
         });
@@ -1119,7 +1207,7 @@ impl MaskToolApp {
             region_id,
             start_iy: iy,
             start_layout: self.block_layout.clone(),
-            start_voff: self.block_voff.max(0).min(i32::MAX as i64) as i32,
+            start_voff: self.sheet_from_canvas(self.block_voff),
             max_trim: (orig_h as i32 - 1).max(0),
             undid: false,
         });
@@ -1494,7 +1582,7 @@ mod gpu_tex_tests {
     #[test]
     fn from_full_rejects_undersized_bg() {
         let bg = RgbImage::from_pixel(50, 50, image::Rgb([10, 20, 30]));
-        assert!(BlockBgTile::from_full(&bg, 16, 9, 200).is_none());
+        assert!(BlockBgTile::from_full(&bg, 2560, 1440, 200).is_none());
     }
 
     #[test]

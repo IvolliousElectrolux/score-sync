@@ -129,6 +129,36 @@ impl ViewLod {
         }
     }
 
+    /// 宽高乘同一倍率, 超限时一起缩小. 分开封顶会把乐谱横条拉变形.
+    pub fn uniform_tex(w: f32, h: f32, scale: f32, max_side: f32) -> (u32, u32) {
+        let mut tw = (w.max(0.5) * scale.max(0.0001)).max(1.0);
+        let mut th = (h.max(0.5) * scale.max(0.0001)).max(1.0);
+        let m = tw.max(th);
+        if max_side > 1.0 && m > max_side {
+            let k = max_side / m;
+            tw *= k;
+            th *= k;
+        }
+        (tw.round().max(1.0) as u32, th.round().max(1.0) as u32)
+    }
+
+    /// 矢量页放大时贴图像素可以超过 point 尺寸, 否则五线会被 1 point = 1 像素卡住.
+    pub fn compute_sharp(
+        xform: &ViewXform,
+        view_w: f32,
+        view_h: f32,
+        img_w: u32,
+        img_h: u32,
+        pad: f32,
+    ) -> Self {
+        let mut lod = Self::compute(xform, view_w, view_h, img_w, img_h, pad);
+        let cap = xform.scale.max(0.0001);
+        let (tw, th) = Self::uniform_tex(lod.w as f32, lod.h as f32, cap, 4096.0);
+        lod.tex_w = tw;
+        lod.tex_h = th;
+        lod
+    }
+
     #[cfg(test)]
     pub fn is_full_page(&self, img_w: u32, img_h: u32) -> bool {
         self.x == 0 && self.y == 0 && self.w >= img_w && self.h >= img_h
@@ -696,6 +726,7 @@ impl ScoreSyncApp {
                         }
                     },
                     move |bounds, _, window, _cx| {
+                        let device_scale = window.scale_factor();
                         let vw = f32::from(bounds.size.width);
                         let vh = f32::from(bounds.size.height);
                         let xform = ViewXform::compute(
@@ -735,6 +766,7 @@ impl ScoreSyncApp {
                                     xform.image_rect_to_screen(lod.x as i32, lod.y as i32, x1, y1);
                                 b.origin.x = bounds.origin.x + b.origin.x;
                                 b.origin.y = bounds.origin.y + b.origin.y;
+                                let b = snap_device_bounds(b, device_scale);
                                 let _ = window.paint_image(
                                     b,
                                     gpui::Corners::default(),
@@ -853,6 +885,22 @@ impl ScoreSyncApp {
                         .child("加载中…"),
                 )
             })
+    }
+}
+
+fn snap_device_bounds(b: Bounds<Pixels>, device_scale: f32) -> Bounds<Pixels> {
+    let sf = device_scale.max(0.0001);
+    let x0 = f32::from(b.origin.x);
+    let y0 = f32::from(b.origin.y);
+    let x1 = x0 + f32::from(b.size.width);
+    let y1 = y0 + f32::from(b.size.height);
+    let sx0 = (x0 * sf).round() / sf;
+    let sy0 = (y0 * sf).round() / sf;
+    let sx1 = (x1 * sf).round() / sf;
+    let sy1 = (y1 * sf).round() / sf;
+    Bounds {
+        origin: point(px(sx0), px(sy0)),
+        size: size(px((sx1 - sx0).max(1.0 / sf)), px((sy1 - sy0).max(1.0 / sf))),
     }
 }
 

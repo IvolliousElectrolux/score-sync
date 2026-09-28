@@ -575,7 +575,17 @@ fn scale_for_page(scales: &[(f32, f32)], index: usize) -> (f32, f32) {
     (DEFAULT_PDF_SCALE, DEFAULT_PDF_SCALE)
 }
 
-/// PDF 逐页渲染到临时 PNG; 每完成一页回调 `(index0, total, path)`.
+/// 导入一页的结果. 矢量页不落整页文档 PNG, 只带几何和一张可丢弃的预览.
+pub enum StreamedPdfPage {
+    Raster(PathBuf),
+    Vector {
+        source: crate::vector_page::VectorSource,
+        preview_png: PathBuf,
+        no_staff: bool,
+    },
+}
+
+/// PDF 逐页处理; 每完成一页回调 `(原页 index0, total, 结果)`.
 /// `scales` 与页一一对应为 `(scale_x, scale_y)`; 长度为 1 时套用到每一页;
 /// 空则用 [DEFAULT_PDF_SCALE].
 /// `pages` 为 1-based 页码; 空则导入全部页.
@@ -588,7 +598,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
     scales: &[(f32, f32)],
     pages: &[u32],
     mut should_continue: impl FnMut() -> bool,
-    mut on_page: impl FnMut(usize, usize, PathBuf),
+    mut on_page: impl FnMut(usize, usize, StreamedPdfPage),
 ) -> Result<usize, crate::error::Error> {
     crate::trace::log(&format!("pdf: 开始打开 {}", pdf_path.display()));
     let pdfium = bind_pdfium()?;
@@ -610,6 +620,9 @@ pub fn pdf_pages_to_tmp_images_streaming(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("pdf");
+    let session_pdf = tmp_dir.join(format!("{stem}.pdf"));
+    std::fs::copy(pdf_path, &session_pdf)
+        .map_err(|e| crate::error::Error::msg(format!("复制 PDF 到会话目录失败: {e}")))?;
     let n = document.pages().len() as usize;
     let selected: Vec<usize> = if pages.is_empty() {
         (0..n).collect()
@@ -650,24 +663,65 @@ pub fn pdf_pages_to_tmp_images_streaming(
             .pages()
             .get(i as u16)
             .map_err(|e| crate::error::Error::msg(format!("读取第 {} 页失败: {e}", i + 1)))?;
-        let (sx, sy) = scale_for_page(scales, i);
-        let image = render_visible(&page, sx, sy)
-            .map_err(|e| crate::error::Error::msg(format!("渲染第 {} 页失败: {e}", i + 1)))?;
-        crate::trace::log(&format!(
-            "pdf: 渲染 {}/{total} 完成 {}×{}, 写 PNG …",
-            done + 1,
-            image.width(),
-            image.height()
-        ));
-        let out_path = tmp_dir.join(format!("{stem}_p{:03}.png", i + 1));
-        image
-            .save(&out_path)
-            .map_err(|e| crate::error::Error::msg(format!("写临时 PNG 失败: {e}")))?;
-        let _ = crate::page_cache::write_org_thumb(&image, &out_path);
-        crate::trace::log(&format!("pdf: 识别 {}/{total} …", done + 1));
-        crate::detect_cache::detect_and_save(&image, &out_path, ink_threshold, margin);
-        crate::trace::log(&format!("pdf: 已写+识别 {}/{total} → 回传 UI", done + 1));
-        on_page(i, total, out_path);
+        let scene = extract_vector_scene(&page);
+        if crate::vector_page::classify(&scene) == crate::vector_page::PageClass::Raster {
+            let (sx, sy) = scale_for_page(scales, i);
+            let image = render_visible(&page, sx, sy)
+                .map_err(|e| crate::error::Error::msg(format!("渲染第 {} 页失败: {e}", i + 1)))?;
+            crate::trace::log(&format!(
+                "pdf: 渲染 {}/{total} 完成 {}×{}, 写 PNG …",
+                done + 1,
+                image.width(),
+                image.height()
+            ));
+            let out_path = tmp_dir.join(format!("{stem}_p{:03}.png", i + 1));
+            image
+                .save(&out_path)
+                .map_err(|e| crate::error::Error::msg(format!("写临时 PNG 失败: {e}")))?;
+            let _ = crate::page_cache::write_org_thumb(&image, &out_path);
+            crate::trace::log(&format!("pdf: 识别 {}/{total} …", done + 1));
+            crate::detect_cache::detect_and_save(&image, &out_path, ink_threshold, margin);
+            crate::trace::log(&format!("pdf: 已写+识别 {}/{total} → 回传 UI", done + 1));
+            on_page(i, total, StreamedPdfPage::Raster(out_path));
+        } else {
+            let bands = crate::vector_page::detect_vector_bands(&scene, margin);
+            let no_staff = bands.is_empty();
+            let w_pt = page.width().value.max(1.0);
+            let h_pt = page.height().value.max(1.0);
+            let preview = render_page_preview_rgb(&page, 1400).map_err(|e| {
+                crate::error::Error::msg(format!("渲染矢量预览第 {} 页失败: {e}", i + 1))
+            })?;
+            let preview_png = tmp_dir.join(format!("{stem}_p{:03}_preview.png", i + 1));
+            preview
+                .save(&preview_png)
+                .map_err(|e| crate::error::Error::msg(format!("写矢量预览失败: {e}")))?;
+            let _ = crate::page_cache::write_org_thumb(&preview, &preview_png);
+            crate::trace::log(&format!(
+                "pdf: 矢量页 {}/{total} 谱行 {} 条{}",
+                done + 1,
+                bands.len(),
+                if no_staff {
+                    " (没有长水平谱线)"
+                } else {
+                    ""
+                }
+            ));
+            on_page(
+                i,
+                total,
+                StreamedPdfPage::Vector {
+                    source: crate::vector_page::VectorSource {
+                        pdf_path: session_pdf.clone(),
+                        page_index: i as u32,
+                        w_pt,
+                        h_pt,
+                        scene,
+                    },
+                    preview_png,
+                    no_staff,
+                },
+            );
+        }
     }
     crate::trace::log(&format!("pdf: 全部 {total} 页渲染结束"));
     Ok(total)
@@ -684,11 +738,285 @@ pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, crate::e
         &[],
         &[],
         || true,
-        |_, _, p| {
-            out.push(p);
+        |_, _, page| {
+            if let StreamedPdfPage::Raster(p) = page {
+                out.push(p);
+            }
         },
     )?;
     Ok(out)
+}
+
+fn page_pt(page: &PdfPage<'_>) -> (f32, f32) {
+    (page.width().value.max(1.0), page.height().value.max(1.0))
+}
+
+/// 从一页抽出水平线段和对象包围盒. 坐标换成 y 向下.
+pub fn extract_vector_scene(page: &PdfPage<'_>) -> crate::vector_page::VectorScene {
+    use crate::vector_page::VectorScene;
+    let (pw, ph) = page_pt(page);
+    let mut scene = VectorScene {
+        w: pw,
+        h: ph,
+        ..VectorScene::default()
+    };
+    let mut image_area = 0.0f32;
+    walk_page_objects(
+        page.objects().iter(),
+        PdfMatrix::IDENTITY,
+        ph,
+        pw,
+        &mut scene,
+        &mut image_area,
+        0,
+    );
+    scene.image_cover = (image_area / (pw * ph)).clamp(0.0, 1.0);
+    scene
+}
+
+fn walk_page_objects<'a>(
+    objects: impl Iterator<Item = PdfPageObject<'a>>,
+    parent: PdfMatrix,
+    page_h: f32,
+    page_w: f32,
+    scene: &mut crate::vector_page::VectorScene,
+    image_area: &mut f32,
+    depth: u8,
+) {
+    use crate::vector_page::{BoxKind, ContentBox, HLine};
+    for obj in objects {
+        if let Some(form) = obj.as_x_object_form_object() {
+            if depth < 4 {
+                let m = parent.multiply(form.matrix().unwrap_or(PdfMatrix::IDENTITY));
+                walk_page_objects(form.iter(), m, page_h, page_w, scene, image_area, depth + 1);
+            }
+            continue;
+        }
+        let kind = if obj.as_path_object().is_some() {
+            scene.path_count = scene.path_count.saturating_add(1);
+            BoxKind::Path
+        } else if obj.as_text_object().is_some() {
+            scene.text_count = scene.text_count.saturating_add(1);
+            BoxKind::Text
+        } else if obj.as_image_object().is_some() {
+            BoxKind::Image
+        } else {
+            continue;
+        };
+        if let Some((x0, y0, x1, y1)) = mapped_bounds(&obj, &parent, page_h) {
+            if kind == BoxKind::Image {
+                *image_area = image_area.max((x1 - x0).abs() * (y1 - y0).abs());
+            }
+            if kind == BoxKind::Path && (y1 - y0) <= 1.5 && (x1 - x0) >= page_w * 0.30 {
+                scene.hlines.push(HLine {
+                    x0,
+                    x1,
+                    y: (y0 + y1) * 0.5,
+                });
+            }
+            scene.boxes.push(ContentBox {
+                x0,
+                y0,
+                x1,
+                y1,
+                kind,
+            });
+        }
+        if let Some(path) = obj.as_path_object() {
+            let acc = parent.multiply(path.matrix().unwrap_or(PdfMatrix::IDENTITY));
+            push_path_curves(scene, path.segments().transform(acc).iter(), page_h);
+        }
+    }
+}
+
+/// PDFium 把三次曲线拆成连续三个 `BezierTo` (控制点、控制点、终点).
+fn push_path_curves<'a>(
+    scene: &mut crate::vector_page::VectorScene,
+    segments: impl Iterator<Item = PdfPathSegment<'a>>,
+    page_h: f32,
+) {
+    use crate::vector_page::PathCurve;
+    let down = |x: PdfPoints, y: PdfPoints| (x.value, page_h - y.value);
+    let mut prev: Option<(f32, f32)> = None;
+    let mut bez: Vec<(f32, f32)> = Vec::new();
+    for seg in segments {
+        let (x, y_up) = seg.point();
+        let p = down(x, y_up);
+        match seg.segment_type() {
+            PdfPathSegmentType::MoveTo | PdfPathSegmentType::Unknown => {
+                bez.clear();
+                prev = Some(p);
+            }
+            PdfPathSegmentType::LineTo => {
+                bez.clear();
+                if let Some(a) = prev {
+                    push_hline(scene, a, p);
+                    scene.curves.push(PathCurve::Line { a, b: p });
+                }
+                prev = Some(p);
+            }
+            PdfPathSegmentType::BezierTo => {
+                bez.push(p);
+                if bez.len() == 3 {
+                    if let Some(a) = prev {
+                        let end = bez[2];
+                        push_hline(scene, a, end);
+                        scene.curves.push(PathCurve::Cubic {
+                            p0: a,
+                            p1: bez[0],
+                            p2: bez[1],
+                            p3: end,
+                        });
+                        prev = Some(end);
+                    }
+                    bez.clear();
+                }
+            }
+        }
+    }
+}
+
+fn push_hline(scene: &mut crate::vector_page::VectorScene, a: (f32, f32), b: (f32, f32)) {
+    use crate::vector_page::HLine;
+    let dx = (b.0 - a.0).abs();
+    let dy = (b.1 - a.1).abs();
+    if dy <= 0.8 && dx >= 8.0 {
+        scene.hlines.push(HLine {
+            x0: a.0.min(b.0),
+            x1: a.0.max(b.0),
+            y: (a.1 + b.1) * 0.5,
+        });
+    }
+}
+
+fn mapped_bounds(
+    obj: &PdfPageObject<'_>,
+    parent: &PdfMatrix,
+    page_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let q = obj.bounds().ok()?;
+    let corners = [
+        (q.left().value, q.bottom().value),
+        (q.right().value, q.bottom().value),
+        (q.right().value, q.top().value),
+        (q.left().value, q.top().value),
+    ];
+    let mut xs = Vec::with_capacity(4);
+    let mut ys = Vec::with_capacity(4);
+    for (x, y) in corners {
+        let (x, y) = parent.apply_to_points(PdfPoints::new(x), PdfPoints::new(y));
+        xs.push(x.value);
+        ys.push(page_h - y.value);
+    }
+    let x0 = xs.iter().copied().fold(f32::MAX, f32::min);
+    let x1 = xs.iter().copied().fold(f32::MIN, f32::max);
+    let y0 = ys.iter().copied().fold(f32::MAX, f32::min);
+    let y1 = ys.iter().copied().fold(f32::MIN, f32::max);
+    Some((x0, y0, x1, y1))
+}
+
+fn render_page_rgba(page: &PdfPage<'_>, scale: f32) -> Result<image::RgbaImage, PdfiumError> {
+    let cfg = PdfRenderConfig::new()
+        .scale_page_by_factor(scale.max(0.05))
+        .set_clear_color(PdfColor::new(0, 0, 0, 0));
+    Ok(page.render_with_config(&cfg)?.as_image().into_rgba8())
+}
+
+fn render_page_preview_rgb(
+    page: &PdfPage<'_>,
+    max_side: u32,
+) -> Result<image::RgbImage, PdfiumError> {
+    let (w, h) = page_pt(page);
+    let cap = max_side.max(64) as f32;
+    let scale = (cap / w).min(cap / h).clamp(0.05, PDF_MAX_SCALE);
+    let rgba = render_page_rgba(page, scale)?;
+    let pad = crate::vector_page::polarity_pad(&rgba);
+    Ok(crate::vector_page::flatten_rgba(&rgba, pad))
+}
+
+/// 把矢量页上的一个 point 矩形光栅成 RGB (预览垫色, 白墨可见).
+pub fn render_vector_rect_rgb(
+    pdf_path: &Path,
+    page_index: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    tex_w: u32,
+    tex_h: u32,
+) -> Result<image::RgbImage, String> {
+    let rgba = render_vector_rect_rgba(pdf_path, page_index, x, y, w, h, tex_w, tex_h)?;
+    let pad = crate::vector_page::polarity_pad(&rgba);
+    Ok(crate::vector_page::flatten_rgba(&rgba, pad))
+}
+
+/// 同一矩形的透明底光栅, 给成片往底色上叠.
+pub fn render_vector_rect_rgba(
+    pdf_path: &Path,
+    page_index: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    tex_w: u32,
+    tex_h: u32,
+) -> Result<image::RgbaImage, String> {
+    let pdfium = bind_pdfium().map_err(|e| e.to_string())?;
+    let document = pdfium
+        .load_pdf_from_file(pdf_path, None)
+        .map_err(|e| format!("打开矢量 PDF 失败: {e}"))?;
+    let page = document
+        .pages()
+        .get(page_index as u16)
+        .map_err(|e| format!("读取矢量页失败: {e}"))?;
+    let (_pw, _ph) = page_pt(&page);
+    let rect_w = w.max(0.5);
+    let rect_h = h.max(0.5);
+    let mut tw = tex_w.max(1) as f32;
+    let mut th = tex_h.max(1) as f32;
+    let side = tw.max(th);
+    if side > PDF_MAX_SIDE_PX as f32 {
+        let k = PDF_MAX_SIDE_PX as f32 / side;
+        tw *= k;
+        th *= k;
+    }
+    let tw = tw.round().max(1.0) as i32;
+    let th = th.round().max(1.0) as i32;
+    let sx = tw as f32 / rect_w;
+    let sy = th as f32 / rect_h;
+    // 页坐标左下为原点、y 向上. 实测正的 d 才和普通整页光栅同向,
+    // 平移用视口顶的页坐标, 否则放大后画面会整体错位.
+    let cfg = PdfRenderConfig::new()
+        .set_fixed_size(tw, th)
+        .set_clear_color(PdfColor::new(0, 0, 0, 0))
+        .transform(sx, 0.0, 0.0, sy, -x * sx, -y * sy)
+        .map_err(|e| format!("光栅矢量页失败: {e}"))?;
+    page.render_with_config(&cfg)
+        .map(|bmp| bmp.as_image().into_rgba8())
+        .map_err(|e| format!("光栅矢量页失败: {e}"))
+}
+
+pub fn load_vector_source(
+    pdf_path: &Path,
+    page_index: u32,
+) -> Result<crate::vector_page::VectorSource, String> {
+    let pdfium = bind_pdfium().map_err(|e| e.to_string())?;
+    let document = pdfium
+        .load_pdf_from_file(pdf_path, None)
+        .map_err(|e| format!("打开矢量 PDF 失败: {e}"))?;
+    let page = document
+        .pages()
+        .get(page_index as u16)
+        .map_err(|e| format!("读取矢量页失败: {e}"))?;
+    let (w_pt, h_pt) = page_pt(&page);
+    let scene = extract_vector_scene(&page);
+    Ok(crate::vector_page::VectorSource {
+        pdf_path: pdf_path.to_path_buf(),
+        page_index,
+        w_pt,
+        h_pt,
+        scene,
+    })
 }
 
 #[cfg(test)]
@@ -698,6 +1026,63 @@ mod tests {
     /// pdfium 不再内嵌, 测试环境里不一定能找到; 本地在 `vendor/pdfium.dll`
     /// 放一份就能跑真实校验, 没放就跳过 (CI/新 clone 下这是预期情况, 不算
     /// 失败).
+    #[test]
+    fn viewport_render_matches_full_page_crop() {
+        let dll = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/pdfium.dll");
+        let pdf = concat!(env!("CARGO_MANIFEST_DIR"), "/../反色.pdf");
+        if !std::path::Path::new(dll).is_file() || !std::path::Path::new(pdf).is_file() {
+            eprintln!("跳过: 缺少 pdfium 或测试 PDF");
+            return;
+        }
+        unsafe {
+            std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", dll);
+        }
+        let pdfium = bind_pdfium().expect("pdfium");
+        let doc = pdfium.load_pdf_from_file(pdf, None).expect("pdf");
+        let page = doc.pages().get(0).expect("page");
+        let (pw, ph) = page_pt(&page);
+        let scale = 2.0f32;
+        let full = render_page_rgba(&page, scale).expect("full");
+        drop(page);
+        drop(doc);
+        drop(pdfium);
+        let x = (pw * 0.15).round();
+        let w = (pw * 0.25).round().max(20.0);
+        let h = (ph * 0.18).round().max(20.0);
+        for y in [40.0, (ph * 0.35).round(), (ph - h - 30.0).max(0.0)] {
+            let part = render_vector_rect_rgba(
+                std::path::Path::new(pdf),
+                0,
+                x,
+                y,
+                w,
+                h,
+                (w * scale).round() as u32,
+                (h * scale).round() as u32,
+            )
+            .expect("viewport");
+            let fx = (x * scale).round() as i32;
+            let fy = (y * scale).round() as i32;
+            let mut err = 0i64;
+            let mut n = 0i64;
+            for py in (0..part.height() as i32).step_by(4) {
+                for px in (0..part.width() as i32).step_by(4) {
+                    let ox = fx + px;
+                    let oy = fy + py;
+                    if ox < 0 || oy < 0 || ox >= full.width() as i32 || oy >= full.height() as i32 {
+                        continue;
+                    }
+                    let pa = part.get_pixel(px as u32, py as u32).0;
+                    let pb = full.get_pixel(ox as u32, oy as u32).0;
+                    err += (pa[0] as i32 - pb[0] as i32).unsigned_abs() as i64;
+                    n += 1;
+                }
+            }
+            let score = if n == 0 { i32::MAX } else { (err / n) as i32 };
+            assert!(score < 8, "y={y} 视口与整页裁切不一致, 平均误差 {score}");
+        }
+    }
+
     #[test]
     fn bind_via_env_override_ok() {
         let dll = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/pdfium.dll");
@@ -747,6 +1132,63 @@ mod tests {
     #[test]
     fn parse_page_selection_reversed_range() {
         assert_eq!(parse_page_selection("7-3", 10), vec![3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn sample_pdf_brace_anchor_hits_leftmost_tip() {
+        let dll = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/pdfium.dll");
+        if !std::path::Path::new(dll).is_file() {
+            eprintln!("跳过: 缺少 pdfium");
+            return;
+        }
+        unsafe {
+            std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", dll);
+        }
+        for name in ["../反色.pdf", "../marasy - SnowMix♪.pdf"] {
+            let pdf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+            if !pdf.is_file() {
+                eprintln!("缺少 {}", pdf.display());
+                continue;
+            }
+            let pdfium = bind_pdfium().expect("pdfium");
+            let doc = pdfium.load_pdf_from_file(&pdf, None).expect("pdf");
+            let page = doc.pages().get(0).expect("page");
+            let scene = extract_vector_scene(&page);
+            let bands = crate::vector_page::detect_vector_bands(&scene, 8);
+            assert!(!bands.is_empty(), "{}", pdf.display());
+            let scale = 4.0f32;
+            let rgba = render_page_rgba(&page, scale).expect("render");
+            let label = pdf.file_name().unwrap_or_default().to_string_lossy();
+            for (i, b) in bands.iter().enumerate() {
+                let anchor = b.anchor.expect("brace system should have an anchor");
+                let y0 = (b.y0 as f32 * scale).round() as i32;
+                let y1 = (b.y1 as f32 * scale).round() as i32;
+                let x_max = (scene.w * scale * 0.12) as i32;
+                let mut best: Option<(i32, i32)> = None;
+                for y in y0.max(0)..=y1.min(rgba.height() as i32 - 1) {
+                    for x in 0..x_max.min(rgba.width() as i32) {
+                        let p = rgba.get_pixel(x as u32, y as u32).0;
+                        if p[3] < 40 {
+                            continue;
+                        }
+                        let lum = (p[0] as i32 * 30 + p[1] as i32 * 59 + p[2] as i32 * 11) / 100;
+                        let ink = lum > 180 || lum < 80;
+                        if !ink {
+                            continue;
+                        }
+                        if best.is_none_or(|(bx, _)| x < bx) {
+                            best = Some((x, y));
+                        }
+                    }
+                }
+                let (_, tip_y) = best.expect("left ink");
+                let tip_rel = tip_y as f32 / scale - b.y0 as f32;
+                assert!(
+                    (anchor as f32 - tip_rel).abs() <= 1.0,
+                    "{label} band {i}: anchor {anchor}, tip {tip_rel:.2}"
+                );
+            }
+        }
     }
 
     #[test]

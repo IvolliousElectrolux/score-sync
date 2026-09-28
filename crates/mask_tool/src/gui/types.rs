@@ -294,10 +294,12 @@ pub(crate) enum DragKind {
         y1: f32,
     },
     /// 套索: 按下后若拖过 slop 则进入自由轨迹, 否则仍是折线加点.
+    /// 自由轨迹松手不闭合, 只有已吸附回起点 (`snapped`) 才在松手时闭环.
     PolyStroke {
         start_x: f32,
         start_y: f32,
         freehand: bool,
+        snapped: bool,
     },
     /// 画笔描边: 正在编辑的蒙版 id; `undid` 表示本笔是否已压入撤销栈.
     /// `start_iy`: 落笔起点的画布纵坐标, 松开时与终点一起判定绑定哪个
@@ -416,7 +418,7 @@ pub(crate) enum ToolMode {
     Select,
     /// 框选新蒙版
     Draw,
-    /// 套索多边形: 单击逐点; 按住拖动为连续轨迹, 松手闭环.
+    /// 套索多边形: 单击逐点; 按住拖动为连续轨迹, 拖回起点才松手闭环.
     Poly,
     /// 画笔描边 (自由绘制, 可调颜色/粗细)
     Brush,
@@ -509,5 +511,19 @@ mod brush_size_tests {
         let style = ring_style_from_under(&samples, None);
         assert_eq!(style.ring, [0, 0, 0]);
         assert_eq!(style.halo, None);
+    }
+
+    #[test]
+    fn preview_zoom_keeps_the_same_image_point() {
+        let pan = Point { x: 12.0, y: -4.0 };
+        let fit = ViewXform::compute(500.0, 700.0, 900.0, 700.0, 1.0, pan, false);
+        let zoomed = ViewXform::compute(500.0, 700.0, 900.0, 700.0, 3.5, pan, true);
+        let (sx, sy) = fit.image_to_screen(120.0, 240.0);
+        let (zx, zy) = zoomed.image_to_screen(120.0, 240.0);
+        let (ix, iy) = fit.screen_to_image(sx, sy);
+        let (jx, jy) = zoomed.screen_to_image(zx, zy);
+        assert!((ix - 120.0).abs() < 0.01 && (iy - 240.0).abs() < 0.01);
+        assert!((jx - 120.0).abs() < 0.01 && (jy - 240.0).abs() < 0.01);
+        assert!((sx - zx).abs() > 1.0 || (sy - zy).abs() > 1.0);
     }
 }

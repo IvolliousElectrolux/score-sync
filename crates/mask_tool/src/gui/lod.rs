@@ -5,6 +5,18 @@
 
 use super::*;
 
+fn uniform_tex(w: f32, h: f32, scale: f32, max_side: f32) -> (u32, u32) {
+    let mut tw = (w.max(0.5) * scale.max(0.0001)).max(1.0);
+    let mut th = (h.max(0.5) * scale.max(0.0001)).max(1.0);
+    let m = tw.max(th);
+    if max_side > 1.0 && m > max_side {
+        let k = max_side / m;
+        tw *= k;
+        th *= k;
+    }
+    (tw.round().max(1.0) as u32, th.round().max(1.0) as u32)
+}
+
 const LOD_PAD: f32 = 0.22;
 const LOD_DENSITY_SLACK: f32 = 1.02;
 const LOD_COVER_DENSITY: f32 = 0.92;
@@ -41,6 +53,7 @@ pub(crate) struct LodNeed {
     band_h: u32,
     logical_w: u32,
     logical_h: u32,
+    raster: Option<super::blocks::PieceRaster>,
 }
 
 struct Placed {
@@ -122,15 +135,19 @@ impl MaskToolApp {
             else {
                 continue;
             };
+            let sharp = src.raster.is_some();
+            let per = if sharp { screen_per } else { screen_per.min(1.0) };
             let src_w = source_span(job.w, tile.width, src.page_w.max(1));
             let src_span_h = if src.flat { src.page_h } else { src.band_h };
             let src_h = source_span(job.h, tile.height, src_span_h.max(1));
-            job.tex_w = (((job.w as f32) * screen_per.min(1.0)).round() as u32)
-                .min(src_w)
-                .max(1);
-            job.tex_h = (((job.h as f32) * screen_per.min(1.0)).round() as u32)
-                .min(src_h)
-                .max(1);
+            if sharp {
+                let (tw, th) = uniform_tex(job.w as f32, job.h as f32, per, 4096.0);
+                job.tex_w = tw;
+                job.tex_h = th;
+            } else {
+                job.tex_w = (((job.w as f32) * per).round() as u32).min(src_w).max(1);
+                job.tex_h = (((job.h as f32) * per).round() as u32).min(src_h).max(1);
+            }
             job.region_id = tile.region_id.clone();
             job.path = src.path.clone();
             job.flat = src.flat;
@@ -140,10 +157,18 @@ impl MaskToolApp {
             job.band_h = src.band_h.max(1);
             job.logical_w = tile.width.max(1);
             job.logical_h = tile.height.max(1);
+            job.raster = src.raster.clone();
             let mut vis_need = vis;
             vis_need.region_id = tile.region_id.clone();
-            vis_need.tex_w = (((vis_need.w as f32) * screen_per.min(1.0)).round() as u32).max(1);
-            vis_need.tex_h = (((vis_need.h as f32) * screen_per.min(1.0)).round() as u32).max(1);
+            let tight_per = if sharp { screen_per } else { screen_per.min(1.0) };
+            if sharp {
+                let (tw, th) = uniform_tex(vis_need.w as f32, vis_need.h as f32, tight_per, 4096.0);
+                vis_need.tex_w = tw;
+                vis_need.tex_h = th;
+            } else {
+                vis_need.tex_w = (((vis_need.w as f32) * tight_per).round() as u32).max(1);
+                vis_need.tex_h = (((vis_need.h as f32) * tight_per).round() as u32).max(1);
+            }
             tight.push(vis_need);
             jobs.push(job);
         }
@@ -506,6 +531,7 @@ fn local_visible(
         band_h: 1,
         logical_w: place.logical_w,
         logical_h: place.logical_h,
+        raster: None,
     })
 }
 
@@ -528,6 +554,22 @@ fn build_details(
 ) -> Vec<PieceDetail> {
     let mut out = Vec::with_capacity(jobs.len());
     for job in jobs {
+        if let Some(raster) = &job.raster {
+            let Some(rgba) = raster(job.x, job.y, job.w, job.h, job.tex_w, job.tex_h) else {
+                continue;
+            };
+            out.push(PieceDetail {
+                region_id: job.region_id.clone(),
+                tex: rgba_to_render_image_capped(&rgba, job.tex_w.max(job.tex_h)),
+                x: job.x as i32,
+                y: job.y as i32,
+                w: job.w,
+                h: job.h,
+                tex_w: job.tex_w,
+                tex_h: job.tex_h,
+            });
+            continue;
+        }
         let src = if let Some(img) = cache.get(&job.path) {
             img.clone()
         } else if let Some(img) = load_rgb(&job.path) {
@@ -613,6 +655,7 @@ mod tests {
             band_h: 1,
             logical_w: 1,
             logical_h: 1,
+            raster: None,
         };
         let need = LodNeed {
             region_id: "a".into(),

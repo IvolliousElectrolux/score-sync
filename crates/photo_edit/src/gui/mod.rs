@@ -2,6 +2,7 @@
 
 mod canvas;
 mod chrome;
+mod grade;
 mod io;
 mod picker;
 mod tools;
@@ -21,7 +22,7 @@ use gpui::{
 use image::{RgbImage, RgbaImage};
 
 use crate::document::EditDocument;
-use crate::process::Selection;
+use crate::process::{FilterAmt, Selection, Tone};
 
 use types::*;
 
@@ -135,6 +136,23 @@ pub struct PhotoEditApp {
     recent_colors: Vec<[u8; 3]>,
     lasso_draft: Option<Vec<(f32, f32)>>,
     lasso_cursor: Option<(f32, f32)>,
+    grade_pane: GradePane,
+    tone: Tone,
+    tone_tracks: [Bounds<Pixels>; 7],
+    /// 滤镜强度, 和影调共用同一张基准图.
+    filter_amt: FilterAmt,
+    filter_tracks: [Bounds<Pixels>; 6],
+    /// 这一轮调整开始前的图层像素. 拖动条始终相对它计算, 而不是叠加上一次.
+    tone_base: Option<Arc<RgbaImage>>,
+    tone_layer_id: Option<String>,
+    /// `push_undo` 里不要把正在采样的调整基准清掉.
+    tone_applying: bool,
+    /// 拖动中的屏幕预览. 松手后清掉, 改由全图贴图显示.
+    tone_preview: Option<grade::TonePreview>,
+    /// 当前拖动条还没写回全图.
+    tone_dirty: bool,
+    tone_preview_due: bool,
+    tone_preview_queued: bool,
 }
 
 impl PhotoEditApp {
@@ -219,6 +237,18 @@ impl PhotoEditApp {
             recent_colors: default_recent_colors(),
             lasso_draft: None,
             lasso_cursor: None,
+            grade_pane: GradePane::Off,
+            tone: Tone::default(),
+            tone_tracks: [Bounds::default(); 7],
+            filter_amt: FilterAmt::default(),
+            filter_tracks: [Bounds::default(); 6],
+            tone_base: None,
+            tone_layer_id: None,
+            tone_applying: false,
+            tone_preview: None,
+            tone_dirty: false,
+            tone_preview_due: false,
+            tone_preview_queued: false,
         }
     }
 
@@ -281,6 +311,7 @@ impl PhotoEditApp {
     }
 
     pub fn open_rgb(&mut self, img: RgbImage, paper: Option<[u8; 3]>, cx: &mut Context<Self>) {
+        self.reset_grade_ui();
         let paper = paper.unwrap_or_else(|| crate::process::sample_paper(&img, 200));
         self.doc = Some(EditDocument::from_rgb(&img, paper));
         self.selection = Selection::None;
@@ -297,6 +328,7 @@ impl PhotoEditApp {
     }
 
     pub fn open_document(&mut self, doc: EditDocument, cx: &mut Context<Self>) {
+        self.reset_grade_ui();
         self.doc = Some(doc);
         self.selection = Selection::None;
         self.undo_stack.clear();
@@ -329,6 +361,7 @@ impl PhotoEditApp {
     }
 
     pub fn close_session(&mut self, cx: &mut Context<Self>) {
+        self.reset_grade_ui();
         self.doc = None;
         self.selection = Selection::None;
         self.undo_stack.clear();
@@ -399,7 +432,27 @@ impl PhotoEditApp {
                     0.0
                 };
                 let rotate_deg = l.rotation + extra;
-                let tiles = g.tiles.iter().flatten().cloned().collect();
+                let tiles = if i == doc.active {
+                    self.tone_preview.as_ref().and_then(|p| {
+                        if p.layer_id != l.id {
+                            return None;
+                        }
+                        Some(vec![TileSprite {
+                            tex: p.tex.clone(),
+                            x: p.x,
+                            y: p.y,
+                            w: p.w,
+                            h: p.h,
+                            pad_l: 0,
+                            pad_t: 0,
+                            pad_r: 0,
+                            pad_b: 0,
+                        }])
+                    })
+                } else {
+                    None
+                };
+                let tiles = tiles.unwrap_or_else(|| g.tiles.iter().flatten().cloned().collect());
                 Some(LayerPaint {
                     tiles,
                     x,
@@ -706,6 +759,7 @@ impl PhotoEditApp {
             pan: self.pan,
             zoom: self.zoom,
             user_zoomed: self.user_zoomed,
+            selection: None,
         })
     }
 
@@ -714,12 +768,18 @@ impl PhotoEditApp {
         self.pan = snap.pan;
         self.zoom = snap.zoom;
         self.user_zoomed = snap.user_zoomed;
+        if let Some(sel) = snap.selection {
+            self.selection = sel;
+        }
         self.brush_last = None;
         self.clone_snap = None;
         self.heal_offset = None;
     }
 
     pub(crate) fn push_undo(&mut self) {
+        if !self.tone_applying {
+            self.finish_tone();
+        }
         if let Some(snap) = self.history_snap() {
             self.undo_stack.push(snap);
             if self.undo_stack.len() > HISTORY_LIMIT {
@@ -730,12 +790,16 @@ impl PhotoEditApp {
     }
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
-        let Some(cur) = self.history_snap() else {
+        self.finish_tone();
+        let Some(mut cur) = self.history_snap() else {
             return;
         };
         let Some(prev) = self.undo_stack.pop() else {
             return;
         };
+        if prev.selection.is_some() {
+            cur.selection = Some(self.selection.clone());
+        }
         self.redo_stack.push(cur);
         self.restore_snap(prev);
         self.dirty = true;
@@ -745,12 +809,16 @@ impl PhotoEditApp {
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
-        let Some(cur) = self.history_snap() else {
+        self.finish_tone();
+        let Some(mut cur) = self.history_snap() else {
             return;
         };
         let Some(next) = self.redo_stack.pop() else {
             return;
         };
+        if next.selection.is_some() {
+            cur.selection = Some(self.selection.clone());
+        }
         self.undo_stack.push(cur);
         self.restore_snap(next);
         self.dirty = true;
@@ -767,6 +835,7 @@ impl PhotoEditApp {
     }
 
     pub fn request_apply(&mut self, cx: &mut Context<Self>) {
+        self.commit_live_tone();
         if self.standalone {
             self.export_image_standalone(cx);
         } else {
@@ -844,6 +913,7 @@ impl PhotoEditApp {
     }
 
     pub fn set_mode(&mut self, mode: ToolMode, cx: &mut Context<Self>) {
+        self.commit_live_tone();
         if self.mode == ToolMode::Lasso && mode != ToolMode::Lasso {
             self.lasso_draft = None;
             self.lasso_cursor = None;

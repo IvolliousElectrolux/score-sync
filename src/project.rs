@@ -143,9 +143,22 @@ struct ProjectPage {
     id: String,
     /// 标签显示名
     title: String,
-    /// zip 内相对路径, 如 `pages/abcd.png`
+    /// zip 内相对路径, 如 `pages/abcd.png`. 矢量页为空.
+    #[serde(default)]
     image: String,
     regions: Vec<ProjectRegion>,
+    /// `"pt"` 表示区域坐标是 point. 缺省为像素.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    coord: String,
+    /// zip 内 PDF, 如 `pdfs/abcd.pdf`. 同一文件多页只存一份.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pdf: String,
+    #[serde(default)]
+    pdf_page: u32,
+    #[serde(default)]
+    w_pt: f32,
+    #[serde(default)]
+    h_pt: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -231,6 +244,18 @@ fn ensure_staffcrop_ext(path: PathBuf) -> PathBuf {
     }
 }
 
+fn sanitize_zip_name(rel: &str) -> String {
+    rel.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn encode_png(image: &image::RgbImage) -> Result<Vec<u8>, String> {
     let mut buf = Cursor::new(Vec::new());
     image
@@ -256,11 +281,37 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     let tmp_path = project_path.with_extension("staffcrop.tmp");
 
     let mut pages = Vec::with_capacity(doc.pages.len());
+    let mut pdf_rels: HashMap<PathBuf, String> = HashMap::new();
     for page in &doc.pages {
-        let rel = format!("pages/{}.png", page.id);
-        if !page.disk_path.is_file() && page.image.is_none() {
-            return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));
-        }
+        let (image, coord, pdf, pdf_page, w_pt, h_pt) = if let Some(src) = page.vector.as_ref() {
+            let rel = if let Some(rel) = pdf_rels.get(&src.pdf_path) {
+                rel.clone()
+            } else {
+                let rel = format!("pdfs/{}.pdf", page.id);
+                pdf_rels.insert(src.pdf_path.clone(), rel.clone());
+                rel
+            };
+            (
+                String::new(),
+                "pt".to_string(),
+                rel,
+                src.page_index,
+                src.w_pt,
+                src.h_pt,
+            )
+        } else {
+            if !page.disk_path.is_file() && page.image.is_none() {
+                return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));
+            }
+            (
+                format!("pages/{}.png", page.id),
+                String::new(),
+                String::new(),
+                0,
+                0.0,
+                0.0,
+            )
+        };
         let mut regions: Vec<ProjectRegion> = page
             .regions
             .values()
@@ -277,8 +328,13 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         pages.push(ProjectPage {
             id: page.id.clone(),
             title: page.title(),
-            image: rel,
+            image,
             regions,
+            coord,
+            pdf,
+            pdf_page,
+            w_pt,
+            h_pt,
         });
     }
 
@@ -426,7 +482,23 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         // json 缓冲可先释放
         drop(json);
 
+        let mut written_pdfs: HashSet<String> = HashSet::new();
         for page in &doc.pages {
+            if let Some(src) = page.vector.as_ref() {
+                let Some(rel) = pdf_rels.get(&src.pdf_path) else {
+                    continue;
+                };
+                if !written_pdfs.insert(rel.clone()) {
+                    continue;
+                }
+                if !src.pdf_path.is_file() {
+                    return Err(format!("矢量页缺少 PDF ({})", src.pdf_path.display()));
+                }
+                zip.start_file(rel, png_opts)
+                    .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
+                copy_file_into_zip(&mut zip, &src.pdf_path)?;
+                continue;
+            }
             let rel = format!("pages/{}.png", page.id);
             zip.start_file(&rel, png_opts)
                 .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
@@ -556,13 +628,38 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
     let mut pages = Vec::with_capacity(meta.pages.len());
     // 解压到会话 tmp, 不一次全解码进内存
     let session = crate::page_cache::session_dir();
+    let mut pdf_files: HashMap<String, PathBuf> = HashMap::new();
     for p in &meta.pages {
-        let png = read_zip_entry(&mut zip, &p.image)?;
-        let disk_path = session.join(format!("proj_{}.png", p.id));
-        std::fs::write(&disk_path, &png)
-            .map_err(|e| format!("写出页图到会话目录失败 ({}): {e}", p.id))?;
-        let (w, h) = image::image_dimensions(&disk_path)
-            .map_err(|e| format!("读取页尺寸失败 ({}): {e}", p.id))?;
+        let vector = if p.coord == "pt" && !p.pdf.is_empty() {
+            let pdf_path = if let Some(path) = pdf_files.get(&p.pdf) {
+                path.clone()
+            } else {
+                let bytes = read_zip_entry(&mut zip, &p.pdf)?;
+                let dest = session.join(format!("proj_{}.pdf", sanitize_zip_name(&p.pdf)));
+                std::fs::write(&dest, &bytes)
+                    .map_err(|e| format!("写出 PDF 到会话目录失败 ({}): {e}", p.pdf))?;
+                pdf_files.insert(p.pdf.clone(), dest.clone());
+                dest
+            };
+            Some(
+                crate::pdf::load_vector_source(&pdf_path, p.pdf_page)
+                    .map_err(|e| format!("读取矢量页失败 ({}): {e}", p.id))?,
+            )
+        } else {
+            None
+        };
+        let (disk_path, w, h) = if let Some(src) = vector.as_ref() {
+            let (w, h) = src.logical_size();
+            (PathBuf::new(), w, h)
+        } else {
+            let png = read_zip_entry(&mut zip, &p.image)?;
+            let disk_path = session.join(format!("proj_{}.png", p.id));
+            std::fs::write(&disk_path, &png)
+                .map_err(|e| format!("写出页图到会话目录失败 ({}): {e}", p.id))?;
+            let (w, h) = image::image_dimensions(&disk_path)
+                .map_err(|e| format!("读取页尺寸失败 ({}): {e}", p.id))?;
+            (disk_path, w, h)
+        };
         let mut regions = HashMap::new();
         for r in &p.regions {
             regions.insert(
@@ -578,7 +675,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             );
         }
         let display_path = if p.title.is_empty() {
-            PathBuf::from(&p.image)
+            PathBuf::from(if p.image.is_empty() { "page" } else { &p.image })
         } else {
             PathBuf::from(&p.title)
         };
@@ -590,6 +687,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             img_w: w,
             img_h: h,
             regions,
+            vector,
         });
     }
 
@@ -803,6 +901,7 @@ mod tests {
             img_w: 8,
             img_h: 20,
             regions,
+            vector: None,
         });
         doc.groups.push(Group {
             id: "g-late".into(),

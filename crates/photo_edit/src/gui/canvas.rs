@@ -1,12 +1,12 @@
 use gpui::Negate;
 use gpui::{
     canvas, point, prelude::*, px, quad, radians, rgb, size, Bounds, ContentMask, Corners,
-    CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Point,
-    ScrollDelta, ScrollWheelEvent, TransformationMatrix, Window,
+    CursorStyle, DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathBuilder, Point, ScrollDelta, ScrollWheelEvent, TransformationMatrix, Window,
 };
 
 use super::*;
-use crate::process::Selection;
+use crate::process::{translate_selection, Selection};
 
 impl PhotoEditApp {
     pub fn image_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -47,6 +47,8 @@ impl PhotoEditApp {
         let lasso_draft = self.lasso_draft.clone();
         let lasso_cursor = self.lasso_cursor;
         let show_canvas = self.mode == ToolMode::Canvas;
+        let snap_w = self.fit_hint.snap_w;
+        let snap_h = self.fit_hint.snap_h;
         let canvas_hot = match &self.drag {
             Some(DragKind::Canvas {
                 edge,
@@ -199,7 +201,27 @@ impl PhotoEditApp {
                         entity.update(cx, |this, _| this.view_bounds = bounds);
                     }
                 },
-                move |bounds, _, window, _| {
+                {
+                    let slider_entity = cx.entity().clone();
+                    move |bounds, _, window, app| {
+                    if let Some(kind) = slider_entity.update(app, |this, _| match this.drag {
+                        Some(DragKind::Slider(kind)) => Some(kind),
+                        _ => None,
+                    }) {
+                        let entity = slider_entity.clone();
+                        window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let x = f32::from(ev.position.x);
+                            entity.update(cx, |this, cx| {
+                                if !matches!(this.drag, Some(DragKind::Slider(k)) if k == kind) {
+                                    return;
+                                }
+                                this.set_slider_from_x(x, kind, window, cx);
+                            });
+                        });
+                    }
                     let vw = f32::from(bounds.size.width);
                     let vh = f32::from(bounds.size.height);
                     let (fit_w, fit_h, use_pan, zoomed) = if let Some((ow, oh, opan, ox, oy)) =
@@ -384,6 +406,23 @@ impl PhotoEditApp {
                     if show_canvas {
                         paint_rect(0.0, 0.0, cw - 1.0, ch - 1.0, rgb(0xf59e0b), 1.6, true, 1.0, false);
                     }
+                    let (bw, bh, shift_x, shift_y) = if let Some((ow, oh, _, ox, oy)) = canvas_drag
+                    {
+                        (ow, oh, ox as f32, oy as f32)
+                    } else {
+                        (cw, ch, 0.0, 0.0)
+                    };
+                    let x_edge = target_frame_edges(bw.round() as u32, snap_w);
+                    let y_edge = target_frame_edges(bh.round() as u32, snap_h);
+                    if x_edge.is_some() || y_edge.is_some() {
+                        let (x0, x1) = x_edge
+                            .map(|(a, b)| (a - shift_x, b - shift_x))
+                            .unwrap_or((0.0, cw));
+                        let (y0, y1) = y_edge
+                            .map(|(a, b)| (a - shift_y, b - shift_y))
+                            .unwrap_or((0.0, ch));
+                        paint_rect(x0, y0, x1, y1, rgb(0x22d3ee), 1.25, true, 0.0, false);
+                    }
                     let has_path = sel_loops
                         .as_ref()
                         .is_some_and(|ls| ls.iter().any(|p| p.len() >= 3))
@@ -490,37 +529,24 @@ impl PhotoEditApp {
                         }
                     }
                     {
+                        // 放大后轮廓在屏幕上会很长. 整条虚线一次剖分会超过 u16
+                        // 顶点上限, build 失败, 选区就整段消失. 只画视口里的线段.
                         let to_screen = |ix: f32, iy: f32| {
                             let (sx, sy) = xform.image_to_screen(ix, iy);
-                            point(px(ox + sx), px(oy + sy))
+                            (ox + sx, oy + sy)
                         };
-                        let mut stroke = PathBuilder::stroke(px(1.6));
-                        stroke = stroke.dash_array(&[px(5.), px(3.)]);
-                        let mut any = false;
-                        let mut emit = |stroke: &mut PathBuilder, pts: &[(f32, f32)]| {
-                            if pts.len() < 3 {
-                                return;
-                            }
-                            any = true;
-                            stroke.move_to(to_screen(pts[0].0, pts[0].1));
-                            for &(ix, iy) in pts.iter().skip(1) {
-                                stroke.line_to(to_screen(ix, iy));
-                            }
-                            stroke.close();
-                        };
+                        let min_x = f32::from(bounds.origin.x) - 2.0;
+                        let min_y = f32::from(bounds.origin.y) - 2.0;
+                        let max_x = min_x + f32::from(bounds.size.width) + 4.0;
+                        let max_y = min_y + f32::from(bounds.size.height) + 4.0;
+                        let view = (min_x, min_y, max_x, max_y);
                         if let Some(loops) = sel_loops.as_ref() {
                             for pts in loops {
-                                emit(&mut stroke, pts);
+                                paint_closed_outline(window, pts, &to_screen, view);
                             }
                         }
                         if let Some(pts) = sel_outline.as_ref() {
-                            emit(&mut stroke, pts);
-                        }
-                        drop(emit);
-                        if any {
-                            if let Ok(path) = stroke.build() {
-                                window.paint_path(path, rgb(0xf97316));
-                            }
+                            paint_closed_outline(window, pts, &to_screen, view);
                         }
                     }
                     if let Some(ref draft) = lasso_draft {
@@ -667,6 +693,7 @@ impl PhotoEditApp {
                         if let Some((pxv, pyv)) = pointer {
                             paint_rotate_cursor(window, ox + pxv, oy + pyv);
                         }
+                    }
                     }
                 },
             )
@@ -1139,7 +1166,11 @@ impl PhotoEditApp {
                 if let Some((cw, ch, orig_pos)) = info {
                     let edge = canvas_edge(ix, iy, cw, ch, self.view_xform().scale);
                     if let Some(edge) = edge {
+                        let orig_sel = self.selection.clone();
                         self.push_undo();
+                        if let Some(snap) = self.undo_stack.last_mut() {
+                            snap.selection = Some(orig_sel.clone());
+                        }
                         self.user_zoomed = true;
                         self.drag = Some(DragKind::Canvas {
                             edge,
@@ -1148,6 +1179,7 @@ impl PhotoEditApp {
                             orig_h: ch,
                             orig_pos,
                             orig_pan: self.pan,
+                            orig_sel,
                         });
                     }
                 }
@@ -1186,7 +1218,7 @@ impl PhotoEditApp {
         self.notify_nav(cx);
     }
 
-    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.last_shift = ev.modifiers.shift;
         let alt = ev.modifiers.alt;
         let alt_changed = self.clone_alt != alt;
@@ -1195,7 +1227,7 @@ impl PhotoEditApp {
         let vy = f32::from(ev.position.y) - f32::from(self.view_bounds.origin.y);
         self.last_pointer_view = Some((vx, vy));
         if let Some(DragKind::Slider(kind)) = self.drag {
-            self.set_slider_from_x(f32::from(ev.position.x), kind, cx);
+            self.set_slider_from_x(f32::from(ev.position.x), kind, window, cx);
             return;
         }
         if matches!(self.drag, Some(DragKind::PaletteSb)) {
@@ -1292,10 +1324,16 @@ impl PhotoEditApp {
                     .as_ref()
                     .map(|d| (d.canvas_w as f32, d.canvas_h as f32))
                     .unwrap_or((1.0, 1.0));
-                let xs = [0.0, (cw - 1.0).max(0.0), *x0];
-                let ys = [0.0, (ch - 1.0).max(0.0), *y0];
-                *x1 = snap_to_targets(ix, &xs, snap_tol);
-                *y1 = snap_to_targets(iy, &ys, snap_tol);
+                let (xs, nx) = snap_axis_targets(
+                    [0.0, (cw - 1.0).max(0.0), *x0],
+                    target_frame_edges(cw as u32, self.fit_hint.snap_w),
+                );
+                let (ys, ny) = snap_axis_targets(
+                    [0.0, (ch - 1.0).max(0.0), *y0],
+                    target_frame_edges(ch as u32, self.fit_hint.snap_h),
+                );
+                *x1 = snap_to_targets(ix, &xs[..nx], snap_tol);
+                *y1 = snap_to_targets(iy, &ys[..ny], snap_tol);
                 self.notify_nav(cx);
             }
             Some(DragKind::Move {
@@ -1324,6 +1362,7 @@ impl PhotoEditApp {
                 orig_w,
                 orig_h,
                 orig_pos,
+                orig_sel,
                 ..
             }) => {
                 let (sx, sy) = *start;
@@ -1331,12 +1370,24 @@ impl PhotoEditApp {
                 let orig_h = *orig_h;
                 let edge = *edge;
                 let orig_pos = orig_pos.clone();
+                let orig_sel = orig_sel.clone();
                 let content = layers_aabb_at(self.doc.as_ref(), &orig_pos);
-                let (w, h, ox, oy) =
-                    snap_canvas_resize(edge, orig_w, orig_h, (sx, sy), ix, iy, content, snap_tol);
+                let (w, h, ox, oy) = snap_canvas_resize(
+                    edge,
+                    orig_w,
+                    orig_h,
+                    (sx, sy),
+                    ix,
+                    iy,
+                    content,
+                    (self.fit_hint.snap_w, self.fit_hint.snap_h),
+                    snap_tol,
+                );
                 if let Some(doc) = self.doc.as_mut() {
                     doc.resize_canvas_from(w as u32, h as u32, &orig_pos, ox, oy);
                 }
+                self.selection =
+                    translate_selection(&orig_sel, orig_w, orig_h, w as u32, h as u32, -ox, -oy);
                 self.dirty = true;
                 self.notify_nav(cx);
             }
@@ -1563,6 +1614,9 @@ impl PhotoEditApp {
             }) => {
                 self.finish_erase(start_ix, start_iy, undid, wiping, hit);
             }
+            Some(DragKind::Slider(kind)) if kind.previews_grade() => {
+                self.commit_live_tone();
+            }
             Some(DragKind::Slider(_)) => {}
             Some(DragKind::Canvas {
                 orig_w,
@@ -1620,7 +1674,7 @@ impl PhotoEditApp {
     pub(crate) fn on_scroll(
         &mut self,
         ev: &ScrollWheelEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (delta_x, delta_y) = match ev.delta {
@@ -1680,9 +1734,207 @@ impl PhotoEditApp {
             self.pan.x += delta_x;
             self.pan.y += delta_y;
         }
+        if matches!(self.drag, Some(DragKind::Slider(kind)) if kind.previews_grade()) {
+            self.schedule_tone_preview(window, cx);
+        }
         self.notify_nav(cx);
         cx.stop_propagation();
     }
+}
+
+fn paint_closed_outline(
+    window: &mut Window,
+    pts: &[(f32, f32)],
+    to_screen: &impl Fn(f32, f32) -> (f32, f32),
+    view: (f32, f32, f32, f32),
+) {
+    let segs = clipped_closed(pts, to_screen, view);
+    if segs.is_empty() {
+        return;
+    }
+    let mut halo = rgb(0x0f172a);
+    halo.a = 0.72;
+    let mut core = rgb(0xf8fafc);
+    core.a = 0.95;
+    paint_segments(window, &segs, 2.8, halo);
+    paint_segments(window, &segs, 1.4, core);
+    paint_dashed_segments(window, &segs, 1.5, 5.0, 3.0, rgb(0xf97316));
+}
+
+fn clipped_closed(
+    pts: &[(f32, f32)],
+    to_screen: &impl Fn(f32, f32) -> (f32, f32),
+    view: (f32, f32, f32, f32),
+) -> Vec<(f32, f32, f32, f32)> {
+    if pts.len() < 3 {
+        return Vec::new();
+    }
+    let (xmin, ymin, xmax, ymax) = view;
+    let mut out = Vec::new();
+    let n = pts.len();
+    for i in 0..n {
+        let (x0, y0) = to_screen(pts[i].0, pts[i].1);
+        let (x1, y1) = to_screen(pts[(i + 1) % n].0, pts[(i + 1) % n].1);
+        if let Some(seg) = clip_segment(x0, y0, x1, y1, xmin, ymin, xmax, ymax) {
+            let dx = seg.2 - seg.0;
+            let dy = seg.3 - seg.1;
+            if dx * dx + dy * dy >= 0.16 {
+                out.push(seg);
+            }
+        }
+    }
+    out
+}
+
+fn clip_segment(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    xmin: f32,
+    ymin: f32,
+    xmax: f32,
+    ymax: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let mut u0 = 0.0f32;
+    let mut u1 = 1.0f32;
+    let ps = [-dx, dx, -dy, dy];
+    let qs = [x0 - xmin, xmax - x0, y0 - ymin, ymax - y0];
+    for i in 0..4 {
+        let p = ps[i];
+        let q = qs[i];
+        if p.abs() <= 1.0e-6 {
+            if q < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            if r > u1 {
+                return None;
+            }
+            if r > u0 {
+                u0 = r;
+            }
+        } else if r < u0 {
+            return None;
+        } else if r < u1 {
+            u1 = r;
+        }
+    }
+    if u1 < u0 {
+        return None;
+    }
+    Some((x0 + u0 * dx, y0 + u0 * dy, x0 + u1 * dx, y0 + u1 * dy))
+}
+
+fn paint_segments(
+    window: &mut Window,
+    segs: &[(f32, f32, f32, f32)],
+    width: f32,
+    color: gpui::Rgba,
+) {
+    let mut batch = QuadBatch::new(color);
+    for &(x0, y0, x1, y1) in segs {
+        batch.line(window, x0, y0, x1, y1, width);
+    }
+    batch.flush(window);
+}
+
+fn paint_dashed_segments(
+    window: &mut Window,
+    segs: &[(f32, f32, f32, f32)],
+    width: f32,
+    dash: f32,
+    gap: f32,
+    color: gpui::Rgba,
+) {
+    let dash = dash.max(1.0);
+    let gap = gap.max(1.0);
+    let mut batch = QuadBatch::new(color);
+    for &(x0, y0, x1, y1) in segs {
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.4 {
+            batch.line(window, x0, y0, x1, y1, width);
+            continue;
+        }
+        let mut t = 0.0f32;
+        while t < len {
+            let t1 = (t + dash).min(len);
+            let s0 = t / len;
+            let s1 = t1 / len;
+            batch.line(
+                window,
+                x0 + dx * s0,
+                y0 + dy * s0,
+                x0 + dx * s1,
+                y0 + dy * s1,
+                width,
+            );
+            t = t1 + gap;
+        }
+    }
+    batch.flush(window);
+}
+
+struct QuadBatch {
+    fill: PathBuilder,
+    n: usize,
+    color: gpui::Rgba,
+}
+
+impl QuadBatch {
+    fn new(color: gpui::Rgba) -> Self {
+        Self {
+            fill: PathBuilder::fill(),
+            n: 0,
+            color,
+        }
+    }
+
+    fn line(&mut self, window: &mut Window, x0: f32, y0: f32, x1: f32, y1: f32, width: f32) {
+        if !push_line_quad(&mut self.fill, x0, y0, x1, y1, width) {
+            return;
+        }
+        self.n += 1;
+        if self.n >= 2000 {
+            self.flush(window);
+        }
+    }
+
+    fn flush(&mut self, window: &mut Window) {
+        if self.n == 0 {
+            return;
+        }
+        let fill = std::mem::replace(&mut self.fill, PathBuilder::fill());
+        self.n = 0;
+        if let Ok(path) = fill.build() {
+            window.paint_path(path, self.color);
+        }
+    }
+}
+
+fn push_line_quad(fill: &mut PathBuilder, x0: f32, y0: f32, x1: f32, y1: f32, width: f32) -> bool {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.2 {
+        return false;
+    }
+    let half = width.max(0.6) * 0.5;
+    let nx = -dy / len * half;
+    let ny = dx / len * half;
+    fill.move_to(point(px(x0 + nx), px(y0 + ny)));
+    fill.line_to(point(px(x1 + nx), px(y1 + ny)));
+    fill.line_to(point(px(x1 - nx), px(y1 - ny)));
+    fill.line_to(point(px(x0 - nx), px(y0 - ny)));
+    fill.close();
+    true
 }
 
 fn layers_aabb_at(
@@ -1960,4 +2212,30 @@ fn paint_source_cross(window: &mut Window, cx: f32, cy: f32, half: f32, style: R
     }
     paint_line(window, cx - half, cy, cx + half, cy, w, ring);
     paint_line(window, cx, cy - half, cx, cy + half, w, ring);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clip_segment;
+
+    #[test]
+    fn clip_keeps_an_interior_segment() {
+        let (x0, _, x1, _) = clip_segment(10.0, 10.0, 20.0, 10.0, 0.0, 0.0, 100.0, 100.0).unwrap();
+        assert!((x0 - 10.0).abs() < 1e-3);
+        assert!((x1 - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn clip_drops_a_segment_outside_the_view() {
+        assert!(clip_segment(-20.0, -20.0, -10.0, -10.0, 0.0, 0.0, 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn clip_cuts_the_part_that_enters_the_view() {
+        let (x0, y0, x1, y1) = clip_segment(-10.0, 5.0, 10.0, 5.0, 0.0, 0.0, 100.0, 8.0).unwrap();
+        assert!(x0.abs() < 1e-3, "{x0}");
+        assert!((y0 - 5.0).abs() < 1e-3);
+        assert!((x1 - 10.0).abs() < 1e-3);
+        assert!((y1 - 5.0).abs() < 1e-3);
+    }
 }

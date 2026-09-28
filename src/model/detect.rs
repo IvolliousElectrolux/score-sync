@@ -7,6 +7,15 @@ use crate::staff_detect::{detect_bands, Band};
 
 impl DocState {
     pub fn detect_page(&mut self, page_idx: usize, reset_groups: bool) {
+        if self
+            .pages
+            .get(page_idx)
+            .map(|p| p.is_vector())
+            .unwrap_or(false)
+        {
+            self.detect_vector_page(page_idx, reset_groups);
+            return;
+        }
         let (path, mem, is_full, old_ids, page_id) = {
             let Some(page) = self.pages.get(page_idx) else {
                 return;
@@ -124,6 +133,105 @@ impl DocState {
         }
     }
 
+    /// 用已缓存的几何重做分块. 不改页的 point 尺寸, 也不写像素 sidecar.
+    /// 返回是否认出了谱行.
+    pub fn detect_vector_page(&mut self, page_idx: usize, reset_groups: bool) -> bool {
+        let (scene, old_ids, page_id, page_h) = {
+            let Some(page) = self.pages.get(page_idx) else {
+                return false;
+            };
+            let Some(src) = page.vector.as_ref() else {
+                return false;
+            };
+            (
+                src.scene.clone(),
+                page.regions.keys().cloned().collect::<HashSet<String>>(),
+                page.id.clone(),
+                page.img_h.max(1),
+            )
+        };
+        let found = crate::vector_page::detect_vector_bands(&scene, self.margin);
+        let staff_found = !found.is_empty();
+        let bands = if found.is_empty() {
+            vec![crate::vector_page::StaffBand {
+                y0: 0,
+                y1: page_h.saturating_sub(1) as i32,
+                anchor: None,
+            }]
+        } else {
+            found
+        };
+        let mut regions = HashMap::new();
+        let mut anchors = Vec::new();
+        for (i, b) in bands.iter().enumerate() {
+            let rid = new_id();
+            let kind = if staff_found { "system" } else { "region" };
+            regions.insert(
+                rid.clone(),
+                Region {
+                    id: rid.clone(),
+                    page_id: page_id.clone(),
+                    y0: b.y0,
+                    y1: b.y1,
+                    kind: kind.into(),
+                    color: COLORS[i % COLORS.len()].to_string(),
+                },
+            );
+            anchors.push((rid, b.anchor));
+        }
+        if let Some(page) = self.pages.get_mut(page_idx) {
+            if let Some(src) = page.vector.as_ref() {
+                let (lw, lh) = src.logical_size();
+                page.img_w = lw;
+                page.img_h = lh;
+            }
+            page.regions = regions;
+        }
+        self.rebuild_rid_index();
+        self.ingest_region_staff_anchors(anchors);
+        if reset_groups {
+            let page_regions: Vec<Region> =
+                self.pages[page_idx].regions.values().cloned().collect();
+            let mut new_groups: Vec<Group> = Vec::new();
+            for g in &self.groups {
+                let remain: Vec<String> = g
+                    .region_ids
+                    .iter()
+                    .filter(|x| !old_ids.contains(*x))
+                    .cloned()
+                    .collect();
+                if !remain.is_empty() {
+                    new_groups.push(Group {
+                        id: g.id.clone(),
+                        region_ids: remain,
+                        name: g.name.clone(),
+                    });
+                }
+            }
+            let mut ordered = page_regions;
+            ordered.sort_by_key(|r| (r.y0, r.y1));
+            for r in ordered {
+                new_groups.push(Group {
+                    id: new_id(),
+                    region_ids: vec![r.id],
+                    name: String::new(),
+                });
+            }
+            self.groups = new_groups;
+            self.selected_region_ids = self
+                .selected_region_ids
+                .difference(&old_ids)
+                .cloned()
+                .collect();
+            self.groups_manual_order = false;
+            self.sort_groups();
+            self.prune_dangling_groups_if_hydrated();
+            self.ensure_active_group();
+            self.seed_guide_defaults();
+        }
+        staff_found
+    }
+
     pub fn apply_detect_file(
         &mut self,
         page_idx: usize,
@@ -148,7 +256,13 @@ impl DocState {
             );
         }
         if let Some(page) = self.pages.get_mut(page_idx) {
-            if file.img_w > 0 {
+            if page.is_vector() {
+                if let Some(src) = page.vector.as_ref() {
+                    let (lw, lh) = src.logical_size();
+                    page.img_w = lw;
+                    page.img_h = lh;
+                }
+            } else if file.img_w > 0 {
                 page.img_w = file.img_w;
                 page.img_h = file.img_h;
             }

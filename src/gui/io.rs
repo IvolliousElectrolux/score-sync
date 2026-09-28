@@ -235,15 +235,31 @@ impl ScoreSyncApp {
                             &scales,
                             &pages,
                             move || token_loop.load(Ordering::SeqCst) == gen,
-                            |i, total, path| {
+                            |i, total, page| {
                                 done += 1;
-                                let _ = tx.send_blocking(PdfLoadMsg::Page {
-                                    path,
-                                    index: i,
-                                    done,
-                                    total,
-                                    pdf_name: name.clone(),
-                                });
+                                let msg = match page {
+                                    pdf::StreamedPdfPage::Raster(path) => PdfLoadMsg::Page {
+                                        path,
+                                        index: i,
+                                        done,
+                                        total,
+                                        pdf_name: name.clone(),
+                                    },
+                                    pdf::StreamedPdfPage::Vector {
+                                        source,
+                                        preview_png,
+                                        no_staff,
+                                    } => PdfLoadMsg::VectorPage {
+                                        source,
+                                        bands_empty: no_staff,
+                                        preview_png,
+                                        index: i,
+                                        done,
+                                        total,
+                                        pdf_name: name.clone(),
+                                    },
+                                };
+                                let _ = tx.send_blocking(msg);
                             },
                         );
                         if token.load(Ordering::SeqCst) != gen {
@@ -275,7 +291,8 @@ impl ScoreSyncApp {
             let mut pages_since_yield = 0u32;
             while let Ok(msg) = rx.recv().await {
                 let stop = matches!(msg, PdfLoadMsg::AllFinished);
-                let is_page = matches!(msg, PdfLoadMsg::Page { .. });
+                let is_page =
+                    matches!(msg, PdfLoadMsg::Page { .. } | PdfLoadMsg::VectorPage { .. });
                 this.update(cx, |view, cx| {
                     if view.pdf_load_gen.load(Ordering::SeqCst) != gen {
                         return;
@@ -323,6 +340,46 @@ impl ScoreSyncApp {
                                         crate::error::Error::image_open(&path, e),
                                         cx,
                                     );
+                                }
+                            }
+                        }
+                        PdfLoadMsg::VectorPage {
+                            source,
+                            bands_empty,
+                            preview_png,
+                            index,
+                            done,
+                            total,
+                            pdf_name,
+                        } => {
+                            let was_empty = view.doc.pages.is_empty();
+                            let display =
+                                PathBuf::from(format!("{pdf_name}_p{:03}.pdf", index + 1));
+                            match view
+                                .doc
+                                .add_vector_page(display, preview_png, source, was_empty)
+                            {
+                                Ok(_) => {
+                                    view.mark_dirty();
+                                    view.mark_video_pool_dirty_all();
+                                    let note = if bands_empty {
+                                        " (没有长水平谱线, 已收成整页一块)"
+                                    } else {
+                                        ""
+                                    };
+                                    view.status = format!(
+                                        "PDF {pdf_name}: 矢量页 {done}/{total}{note} (共 {} 页)",
+                                        view.doc.pages.len()
+                                    )
+                                    .into();
+                                    view.hint = view.status.clone();
+                                    if was_empty {
+                                        view.refresh_render(cx);
+                                    }
+                                    cx.notify();
+                                }
+                                Err(e) => {
+                                    view.show_error("打开失败", crate::error::Error::msg(e), cx);
                                 }
                             }
                         }

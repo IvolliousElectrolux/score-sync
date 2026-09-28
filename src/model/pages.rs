@@ -14,14 +14,27 @@ impl DocState {
             return Err("页不存在".into());
         };
         if page.image.is_some() {
+            if let Some(src) = page.vector.as_ref() {
+                let (lw, lh) = src.logical_size();
+                if let Some(page) = self.pages.get_mut(page_idx) {
+                    page.img_w = lw;
+                    page.img_h = lh;
+                }
+            }
             return Ok(());
         }
         let path = page.disk_path.clone();
+        let logical = page.vector.as_ref().map(|s| s.logical_size());
         let max_side = self.display_max_side();
         let (w, h, img) = crate::page_cache::load_rgb_display(&path, max_side)?;
         if let Some(page) = self.pages.get_mut(page_idx) {
-            page.img_w = w;
-            page.img_h = h;
+            if let Some((lw, lh)) = logical {
+                page.img_w = lw;
+                page.img_h = lh;
+            } else {
+                page.img_w = w;
+                page.img_h = h;
+            }
             page.image = Some(Arc::new(img));
         }
         Ok(())
@@ -116,6 +129,7 @@ impl DocState {
             img_w: w,
             img_h: h,
             regions: HashMap::new(),
+            vector: None,
         };
         self.pages.push(page);
         let idx = self.pages.len() - 1;
@@ -145,6 +159,7 @@ impl DocState {
             img_w: w,
             img_h: h,
             regions: HashMap::new(),
+            vector: None,
         };
         self.pages.push(page);
         let idx = self.pages.len() - 1;
@@ -161,6 +176,37 @@ impl DocState {
         }
         Ok(idx)
     }
+
+    /// 登记一页矢量. `preview` 只是会话里的显示缓存, 不作为文档像素.
+    /// 区域坐标是 point. 返回是否认出了谱行.
+    pub fn add_vector_page(
+        &mut self,
+        display: PathBuf,
+        preview_png: PathBuf,
+        source: crate::vector_page::VectorSource,
+        switch_to: bool,
+    ) -> Result<(usize, bool), String> {
+        let (w, h) = source.logical_size();
+        let page = Page {
+            id: new_id(),
+            path: display,
+            disk_path: preview_png,
+            image: None,
+            img_w: w,
+            img_h: h,
+            regions: HashMap::new(),
+            vector: Some(source),
+        };
+        self.pages.push(page);
+        let idx = self.pages.len() - 1;
+        if switch_to {
+            self.current_page_index = idx;
+        }
+        let found = self.detect_vector_page(idx, true);
+        self.retain_memory_window();
+        Ok((idx, found))
+    }
+
     pub fn close_page_at(&mut self, index: usize) -> bool {
         !self.close_pages_at(&[index]).is_empty()
     }
@@ -330,9 +376,13 @@ impl DocState {
             format!("{stem}_copy{suf}")
         };
         let new_path = src.path.with_file_name(copy_name);
-        let disk_path = match crate::page_cache::duplicate_disk_png(&src.disk_path) {
-            Ok(p) => p,
-            Err(_) => return None,
+        let disk_path = if src.vector.is_some() {
+            src.disk_path.clone()
+        } else {
+            match crate::page_cache::duplicate_disk_png(&src.disk_path) {
+                Ok(p) => p,
+                Err(_) => return None,
+            }
         };
         let (img_w, img_h) = (src.width(), src.height());
         // 复制页不克隆像素; 若在窗口内再按需加载
@@ -347,6 +397,7 @@ impl DocState {
             img_w,
             img_h,
             regions: HashMap::new(),
+            vector: src.vector.clone(),
         };
         let mut new_region_ids = Vec::new();
         for r in ordered {

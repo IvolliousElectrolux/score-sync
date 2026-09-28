@@ -38,18 +38,29 @@ impl ScoreSyncApp {
             .values()
             .filter(|r| r.kind == "system")
             .count();
-        self.status = format!("本页识别到 {n} 块 (system={systems}).").into();
+        let vector_note = if self
+            .doc
+            .pages
+            .get(idx)
+            .map(|p| p.is_vector())
+            .unwrap_or(false)
+            && systems == 0
+        {
+            " 没有长水平谱线, 已收成整页一块."
+        } else {
+            ""
+        };
+        self.status = format!("本页识别到 {n} 块 (system={systems}).{vector_note}").into();
         self.hint = self.status.clone();
         self.after_doc_change(cx);
     }
 
     pub(super) fn current_page_pixels_ready(&self) -> bool {
         let idx = self.doc.current_page_index;
-        self.doc
-            .pages
-            .get(idx)
-            .and_then(|p| p.image.as_ref())
-            .is_some()
+        let Some(page) = self.doc.pages.get(idx) else {
+            return false;
+        };
+        page.is_vector() || page.image.is_some()
     }
 
     pub(super) fn flush_pending_redetect(&mut self, cx: &mut Context<Self>) {

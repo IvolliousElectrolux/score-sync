@@ -4,10 +4,10 @@ use std::ops::Range;
 
 use gpui::{
     actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
-    ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
-    Subscription, TextRun, UTF16Selection, UnderlineStyle, Window,
+    ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
+    SharedString, Style, Subscription, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::*;
 
@@ -56,7 +56,11 @@ pub struct TextInput {
 }
 
 impl TextInput {
-    pub fn new(cx: &mut Context<Self>, content: impl Into<SharedString>, placeholder: impl Into<SharedString>) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        content: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+    ) -> Self {
         let content: SharedString = content.into();
         let len = content.len();
         Self {
@@ -137,7 +141,12 @@ impl TextInput {
     }
 
     /// 根据光标 / 文本宽度把滚动夹到可见区内.
-    fn ensure_cursor_visible(scroll: Pixels, cursor_x: Pixels, text_w: Pixels, view_w: Pixels) -> Pixels {
+    fn ensure_cursor_visible(
+        scroll: Pixels,
+        cursor_x: Pixels,
+        text_w: Pixels,
+        view_w: Pixels,
+    ) -> Pixels {
         let mut scroll = scroll;
         let max_scroll = (text_w - view_w).max(px(0.));
         let margin = px(3.);
@@ -491,8 +500,7 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
 
         assert_eq!(last_layout.text, self.content);
-        let utf8_index =
-            last_layout.index_for_x(point.x - line_point.x + self.scroll_offset)?;
+        let utf8_index = last_layout.index_for_x(point.x - line_point.x + self.scroll_offset)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -549,14 +557,7 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (
-            content,
-            selected_range,
-            cursor,
-            marked_range,
-            placeholder,
-            prev_scroll,
-        ) = {
+        let (content, selected_range, cursor, marked_range, placeholder, prev_scroll) = {
             let input = self.input.read(cx);
             (
                 input.content.clone(),
@@ -712,7 +713,8 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self._blur_subscription.is_none() {
             let handle = self.focus_handle.clone();
-            self._blur_subscription = Some(cx.on_blur(&handle, window, Self::on_blur_clear_selection));
+            self._blur_subscription =
+                Some(cx.on_blur(&handle, window, Self::on_blur_clear_selection));
         }
         if self._focus_subscription.is_none() {
             let handle = self.focus_handle.clone();
@@ -765,9 +767,7 @@ impl Render for TextInput {
                     .flex()
                     .items_center()
                     .overflow_x_hidden()
-                    .child(TextElement {
-                        input: cx.entity(),
-                    }),
+                    .child(TextElement { input: cx.entity() }),
             )
     }
 }

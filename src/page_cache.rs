@@ -214,11 +214,37 @@ pub fn save_rgb_preview_jpeg(rgb: &RgbImage, path: &Path, max_side: u32) -> Resu
         .map_err(|e| format!("写入预览 JPEG 失败 ({}): {e}", path.display()))
 }
 
+/// 按文件头识别格式再解码. `image::open` 会先信扩展名, `.png` 里的 JPEG 会失败.
+pub fn open_image(path: &Path) -> Result<image::DynamicImage, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("读取图片失败 ({}): {e}", path.display()))?;
+    let sniffed = image::ImageReader::new(std::io::BufReader::new(file))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())
+        .and_then(|reader| reader.decode().map_err(|e| e.to_string()));
+    match sniffed {
+        Ok(img) => Ok(img),
+        Err(sniff_err) => image::open(path).map_err(|e| {
+            format!("读取图片失败 ({}): {e} (内容识别: {sniff_err})", path.display())
+        }),
+    }
+}
+
 /// 从磁盘解码 RGB.
 pub fn load_rgb(path: &Path) -> Result<RgbImage, String> {
-    image::open(path)
-        .map_err(|e| format!("读取页图失败 ({}): {e}", path.display()))
-        .map(|i| i.to_rgb8())
+    open_image(path).map(|i| i.to_rgb8())
+}
+
+/// 按文件头读宽高, 不看扩展名. `image::image_dimensions` 只信扩展名,
+/// `.png` 里的 JPEG 会失败或读错.
+pub fn image_file_dimensions(path: &Path) -> Result<(u32, u32), String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("读取图片失败 ({}): {e}", path.display()))?;
+    image::ImageReader::new(std::io::BufReader::new(file))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .into_dimensions()
+        .map_err(|e| format!("读取图片尺寸失败 ({}): {e}", path.display()))
 }
 
 /// 交互预览默认最长边 (画布尚未量到时). GUI 会按视口改成屏幕尺寸.
@@ -478,6 +504,20 @@ mod window_radius_tests {
     #[test]
     fn map_band_identity_when_same_height() {
         assert_eq!(super::map_band_to_proxy(100, 50, 1000, 1000), (100, 50));
+    }
+
+    #[test]
+    fn jpeg_named_png_opens_by_header() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../月光下的德累斯顿.png");
+        if !path.is_file() {
+            return;
+        }
+        let img = super::open_image(&path).expect("按文件头打开底色");
+        assert_eq!((img.width(), img.height()), (1422, 800));
+        assert_eq!(
+            super::image_file_dimensions(&path).expect("按文件头读尺寸"),
+            (1422, 800)
+        );
     }
 
     #[test]

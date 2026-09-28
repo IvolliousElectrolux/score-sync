@@ -50,10 +50,13 @@ pub struct Page {
     /// [`DocState::display_max_side`] 缩小, 坐标仍用下面的原图像素尺寸.
     /// `Arc` 让后台任务廉价共享同一份显示像素.
     pub image: Option<Arc<RgbImage>>,
-    /// 磁盘原图尺寸 (识别 / 区域 y0y1 / 导出). 与 `image` 像素宽高可能不同.
+    /// 磁盘原图尺寸, 或矢量页的 point 尺寸 (识别 / 区域 y0y1).
+    /// 与 `image` 像素宽高可能不同.
     pub img_w: u32,
     pub img_h: u32,
     pub regions: HashMap<String, Region>,
+    /// 有值时这一页是矢量: 坐标为 point, 像素只在预览和成片时光栅.
+    pub vector: Option<crate::vector_page::VectorSource>,
 }
 
 impl Page {
@@ -81,6 +84,10 @@ impl Page {
 
     pub fn height(&self) -> u32 {
         self.img_h
+    }
+
+    pub fn is_vector(&self) -> bool {
+        self.vector.is_some()
     }
 
     /// 当前内存里那份图的字节数 (显示代理; 未加载则按原图估).

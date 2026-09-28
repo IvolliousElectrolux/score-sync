@@ -135,6 +135,7 @@ impl DocState {
                     img_w: p.img_w,
                     img_h: p.img_h,
                     regions: p.regions.clone(),
+                    vector: p.vector.clone(),
                 })
                 .collect(),
             groups: self.groups.clone(),
