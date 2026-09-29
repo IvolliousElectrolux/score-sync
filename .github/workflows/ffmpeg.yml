@@ -10,6 +10,8 @@ name: slim ffmpeg
 
 on:
   push:
+    branches:
+      - main
     paths:
       - scripts/build_ffmpeg.sh
       - .github/workflows/ffmpeg.yml
@@ -193,12 +195,27 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view sidecars >/dev/null 2>&1; then
-            gh release create sidecars --title sidecars --notes "pdfium / ffmpeg / background sidecars"
+            gh release create sidecars --title sidecars --notes "pdfium / ffmpeg / background sidecars" || true
           fi
-          gh release upload sidecars "dist/${{ matrix.asset }}" --clobber
-          if [ -f dist/ffmpeg-COPYING.txt ]; then
-            gh release upload sidecars dist/ffmpeg-COPYING.txt --clobber
-          fi
-          if [ -f dist/ffmpeg-SOURCE.txt ]; then
-            gh release upload sidecars dist/ffmpeg-SOURCE.txt --clobber
+          # --clobber 是先删再传. 五个平台同时传同一个文件名会 422 name already exists.
+          upload() {
+            local f="$1"
+            local i
+            for i in 1 2 3 4 5; do
+              if gh release upload sidecars "$f" --clobber; then
+                return 0
+              fi
+              echo "upload $f failed, retry $i"
+              sleep $((i * 3))
+            done
+            return 1
+          }
+          upload "dist/${{ matrix.asset }}"
+          if [ "${{ matrix.id }}" = "linux-x64" ]; then
+            if [ -f dist/ffmpeg-COPYING.txt ]; then
+              upload dist/ffmpeg-COPYING.txt
+            fi
+            if [ -f dist/ffmpeg-SOURCE.txt ]; then
+              upload dist/ffmpeg-SOURCE.txt
+            fi
           fi
