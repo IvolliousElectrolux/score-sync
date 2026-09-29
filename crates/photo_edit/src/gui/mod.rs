@@ -237,7 +237,7 @@ impl PhotoEditApp {
             recent_colors: default_recent_colors(),
             lasso_draft: None,
             lasso_cursor: None,
-            grade_pane: GradePane::Off,
+            grade_pane: GradePane::Tool,
             tone: Tone::default(),
             tone_tracks: [Bounds::default(); 7],
             filter_amt: FilterAmt::default(),
@@ -760,6 +760,7 @@ impl PhotoEditApp {
             zoom: self.zoom,
             user_zoomed: self.user_zoomed,
             selection: None,
+            affects_doc: true,
         })
     }
 
@@ -780,17 +781,35 @@ impl PhotoEditApp {
         if !self.tone_applying {
             self.finish_tone();
         }
-        if let Some(snap) = self.history_snap() {
-            self.undo_stack.push(snap);
-            if self.undo_stack.len() > HISTORY_LIMIT {
-                self.undo_stack.remove(0);
-            }
-            self.redo_stack.clear();
+        self.push_snap(self.history_snap());
+    }
+
+    /// Esc 取消选区. 不调用 `finish_tone`, 拖动条和像素都留在当前值.
+    pub(crate) fn push_selection_undo(&mut self) {
+        let Some(mut snap) = self.history_snap() else {
+            return;
+        };
+        snap.selection = Some(self.selection.clone());
+        snap.affects_doc = false;
+        self.push_snap(Some(snap));
+    }
+
+    fn push_snap(&mut self, snap: Option<HistorySnap>) {
+        let Some(snap) = snap else {
+            return;
+        };
+        self.undo_stack.push(snap);
+        if self.undo_stack.len() > HISTORY_LIMIT {
+            self.undo_stack.remove(0);
         }
+        self.redo_stack.clear();
     }
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
-        self.finish_tone();
+        let selection_only = self.undo_stack.last().is_some_and(|s| !s.affects_doc);
+        if !selection_only {
+            self.finish_tone();
+        }
         let Some(mut cur) = self.history_snap() else {
             return;
         };
@@ -800,16 +819,20 @@ impl PhotoEditApp {
         if prev.selection.is_some() {
             cur.selection = Some(self.selection.clone());
         }
+        if !prev.affects_doc {
+            cur.affects_doc = false;
+        }
         self.redo_stack.push(cur);
-        self.restore_snap(prev);
-        self.dirty = true;
-        self.rebuild_preview();
+        self.restore_history(prev);
         self.status = "已撤销".into();
         self.notify_chrome(cx);
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
-        self.finish_tone();
+        let selection_only = self.redo_stack.last().is_some_and(|s| !s.affects_doc);
+        if !selection_only {
+            self.finish_tone();
+        }
         let Some(mut cur) = self.history_snap() else {
             return;
         };
@@ -819,12 +842,25 @@ impl PhotoEditApp {
         if next.selection.is_some() {
             cur.selection = Some(self.selection.clone());
         }
+        if !next.affects_doc {
+            cur.affects_doc = false;
+        }
         self.undo_stack.push(cur);
-        self.restore_snap(next);
-        self.dirty = true;
-        self.rebuild_preview();
+        self.restore_history(next);
         self.status = "已重做".into();
         self.notify_chrome(cx);
+    }
+
+    fn restore_history(&mut self, snap: HistorySnap) {
+        if !snap.affects_doc {
+            if let Some(sel) = snap.selection {
+                self.selection = sel;
+            }
+            return;
+        }
+        self.restore_snap(snap);
+        self.dirty = true;
+        self.rebuild_preview();
     }
 
     pub fn fit_to_view(&mut self, cx: &mut Context<Self>) {
@@ -919,6 +955,9 @@ impl PhotoEditApp {
             self.lasso_cursor = None;
         }
         self.mode = mode;
+        if mode.shows_tool_pane() {
+            self.grade_pane = GradePane::Tool;
+        }
         self.drag = None;
         if !mode.uses_brush() {
             self.brush_cursor = None;

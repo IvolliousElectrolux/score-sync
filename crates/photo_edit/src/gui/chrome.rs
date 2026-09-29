@@ -547,15 +547,6 @@ impl PhotoEditApp {
                     .child(self.hardness_slider(cx));
             }
             ToolMode::Eraser => {
-                let hint = match (self.erase_target, self.trace_erase) {
-                    (EraseTarget::Layer, _) => "单击删最上层, 拖动删碰到的图层; Alt+滚轮调大小",
-                    (EraseTarget::Trace, TraceErase::Dab) => {
-                        "单击擦最上层笔尖, 拖动擦碰到的盖章点; 从中间擦断会拆成两笔"
-                    }
-                    (EraseTarget::Trace, TraceErase::Stroke) => {
-                        "单击删最上面一整笔, 拖动删碰到的每一笔"
-                    }
-                };
                 box_ = box_.child(self.brush_size_slider(cx)).child(
                     div()
                         .flex()
@@ -610,7 +601,6 @@ impl PhotoEditApp {
                             )),
                     );
                 }
-                box_ = box_.child(div().text_color(rgb(0x64748b)).child(hint));
             }
             ToolMode::Wand => {
                 box_ = box_
@@ -640,19 +630,7 @@ impl PhotoEditApp {
                                 },
                                 cx,
                             )),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0x64748b))
-                            .child("Shift 加选, Alt 减选, Shift+Alt 交选"),
                     );
-            }
-            ToolMode::Lasso => {
-                box_ = box_.child(
-                    div()
-                        .text_color(rgb(0x64748b))
-                        .child("单击折线, 按住拖轨迹, 靠近首点或松手闭环"),
-                );
             }
             _ => {}
         }
@@ -896,6 +874,13 @@ impl PhotoEditApp {
             .px_2()
             .py_1()
             .child(self.chip(
+                "grade_tools",
+                "工具",
+                self.grade_pane == GradePane::Tool,
+                |this, _, cx| this.toggle_grade(GradePane::Tool, cx),
+                cx,
+            ))
+            .child(self.chip(
                 "grade_filters",
                 "滤镜",
                 self.grade_pane == GradePane::Filters,
@@ -922,7 +907,7 @@ impl PhotoEditApp {
         match self.grade_pane {
             GradePane::Filters => body.child(self.filter_pane(cx)),
             GradePane::Tone => body.child(self.tone_pane(cx)),
-            GradePane::Off => body.child(self.tool_opts(cx)),
+            GradePane::Tool => body.child(self.tool_opts(cx)),
         }
     }
 
@@ -946,9 +931,7 @@ impl PhotoEditApp {
             .flex_col()
             .gap_1()
             .child(row)
-            .child(col.child(div().text_color(rgb(0x64748b)).child(
-                "0 为原图, 向右加深. 灰度和棕褐到最右即满, 锐化, 模糊, 褪色, 暗角可以比点一下更深. 有选区时只改选区. 自动色阶和反相点一下生效.",
-            )))
+            .child(col)
     }
 
     fn filter_slider(&self, kind: FilterSlider, cx: &mut Context<Self>) -> impl IntoElement {
@@ -974,9 +957,7 @@ impl PhotoEditApp {
         for kind in ToneSlider::ALL {
             col = col.child(self.tone_slider(kind, cx));
         }
-        col.child(div().text_color(rgb(0x64748b)).child(
-            "以 0 为原图, 向右增强, 向左减弱. 色温向右偏暖, 色调向右偏品红. 有选区时只改选区.",
-        ))
+        col
     }
 
     fn tone_slider(&self, kind: ToneSlider, cx: &mut Context<Self>) -> impl IntoElement {

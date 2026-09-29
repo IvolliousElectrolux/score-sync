@@ -8,8 +8,10 @@ pub(crate) struct HistorySnap {
     pub pan: Point<f32>,
     pub zoom: f32,
     pub user_zoomed: bool,
-    /// 画布改边时记下选区. 撤销/重做才恢复; 其它操作留着 `None`, 不碰当前选区.
+    /// 画布改边或 Esc 取消选区时记下选区. 撤销/重做才恢复; 其它操作留着 `None`, 不碰当前选区.
     pub selection: Option<crate::process::Selection>,
+    /// 为 false 时这条记录只改选区, 撤销时不回写文档, 也不把修图标成已修改.
+    pub affects_doc: bool,
 }
 pub(crate) const GPU_TEX_MAX_SIDE: u32 = 2048;
 pub(crate) const BRUSH_MIN: f32 = 2.0;
@@ -185,6 +187,14 @@ impl ToolMode {
 
     pub(crate) fn uses_selection(self) -> bool {
         matches!(self, Self::Select | Self::Wand | Self::Lasso)
+    }
+
+    /// 选中后右侧应打开「工具」页. 框选, 移动, 画布, 套索没有要一起看的控件.
+    pub(crate) fn shows_tool_pane(self) -> bool {
+        matches!(
+            self,
+            Self::Heal | Self::Clone | Self::Paint | Self::Eraser | Self::Wand
+        )
     }
 }
 
@@ -366,10 +376,10 @@ impl SliderKind {
     }
 }
 
-/// 右侧「滤镜 / 调整」当前展开的一页. 关掉时仍显示当前工具的选项.
+/// 右侧「工具 / 滤镜 / 调整」当前页. 三页可以来回切, 不清除选区.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GradePane {
-    Off,
+    Tool,
     Filters,
     Tone,
 }

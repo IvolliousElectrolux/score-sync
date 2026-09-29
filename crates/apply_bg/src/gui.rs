@@ -53,7 +53,6 @@ pub struct ApplyBgApp {
     progress_done: usize,
     progress_total: usize,
     running: bool,
-    hint: SharedString,
     error_dialog: Option<(SharedString, SharedString)>,
     /// 按下的按钮 id; 松开须仍在同一按钮才算点击.
     btn_press: Option<&'static str>,
@@ -89,10 +88,6 @@ impl ApplyBgApp {
             progress_done: 0,
             progress_total: 0,
             running: false,
-            hint: format!(
-                "谱面完整装进比例画布: 装得下则宽=谱面宽上下补边, 上下超了则高=谱面高左右补边. 路径记入 %APPDATA%\\apply_bg; 比例仅在修改或恢复默认后保存 (默认 {DEFAULT_ASPECT_W}:{DEFAULT_ASPECT_H})."
-            )
-            .into(),
             error_dialog: None,
             btn_press: None,
         }
@@ -755,12 +750,6 @@ impl ApplyBgApp {
                 cx,
             ))
             .child(self.aspect_row(cx))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x64748b))
-                    .child(self.hint.clone()),
-            )
             .child(
                 div()
                     .w_full()

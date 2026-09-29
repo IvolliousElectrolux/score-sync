@@ -805,12 +805,16 @@ impl Render for ScoreSyncApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &CancelParamEdit, window, cx| {
-                if this.pdf_import.is_some() {
-                    this.close_import_dialog(cx);
-                } else if this.param_edit.is_some() {
+                // 无上下文的 Esc 和 PhotoEdit 的 Esc 深度相同, 后注册的这条会先接到按键.
+                // 没有要关掉的浮层时, 交给修图: 取消选区, 或离开本次修图.
+                if this.param_edit.is_some() {
                     this.cancel_param_edit(window, cx);
                 } else if this.region_y_edit.is_some() {
                     this.cancel_edit_y(window, cx);
+                } else if this.has_modal_overlay(cx) {
+                    this.dismiss_blocking_overlays(cx);
+                } else if this.photo_open() {
+                    this.photo_edit.update(cx, |p, cx| p.on_escape(cx));
                 } else {
                     this.dismiss_blocking_overlays(cx);
                 }
@@ -1444,4 +1448,29 @@ fn default_window_bounds(cx: &App) -> Bounds<Pixels> {
     let w = PREF_W.min(max_w).clamp(1., avail_w.max(1.));
     let h = PREF_H.min(max_h).clamp(1., avail_h.max(1.));
     Bounds::centered(None, size(px(w), px(h)), cx)
+}
+
+#[cfg(test)]
+mod esc_key_tests {
+    use gpui::{KeyBinding, KeyContext, Keymap, Keystroke};
+
+    use super::CancelParamEdit;
+
+    #[test]
+    fn global_escape_is_dispatched_before_photo_edit() {
+        let mut keymap = Keymap::default();
+        keymap.add_bindings([
+            KeyBinding::new("escape", photo_edit::gui::Cancel, Some("PhotoEdit")),
+            KeyBinding::new("escape", CancelParamEdit, None),
+        ]);
+        let (result, pending) = keymap.bindings_for_input(
+            &[Keystroke::parse("escape").unwrap()],
+            &[KeyContext::parse("PhotoEdit").unwrap()],
+        );
+        assert!(!pending);
+        assert!(
+            result[0].action().partial_eq(&CancelParamEdit),
+            "无上下文的 Esc 后注册, 深度与 PhotoEdit 相同, 会先于修图的 Cancel"
+        );
+    }
 }

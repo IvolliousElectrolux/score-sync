@@ -27,12 +27,9 @@ impl PhotoEditApp {
             return;
         }
         if !self.selection.is_none() {
+            self.push_selection_undo();
             self.selection = Selection::None;
             self.notify_chrome(cx);
-            return;
-        }
-        if self.mode != ToolMode::Select {
-            self.set_mode(ToolMode::Select, cx);
             return;
         }
         self.request_cancel(cx);

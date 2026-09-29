@@ -355,8 +355,8 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
-    /// 导入的那张底色文件的宽高. 拉伸盖住之后, 会话里的图短边对齐目标, 长边可能更长,
-    /// 「用底色尺寸」不能去读那张拉伸结果.
+    /// 导入的那张底色文件的宽高. 等比填充之后, 会话里的图短边对齐目标, 长边可能更长,
+    /// 「设为分辨率」不能去读那张填充结果.
     fn imported_bg_dimensions(&self) -> Option<(u32, u32)> {
         let path = self
             .bg
@@ -405,7 +405,7 @@ impl ScoreSyncApp {
         else {
             self.show_error(
                 "无法读取底色",
-                crate::error::Error::msg("请先点「选择底色」导入一张底色图."),
+                crate::error::Error::msg("请先使用「选择底色」导入底色图."),
                 cx,
             );
             return;
@@ -421,14 +421,14 @@ impl ScoreSyncApp {
         });
         self.bg.aspect_syncing = false;
         if w == self.doc.bg_aspect_w && h == self.doc.bg_aspect_h {
-            self.status = format!("目标分辨率已是底色的 {w}×{h}.").into();
+            self.status = format!("目标分辨率已为 {w}×{h}.").into();
             self.hint = self.status.clone();
             cx.notify();
             return;
         }
         self.set_bg_aspect(w, h, cx);
         if self.dialog.is_none() && !self.doc.bg_enabled {
-            self.status = format!("目标分辨率已改为底色的 {w}×{h}.").into();
+            self.status = format!("目标分辨率已设为原图尺寸 {w}×{h}.").into();
             self.hint = self.status.clone();
             cx.notify();
         }
@@ -437,8 +437,8 @@ impl ScoreSyncApp {
     fn stretch_bg_to_cover(&mut self, cx: &mut Context<Self>) {
         let Some(img) = self.image_for_bg_edit() else {
             self.show_error(
-                "无法拉伸底色",
-                crate::error::Error::msg("请先点「选择底色」导入一张底色图."),
+                "无法填充底色",
+                crate::error::Error::msg("请先使用「选择底色」导入底色图."),
                 cx,
             );
             return;
@@ -447,7 +447,7 @@ impl ScoreSyncApp {
         let th = self.doc.bg_aspect_h.max(1);
         let (nw, nh) = apply_bg::process::cover_target(img.width(), img.height(), tw, th);
         if nw == img.width() && nh == img.height() {
-            self.status = format!("底色已是 {nw}×{nh}, 短边已对齐目标 {tw}×{th}.").into();
+            self.status = format!("底色为 {nw}×{nh}, 短边已对齐目标 {tw}×{th}.").into();
             self.hint = self.status.clone();
             cx.notify();
             return;
@@ -456,9 +456,9 @@ impl ScoreSyncApp {
         self.commit_edited_bg(resized, cx);
         if self.dialog.is_none() {
             let status = if nw > tw || nh > th {
-                format!("已把底色拉伸到 {nw}×{nh}, 短边对齐目标 {tw}×{th}, 长边超出.")
+                format!("底色已等比填充为 {nw}×{nh}. 短边对齐 {tw}×{th}, 长边超出.")
             } else {
-                format!("宽高比很接近, 已把底色拉齐到 {nw}×{nh}.")
+                format!("宽高比接近, 底色已改为 {nw}×{nh}.")
             };
             self.status = status.into();
             self.hint = self.status.clone();
@@ -506,7 +506,7 @@ impl ScoreSyncApp {
             self.bg.eyedropper_armed = true;
             self.mask_tool
                 .update(cx, |m, cx| m.set_host_pick_armed(true, cx));
-            self.status = "取色: 在左侧预览上移动预览, 单击确认, 右键取消".into();
+            self.status = "取色: 在左侧预览中移动指针, 单击确认, 右键取消".into();
         }
         self.hint = self.status.clone();
         cx.notify();
@@ -546,7 +546,7 @@ impl ScoreSyncApp {
             self.push_bg_undo();
             self.apply_image_inner(cx);
         } else {
-            self.status = "已选择底色图, 点「应用底色」叠到工程组合.".into();
+            self.status = "已选择底色图. 点「应用底色」叠加到各输出组合.".into();
             self.hint = self.status.clone();
             cx.notify();
         }
@@ -583,7 +583,7 @@ impl ScoreSyncApp {
                     view.cache_bg_file(path, rgb);
                     view.bg.pending_preview = Some(rgb_to_render_image(&thumb));
                     view.status =
-                        format!("已选择底色图 {w}×{h}, 点「应用底色」叠到工程组合.").into();
+                        format!("已选择底色图 {w}×{h}. 点「应用底色」叠加到各输出组合.").into();
                     view.hint = view.status.clone();
                     cx.notify();
                 }
@@ -731,11 +731,11 @@ impl ScoreSyncApp {
             let gen = self.doc.bg_gen;
             self.apply_project_bg_image(arc, source, cx);
             if self.doc.bg_gen != gen {
-                self.status = "已把修图写回底色.".into();
+                self.status = "修图结果已写回底色.".into();
                 self.hint = self.status.clone();
             }
         } else {
-            self.status = "已更新底色图, 点「应用底色」叠到组合.".into();
+            self.status = "底色图已更新. 点「应用底色」后生效.".into();
             self.hint = self.status.clone();
         }
         cx.notify();
@@ -817,7 +817,7 @@ impl ScoreSyncApp {
         if self.load_cached_bg_image().is_none() {
             self.show_error(
                 "无法应用底色",
-                crate::error::Error::msg("请先点「选择底色」导入一张底色图."),
+                crate::error::Error::msg("请先使用「选择底色」导入底色图."),
                 cx,
             );
             return;
@@ -842,7 +842,7 @@ impl ScoreSyncApp {
         let Some(img) = self.image_for_bg_edit() else {
             self.show_error(
                 "无法应用底色",
-                crate::error::Error::msg("请先点「选择底色」导入一张底色图."),
+                crate::error::Error::msg("请先使用「选择底色」导入底色图."),
                 cx,
             );
             return;
@@ -857,7 +857,7 @@ impl ScoreSyncApp {
         if self.doc.groups.is_empty() {
             self.show_error(
                 "提示",
-                crate::error::Error::msg("当前没有输出组合. 请先分块/合并后再应用底色层."),
+                crate::error::Error::msg("当前没有输出组合. 请先完成分块或合并."),
                 cx,
             );
             return;
@@ -872,7 +872,7 @@ impl ScoreSyncApp {
         self.mark_dirty();
         self.mark_video_pool_dirty_all();
         self.status = format!(
-            "已为 {} 个组合启用底色层 纯色 ({}:{})",
+            "已为 {} 个组合应用纯色底色 ({}×{})",
             self.doc.groups.len(),
             aw,
             ah
@@ -894,7 +894,7 @@ impl ScoreSyncApp {
         if self.doc.groups.is_empty() {
             self.show_error(
                 "提示",
-                crate::error::Error::msg("当前没有输出组合. 请先分块/合并后再应用底色层."),
+                crate::error::Error::msg("当前没有输出组合. 请先完成分块或合并."),
                 cx,
             );
             return;
@@ -909,7 +909,7 @@ impl ScoreSyncApp {
             .unwrap_or(1)
             .max(1);
         let (src_w, src_h) = rgb.dimensions();
-        // 比目标小的图按「拉伸盖住」同一套等比放大后再裁页. 矢量页的逻辑宽
+        // 比目标小的图按「等比填充」同一套等比放大后再裁页. 矢量页的逻辑宽
         // 只是 point, 不能拿它当底色像素, 也不能因此拒绝一张盖得住目标的原图.
         let rgb = if apply_bg::process::bg_page_rect(src_w, src_h, aw, ah, sheet_w).is_some() {
             rgb
@@ -920,7 +920,7 @@ impl ScoreSyncApp {
                 self.show_error(
                     "底色不适用",
                     crate::error::Error::msg(format!(
-                        "底色 ({src_w}×{src_h}) 无法盖住目标分辨率 ({aw}×{ah})."
+                        "底色 ({src_w}×{src_h}) 无法覆盖目标分辨率 ({aw}×{ah})."
                     )),
                     cx,
                 );
@@ -1219,7 +1219,7 @@ impl ScoreSyncApp {
                                     ))
                                     .child(self.bg_flex_btn(
                                         "bg_use_size",
-                                        "用底色尺寸".into(),
+                                        "设为分辨率".into(),
                                         false,
                                         can_image,
                                         |this, window, cx| {
@@ -1230,7 +1230,7 @@ impl ScoreSyncApp {
                                     ))
                                     .child(self.bg_flex_btn(
                                         "bg_cover",
-                                        "拉伸盖住".into(),
+                                        "等比填充".into(),
                                         false,
                                         can_image,
                                         |this, window, cx| {

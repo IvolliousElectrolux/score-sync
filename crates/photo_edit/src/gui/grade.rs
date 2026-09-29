@@ -35,7 +35,7 @@ pub(crate) struct TonePreview {
 
 impl PhotoEditApp {
     pub(crate) fn reset_grade_ui(&mut self) {
-        self.grade_pane = GradePane::Off;
+        self.grade_pane = GradePane::Tool;
         self.abandon_tone();
     }
 
@@ -63,12 +63,9 @@ impl PhotoEditApp {
         self.tone.is_neutral() && self.filter_amt.is_neutral()
     }
 
+    /// 切到某一页. 再点当前页保持不动, 不结束这一轮滤镜, 也不清除选区.
     pub(crate) fn toggle_grade(&mut self, pane: GradePane, cx: &mut Context<Self>) {
-        self.grade_pane = if self.grade_pane == pane {
-            GradePane::Off
-        } else {
-            pane
-        };
+        self.grade_pane = pane;
         self.notify_chrome(cx);
     }
 

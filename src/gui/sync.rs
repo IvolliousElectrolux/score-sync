@@ -1932,7 +1932,7 @@ impl ScoreSyncApp {
                 self.scroll_mask_lists_to_active();
                 self.focus_handle.focus(window);
                 self.status = "底色".into();
-                self.hint = "左侧预览组合 (滚轮切换). 右侧选择底色图或纯色, 再应用/取消.".into();
+                self.hint = "左侧预览当前组合, 滚轮切换. 在右侧导入底色图或指定纯色, 然后应用.".into();
             }
             SideTool::Video => {
                 self.score_video
