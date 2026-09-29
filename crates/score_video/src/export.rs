@@ -1476,4 +1476,212 @@ mod tests {
             );
         }
     }
+
+    fn note_glyph(letter: u8) -> [u8; 7] {
+        match letter {
+            b'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
+            b'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+            b'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+            _ => [0; 7],
+        }
+    }
+
+    fn draw_note_page(path: &Path, letter: u8, rgb: [u8; 3]) {
+        let (w, h) = (160u32, 90u32);
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+        let glyph = note_glyph(letter);
+        let scale = 8u32;
+        let ox = (w - 5 * scale) / 2;
+        let oy = (h - 7 * scale) / 2;
+        for y in 0..7u32 {
+            for x in 0..5u32 {
+                if glyph[y as usize] & (1 << (4 - x)) == 0 {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        img.put_pixel(
+                            ox + x * scale + dx,
+                            oy + y * scale + dy,
+                            image::Rgba([0, 0, 0, 255]),
+                        );
+                    }
+                }
+            }
+        }
+        img.save(path).unwrap();
+    }
+
+    fn write_edge_beep_wav(path: &Path, sr: u32, duration: f64, freq: f64) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: sr,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        let n = (duration * sr as f64).round() as u32;
+        let beep_n = (0.08 * sr as f64).round() as u32;
+        let end_beep = n.saturating_sub((0.38 * sr as f64).round() as u32);
+        let end_beep_stop = n.saturating_sub((0.30 * sr as f64).round() as u32);
+        for i in 0..n {
+            let on = i < beep_n || (i >= end_beep && i < end_beep_stop);
+            let s = if on {
+                ((i as f64 * freq * 2.0 * std::f64::consts::PI / sr as f64).sin() * 20000.0) as i16
+            } else {
+                0
+            };
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    /// 非整数秒的 flac: 开头和结尾各一声. 时长若被收成整数秒, 尾音会被裁掉,
+    /// 下一段的开头音也会提前. 画面用音名字母, 核对翻页没有相对音频再偏一截.
+    #[test]
+    fn fractional_flac_tails_stay_with_the_page() {
+        if !ffmpeg_available() {
+            eprintln!("skip: ffmpeg missing");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sv_frac_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sr = 44100u32;
+        let notes: [(&str, u8, f64, f64, [u8; 3]); 3] = [
+            ("C", b'C', 261.626, 3.8, [229, 57, 53]),
+            ("D", b'D', 293.665, 2.7, [251, 140, 0]),
+            ("E", b'E', 329.628, 4.8, [253, 216, 53]),
+        ];
+        let mut pool = Vec::new();
+        let mut tl = Timeline::new();
+        let mut cursor = 0.0;
+        let mut expect_onsets = Vec::new();
+        let mut boundaries = Vec::new();
+        for (name, letter, freq, dur, rgb) in notes {
+            let wav = dir.join(format!("{name}.wav"));
+            let flac = dir.join(format!("{name}.flac"));
+            let png = dir.join(format!("{name}.png"));
+            write_edge_beep_wav(&wav, sr, dur, freq);
+            assert!(
+                run_ff(&[
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    wav.to_str().unwrap(),
+                    "-c:a",
+                    "flac",
+                    flac.to_str().unwrap(),
+                ]),
+                "encode {name}.flac"
+            );
+            let probed = crate::audio::probe_duration(&flac).unwrap();
+            assert!(
+                (probed - dur).abs() < 0.002,
+                "{name} probed {probed}, want {dur}"
+            );
+            draw_note_page(&png, letter, rgb);
+            pool.push(MaterialItem {
+                group_id: name.into(),
+                label: name.into(),
+                cache_path: png,
+                width: 160,
+                height: 90,
+            });
+            tl.video_clips.push(clip(name, cursor, cursor + probed));
+            tl.audio_clips.push(audio_clip(flac, probed, 0.0));
+            expect_onsets.push(cursor);
+            expect_onsets.push(cursor + dur - 0.38);
+            cursor += probed;
+            boundaries.push(cursor);
+        }
+
+        let out = dir.join("CDE.mkv");
+        let opts = ExportOptions {
+            container: Container::Mkv,
+            width: 160,
+            height: 90,
+            fps: 30,
+            crf: 23,
+            out_path: out.clone(),
+            fade_bg_rgb: [255, 255, 255],
+        };
+        let rx = export_async(tl, pool, opts);
+        loop {
+            match rx.recv_blocking() {
+                Ok(ExportMsg::Progress(_)) => {}
+                Ok(ExportMsg::Done(Ok(_))) => break,
+                Ok(ExportMsg::Done(Err(e))) => panic!("export failed: {e}"),
+                Err(_) => panic!("export channel closed"),
+            }
+        }
+
+        let wav = dir.join("CDE.wav");
+        assert!(
+            run_ff(&[
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                out.to_str().unwrap(),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "44100",
+                "-c:a",
+                "pcm_s16le",
+                wav.to_str().unwrap(),
+            ]),
+            "extract wav"
+        );
+        let onsets = beep_onsets(&wav, sr);
+        assert_eq!(onsets.len(), expect_onsets.len(), "onsets={onsets:?} want={expect_onsets:?}");
+        for (got, exp) in onsets.iter().zip(expect_onsets.iter()) {
+            assert!((got - exp).abs() < 0.03, "onset {got} expected {exp}");
+        }
+
+        let page = [notes[0].4, notes[1].4, notes[2].4];
+        let checks = [
+            (boundaries[0] - 0.05, 0usize),
+            (boundaries[0] + 0.05, 1usize),
+            (boundaries[1] - 0.05, 1usize),
+            (boundaries[1] + 0.05, 2usize),
+        ];
+        for (i, (t, want)) in checks.iter().enumerate() {
+            let frame = dir.join(format!("f{i}.png"));
+            let ts = format!("{t:.6}");
+            assert!(
+                run_ff(&[
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    out.to_str().unwrap(),
+                    "-ss",
+                    &ts,
+                    "-frames:v",
+                    "1",
+                    frame.to_str().unwrap(),
+                ]),
+                "frame at {t}"
+            );
+            let img = image::open(&frame).unwrap().to_rgb8();
+            let px = img.get_pixel(2, 2).0;
+            let mut best = 0usize;
+            let mut best_d = i32::MAX;
+            for (j, c) in page.iter().enumerate() {
+                let d = rgb_dist(px, *c);
+                if d < best_d {
+                    best_d = d;
+                    best = j;
+                }
+            }
+            assert_eq!(best, *want, "t={t:.3} corner {px:?} closest to page {best}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

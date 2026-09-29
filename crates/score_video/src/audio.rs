@@ -9,7 +9,7 @@
 
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -679,11 +679,75 @@ fn open_decoder_raw(path: &Path) -> Option<Decoder<BufReader<File>>> {
     result.ok().flatten()
 }
 
+/// FLAC STREAMINFO: 20 bit 采样率, 中间 8 bit (声道/位深), 低 36 bit 为
+/// 每声道采样数. 采样数为 0 表示未知, 交给后面的探测.
+fn flac_streaminfo_duration(path: &Path) -> Option<f64> {
+    let mut file = File::open(path).ok()?;
+    skip_id3v2(&mut file)?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).ok()?;
+    if &magic != b"fLaC" {
+        return None;
+    }
+    let mut hdr = [0u8; 4];
+    file.read_exact(&mut hdr).ok()?;
+    if hdr[0] & 0x7F != 0 {
+        return None;
+    }
+    let len = u32::from_be_bytes([0, hdr[1], hdr[2], hdr[3]]) as usize;
+    if len < 18 {
+        return None;
+    }
+    let mut info = vec![0u8; len];
+    file.read_exact(&mut info).ok()?;
+    let word = u64::from_be_bytes(info[10..18].try_into().ok()?);
+    let sample_rate = (word >> 44) & 0xF_FFFF;
+    let samples = word & 0xF_FFFF_FFFF;
+    if sample_rate == 0 || samples == 0 {
+        return None;
+    }
+    Some(samples as f64 / sample_rate as f64)
+}
+
+/// 有的封装在 `fLaC` 前面贴了 ID3v2. 没有标签时把读指针拨回文件头.
+fn skip_id3v2(file: &mut File) -> Option<()> {
+    let mut hdr = [0u8; 10];
+    if file.read_exact(&mut hdr).is_err() {
+        return None;
+    }
+    if &hdr[..3] != b"ID3" {
+        file.seek(SeekFrom::Start(0)).ok()?;
+        return Some(());
+    }
+    let size = synchsafe_u32(&hdr[6..10])?;
+    let footer = if hdr[5] & 0x10 != 0 { 10 } else { 0 };
+    file.seek(SeekFrom::Start(10 + u64::from(size) + footer))
+        .ok()?;
+    Some(())
+}
+
+fn synchsafe_u32(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 4 || bytes.iter().any(|b| b & 0x80 != 0) {
+        return None;
+    }
+    Some(
+        ((bytes[0] as u32) << 21)
+            | ((bytes[1] as u32) << 14)
+            | ((bytes[2] as u32) << 7)
+            | (bytes[3] as u32),
+    )
+}
+
 /// 探测音频文件总时长; 导入时调用.
 ///
-/// `.wav` 走 `hound` 读头. `.m4a` 等 MPEG-4 只问 ffmpeg, 绝不走 rodio
+/// `.wav` 走 `hound` 读头. `.flac` 读 STREAMINFO 里的采样数 (和文件尾的
+/// 静音一起算进去). `.m4a` 等 MPEG-4 只问 ffmpeg, 绝不走 rodio
 /// (带封面的商店 m4a 会在 rodio 初始化时 panic).
-/// 其它格式先 rodio 元数据, 失败再 ffmpeg, 最后整段计数.
+///
+/// 不要用 rodio 0.19 的 `total_duration`: symphonia 的小数秒在
+/// `[0, 1)`, 它却写成 `Duration::new(秒, (1/小数) 纳秒)`, 小数部分几乎
+/// 被丢掉. 48.800 秒会变成 48.000 秒. 多段导入时下一段最多提前将近 1 秒
+/// 接上, 而且一段一段往后面累加. 其它格式先问 ffmpeg 解出来的微秒时长.
 pub fn probe_duration(path: &Path) -> Result<f64, crate::error::Error> {
     if !path.is_file() {
         return Err(crate::error::Error::AudioMissing(path.to_path_buf()));
@@ -698,21 +762,15 @@ pub fn probe_duration(path: &Path) -> Result<f64, crate::error::Error> {
             }
         }
     }
+    if ext == "flac" {
+        if let Some(secs) = flac_streaminfo_duration(path) {
+            return Ok(secs);
+        }
+    }
     if needs_ffmpeg_preview(path) {
         return ffmpeg_probe_duration(path).ok_or_else(|| {
             crate::error::Error::audio_probe(path, "ffmpeg 无法读取时长 (文件损坏或没有音轨)")
         });
-    }
-    if let Some(dec) = open_decoder_raw(path) {
-        if let Some(d) = std::panic::catch_unwind(AssertUnwindSafe(|| dec.total_duration()))
-            .ok()
-            .flatten()
-        {
-            let secs = d.as_secs_f64();
-            if secs > 0.001 {
-                return Ok(secs);
-            }
-        }
     }
     if let Some(secs) = ffmpeg_probe_duration(path) {
         return Ok(secs);
@@ -1056,5 +1114,83 @@ mod tests {
         let raw = std::panic::catch_unwind(|| super::open_decoder_raw(p));
         assert!(raw.is_ok(), "open_decoder_raw must catch rodio panic");
         assert!(raw.unwrap().is_none(), "rodio must not decode this m4a");
+    }
+
+    fn write_flac_header(path: &std::path::Path, sample_rate: u32, samples: u64, id3: bool) {
+        let mut body = Vec::new();
+        if id3 {
+            body.extend_from_slice(b"ID3");
+            body.extend_from_slice(&[4, 0, 0]);
+            // synchsafe 长度 0: 标签头之后立刻是 fLaC.
+            body.extend_from_slice(&[0, 0, 0, 0]);
+        }
+        body.extend_from_slice(b"fLaC");
+        body.extend_from_slice(&[0x80, 0x00, 0x00, 34]);
+        body.extend_from_slice(&[0x12, 0x00, 0x12, 0x00]);
+        body.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        let word = ((sample_rate as u64) << 44) | (samples & 0xF_FFFF_FFFF);
+        body.extend_from_slice(&word.to_be_bytes());
+        body.extend_from_slice(&[0u8; 16]);
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn flac_streaminfo_keeps_fractional_seconds() {
+        // 3.8s = 167580 / 44100. rodio 会把它收成 3 秒.
+        let dir = std::env::temp_dir().join(format!("sv_flac_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("frac.flac");
+        let samples = 167_580u64;
+        write_flac_header(&path, 44100, samples, false);
+        let dur = super::probe_duration(&path).unwrap();
+        assert!(
+            (dur - 3.8).abs() < 1e-9,
+            "fractional flac duration truncated: {dur}"
+        );
+        let tagged = dir.join("id3.flac");
+        write_flac_header(&tagged, 44100, samples, true);
+        let dur = super::probe_duration(&tagged).unwrap();
+        assert!((dur - 3.8).abs() < 1e-9, "id3-prefixed flac: {dur}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_flac_tails_are_not_truncated_to_whole_seconds() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = root.parent().and_then(|p| p.parent()).and_then(|p| p.parent());
+        let Some(root) = root else {
+            return;
+        };
+        let cases = [
+            (
+                "01 Ivo Pogorelich - Liszt Sonata; Lento Assai.flac",
+                2_152_080u64,
+            ),
+            (
+                "02 Ivo Pogorelich - Liszt Sonata; Allegro Energico.flac",
+                7_795_704u64,
+            ),
+            (
+                "03 Ivo Pogorelich - Liszt Sonata; Grandioso.flac",
+                20_032_572u64,
+            ),
+        ];
+        for (name, samples) in cases {
+            let path = root.join(name);
+            if !path.is_file() {
+                eprintln!("skip: {}", path.display());
+                continue;
+            }
+            let dur = super::probe_duration(&path).unwrap();
+            let expect = samples as f64 / 44100.0;
+            assert!(
+                (dur - expect).abs() < 1e-6,
+                "{name}: probed {dur}, stream is {expect}"
+            );
+            assert!(
+                dur - expect.floor() > 0.2,
+                "{name}: fractional seconds were dropped ({dur})"
+            );
+        }
     }
 }
