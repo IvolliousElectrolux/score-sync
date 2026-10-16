@@ -489,9 +489,19 @@ impl ScoreSyncApp {
 
     pub(super) fn left_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.photo_open() {
-            let tb = self
-                .photo_edit
-                .update(cx, |p, cx| p.toolbar_embedded(cx).into_any_element());
+            let vector = self.vector_session();
+            let tb = if vector {
+                self.vector_edit
+                    .update(cx, |p, cx| p.toolbar_embedded(cx).into_any_element())
+            } else {
+                self.photo_edit
+                    .update(cx, |p, cx| p.toolbar_embedded(cx).into_any_element())
+            };
+            let canvas = if vector {
+                self.vector_edit.clone().into_any_element()
+            } else {
+                self.photo_edit.clone().into_any_element()
+            };
             return div()
                 .id("left_workspace")
                 .relative()
@@ -501,6 +511,12 @@ impl ScoreSyncApp {
                 .min_w(px(0.))
                 .min_h(px(0.))
                 .overflow_hidden()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.focus_photo_editor(window, cx);
+                    }),
+                )
                 .child(
                     div()
                         .w_full()
@@ -519,7 +535,8 @@ impl ScoreSyncApp {
                         .flex_1()
                         .min_h(px(0.))
                         .min_w(px(0.))
-                        .child(self.photo_edit.clone()),
+                        .overflow_hidden()
+                        .child(canvas),
                 )
                 .into_any_element();
         }
@@ -720,8 +737,13 @@ impl ScoreSyncApp {
 
     pub(super) fn right_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let body = if self.photo_open() {
-            self.photo_edit
-                .update(cx, |p, cx| p.side_panel(cx).into_any_element())
+            if self.vector_session() {
+                self.vector_edit
+                    .update(cx, |p, cx| p.side_panel(cx).into_any_element())
+            } else {
+                self.photo_edit
+                    .update(cx, |p, cx| p.side_panel(cx).into_any_element())
+            }
         } else {
             match self.side_tool {
                 SideTool::Crop => self.side_panel(cx).into_any_element(),

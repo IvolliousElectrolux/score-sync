@@ -48,6 +48,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "alsa"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -136,7 +142,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apply_bg"
-version = "1.6.2"
+version = "1.7.0"
 dependencies = [
  "async-channel 2.5.0",
  "clap",
@@ -145,6 +151,7 @@ dependencies = [
  "image",
  "rayon",
  "rfd",
+ "smallvec",
  "thiserror 2.0.19",
  "unicode-segmentation",
 ]
@@ -1751,7 +1758,17 @@ dependencies = [
  "memmap2",
  "slotmap",
  "tinyvec",
- "ttf-parser",
+ "ttf-parser 0.25.1",
+]
+
+[[package]]
+name = "fontdue"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e57e16b3fe8ff4364c0661fdaac543fb38b29ea9bc9c2f45612d90adf931d2b"
+dependencies = [
+ "hashbrown 0.15.5",
+ "ttf-parser 0.21.1",
 ]
 
 [[package]]
@@ -2297,6 +2314,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -3051,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "mask_tool"
-version = "1.6.2"
+version = "1.7.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -3706,7 +3725,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "photo_edit"
-version = "1.6.2"
+version = "1.7.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -4566,7 +4585,7 @@ dependencies = [
  "core_maths",
  "log",
  "smallvec",
- "ttf-parser",
+ "ttf-parser 0.25.1",
  "unicode-bidi-mirroring",
  "unicode-ccc",
  "unicode-properties",
@@ -4637,7 +4656,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "score_sync"
-version = "1.6.2"
+version = "1.7.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -4656,13 +4675,14 @@ dependencies = [
  "thiserror 2.0.19",
  "ureq",
  "uuid",
+ "vector_edit",
  "winreg 0.52.0",
  "zip",
 ]
 
 [[package]]
 name = "score_video"
-version = "1.6.2"
+version = "1.7.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -5744,6 +5764,12 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "ttf-parser"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c591d83f69777866b9126b24c6dd9a18351f177e49d625920d19f989fd31cf8"
+
+[[package]]
+name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
@@ -5996,6 +6022,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "956ae1e0d85bca567dee1dcf87fb1ca2e792792f66f87dced8381f99cd91156a"
 dependencies = [
  "piston-float",
+]
+
+[[package]]
+name = "vector_edit"
+version = "1.7.0"
+dependencies = [
+ "apply_bg",
+ "clap",
+ "fontdue",
+ "gpui",
+ "image",
+ "pdfium-render",
+ "rfd",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tiny-skia",
+ "uuid",
 ]
 
 [[package]]

@@ -102,7 +102,10 @@ impl PhotoEditApp {
         self.eyedropper_armed = false;
         self.eyedropper_backup = None;
         self.color_picker_open = false;
-        if matches!(self.drag, Some(DragKind::PaletteSb | DragKind::PaletteHue)) {
+        if matches!(
+            self.drag,
+            Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::PaletteAlpha)
+        ) {
             self.drag = None;
         }
         self.notify_chrome(cx);
@@ -130,7 +133,7 @@ impl PhotoEditApp {
             return None;
         }
         let pop_w = Self::picker_pop_w();
-        let pop_h = 22.0 + 8.0 + SB_SIZE + 40.0 + 16.0;
+        let pop_h = 22.0 + 8.0 + SB_SIZE + 40.0 + 28.0 + 16.0;
         let caret = 8.0;
         let gap = 6.0;
         let layer_left = f32::from(layer.origin.x);
@@ -306,18 +309,24 @@ impl PhotoEditApp {
                     );
                 } else if matches!(this.drag, Some(DragKind::PaletteHue)) {
                     this.set_palette_hue_from_y(f32::from(ev.position.y), cx);
+                } else if matches!(this.drag, Some(DragKind::PaletteAlpha)) {
+                    this.set_palette_alpha_from_x(f32::from(ev.position.x), cx);
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if matches!(this.drag, Some(DragKind::PaletteSb | DragKind::PaletteHue)) {
+                    if matches!(
+                        this.drag,
+                        Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::PaletteAlpha)
+                    ) {
                         this.drag = None;
+                        this.sync_rgb_inputs_from_picker(cx);
                         this.notify_chrome(cx);
                     }
                 }),
             )
-            .child(div().flex().flex_row().flex_wrap().gap_1().children(
+            .child(div().w_full().flex().flex_row().justify_between().items_center().children(
                 recent.into_iter().enumerate().map(|(i, color)| {
                     let color_u32 = color_rgb_u32(color);
                     div()
@@ -340,6 +349,7 @@ impl PhotoEditApp {
             ))
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .flex_row()
                     .gap_2()
@@ -348,8 +358,9 @@ impl PhotoEditApp {
                         div()
                             .id("photo_palette_sb")
                             .relative()
-                            .size(px(SB_SIZE))
-                            .flex_shrink_0()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(SB_SIZE))
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
@@ -570,6 +581,80 @@ impl PhotoEditApp {
                             ),
                     ),
             )
+            .child(self.paint_alpha_row(cx))
+    }
+
+    fn paint_alpha_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.paint_alpha as f32 / 255.0;
+        let [r, g, b] = self.paint_color;
+        let fill = gpui::rgba(
+            (u32::from(r) << 24) | (u32::from(g) << 16) | (u32::from(b) << 8) | 255,
+        );
+        let a_in = self.rgb_a_input.clone();
+        let entity = cx.entity().clone();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(div().text_xs().text_color(rgb(0x94a3b8)).child("A"))
+            .child(
+                div()
+                    .id("photo_alpha_track")
+                    .relative()
+                    .flex_1()
+                    .h(px(12.))
+                    .rounded_sm()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(rgb(0x475569))
+                    .cursor_pointer()
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                entity.update(cx, |this, _| this.alpha_track = bounds);
+                            },
+                            move |bounds, _, window, _| {
+                                window.paint_quad(quad(
+                                    bounds,
+                                    px(0.),
+                                    rgb(0x0f172a),
+                                    px(0.),
+                                    rgb(0x000000),
+                                    Default::default(),
+                                ));
+                                let w = px(f32::from(bounds.size.width) * t);
+                                window.paint_quad(quad(
+                                    Bounds {
+                                        origin: bounds.origin,
+                                        size: size(w, bounds.size.height),
+                                    },
+                                    px(0.),
+                                    fill,
+                                    px(0.),
+                                    rgb(0x000000),
+                                    Default::default(),
+                                ));
+                            },
+                        )
+                        .size_full(),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.drag = Some(DragKind::PaletteAlpha);
+                            this.set_palette_alpha_from_x(f32::from(ev.position.x), cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(40.))
+                    .h(px(20.))
+                    .flex_shrink_0()
+                    .child(a_in),
+            )
     }
 
     pub(super) fn rebuild_hue_image(&mut self) {
@@ -619,6 +704,8 @@ impl PhotoEditApp {
             .update(cx, |t, cx| t.set_text(g.to_string(), cx));
         self.rgb_b_input
             .update(cx, |t, cx| t.set_text(b.to_string(), cx));
+        self.rgb_a_input
+            .update(cx, |t, cx| t.set_text(self.paint_alpha.to_string(), cx));
         self.rgb_syncing = false;
     }
 
@@ -628,7 +715,8 @@ impl PhotoEditApp {
         }
         let blur = self.rgb_r_input.update(cx, |t, _| t.take_blur_commit())
             | self.rgb_g_input.update(cx, |t, _| t.take_blur_commit())
-            | self.rgb_b_input.update(cx, |t, _| t.take_blur_commit());
+            | self.rgb_b_input.update(cx, |t, _| t.take_blur_commit())
+            | self.rgb_a_input.update(cx, |t, _| t.take_blur_commit());
         let parse = |s: String| -> Option<u8> {
             let t = s.trim();
             if t.is_empty() {
@@ -639,16 +727,22 @@ impl PhotoEditApp {
         let r = parse(self.rgb_r_input.read(cx).text());
         let g = parse(self.rgb_g_input.read(cx).text());
         let b = parse(self.rgb_b_input.read(cx).text());
-        let (Some(r), Some(g), Some(b)) = (r, g, b) else {
+        let a = parse(self.rgb_a_input.read(cx).text());
+        let (Some(r), Some(g), Some(b), Some(a)) = (r, g, b, a) else {
             if blur {
                 self.sync_rgb_inputs_from_picker(cx);
             }
             return;
         };
-        if [r, g, b] == self.picker_rgb() {
+        if [r, g, b] == self.picker_rgb() && a == self.paint_alpha {
             return;
         }
-        self.set_picker_from_rgb([r, g, b], cx);
+        self.paint_alpha = a;
+        if [r, g, b] != self.picker_rgb() {
+            self.set_picker_from_rgb([r, g, b], cx);
+        } else {
+            self.notify_chrome(cx);
+        }
     }
 
     pub(super) fn set_picker_from_rgb(&mut self, rgb: [u8; 3], cx: &mut Context<Self>) {
@@ -661,13 +755,14 @@ impl PhotoEditApp {
         cx.notify();
     }
 
-    pub(super) fn preview_eyedropper_rgb(&mut self, rgb: [u8; 3], cx: &mut Context<Self>) {
+    pub(super) fn preview_eyedropper_rgb(&mut self, rgb: [u8; 3], alpha: u8, cx: &mut Context<Self>) {
         let (h, s, v) = rgb_to_hsv(rgb);
         self.picker_h = h;
         self.picker_s = s;
         self.picker_v = v;
         self.rebuild_sb_image();
         self.paint_color = rgb;
+        self.paint_alpha = alpha;
         self.sync_rgb_inputs_from_picker(cx);
         self.notify_chrome(cx);
     }
@@ -681,7 +776,7 @@ impl PhotoEditApp {
             return;
         }
         let c = self.picker_rgb();
-        self.eyedropper_backup = Some((self.picker_h, self.picker_s, self.picker_v, c));
+        self.eyedropper_backup = Some((self.picker_h, self.picker_s, self.picker_v, c, self.paint_alpha));
         self.eyedropper_armed = true;
         self.status = "取色: 在画布上移动预览, 单击确认, Esc/右键取消".into();
         self.notify_chrome(cx);
@@ -691,12 +786,13 @@ impl PhotoEditApp {
         if !self.eyedropper_armed {
             return;
         }
-        if let Some((h, s, v, c)) = self.eyedropper_backup.take() {
+        if let Some((h, s, v, c, a)) = self.eyedropper_backup.take() {
             self.picker_h = h;
             self.picker_s = s;
             self.picker_v = v;
             self.rebuild_sb_image();
             self.paint_color = c;
+            self.paint_alpha = a;
             self.sync_rgb_inputs_from_picker(cx);
         }
         self.eyedropper_armed = false;
@@ -753,6 +849,21 @@ impl PhotoEditApp {
         self.rebuild_sb_image();
         self.commit_picker_color(false);
         self.sync_rgb_inputs_from_picker(cx);
+        self.notify_chrome(cx);
+    }
+
+    pub(super) fn set_palette_alpha_from_x(&mut self, x: f32, cx: &mut Context<Self>) {
+        let left = f32::from(self.alpha_track.origin.x);
+        let w = f32::from(self.alpha_track.size.width).max(1.0);
+        let a = ((((x - left) / w).clamp(0.0, 1.0) * 255.0).round() as i32).clamp(0, 255) as u8;
+        if a == self.paint_alpha {
+            return;
+        }
+        self.paint_alpha = a;
+        self.rgb_syncing = true;
+        self.rgb_a_input
+            .update(cx, |t, cx| t.set_text(a.to_string(), cx));
+        self.rgb_syncing = false;
         self.notify_chrome(cx);
     }
 

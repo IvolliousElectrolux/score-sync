@@ -35,6 +35,8 @@ actions!(
         Undo,
         Redo,
         DeleteLayer,
+        CopyLayer,
+        PasteLayer,
         NewLayerFromSel,
         Cancel,
         ApplyEdit,
@@ -65,6 +67,14 @@ struct LayerGpu {
     tiles: Vec<Option<TileSprite>>,
 }
 
+struct LayerThumb {
+    epoch: u64,
+    rot_key: i32,
+    /// 未旋转的小图, 角度变了只转这一张.
+    flat: RgbaImage,
+    tex: Arc<RenderImage>,
+}
+
 pub struct PhotoEditApp {
     focus_handle: FocusHandle,
     pub(crate) doc: Option<EditDocument>,
@@ -73,6 +83,9 @@ pub struct PhotoEditApp {
     pub(crate) erase_target: EraseTarget,
     pub(crate) trace_erase: TraceErase,
     layer_tex: Vec<LayerGpu>,
+    layer_thumbs: HashMap<String, LayerThumb>,
+    /// 像素或笔迹变了就加一. 和指针无关, 原地改像素也能让缩略图失效.
+    thumb_epoch: HashMap<String, u64>,
     gpu_drop: Vec<Arc<RenderImage>>,
     zoom: f32,
     pan: Point<f32>,
@@ -114,13 +127,22 @@ pub struct PhotoEditApp {
     nav_only: bool,
     canvas_hover: Option<CanvasEdge>,
     paint_color: [u8; 3],
+    paint_alpha: u8,
     layer_bounds: HashMap<usize, Bounds<Pixels>>,
+    /// Ctrl+C 记下的图层. 焦点离开这个编辑器就清掉.
+    layer_clip: Option<crate::document::Layer>,
+    /// 画布选区复制出的像素, 以及它在画布上的位置.
+    sel_clip: Option<(Arc<RgbaImage>, i32, i32)>,
+    /// 最近一次点在画布上. 否则 Ctrl+C/V 作用于图层.
+    clip_on_canvas: bool,
+    layer_clip_watch: Option<gpui::Subscription>,
     side_origin: (f32, f32),
     side_bounds: Bounds<Pixels>,
     picker_layer_bounds: Bounds<Pixels>,
     paint_swatch_bounds: Bounds<Pixels>,
     sb_bounds: Bounds<Pixels>,
     hue_bounds: Bounds<Pixels>,
+    alpha_track: Bounds<Pixels>,
     color_picker_open: bool,
     picker_h: f32,
     picker_s: f32,
@@ -130,9 +152,10 @@ pub struct PhotoEditApp {
     rgb_r_input: Entity<apply_bg::text_input::TextInput>,
     rgb_g_input: Entity<apply_bg::text_input::TextInput>,
     rgb_b_input: Entity<apply_bg::text_input::TextInput>,
+    rgb_a_input: Entity<apply_bg::text_input::TextInput>,
     rgb_syncing: bool,
     eyedropper_armed: bool,
-    eyedropper_backup: Option<(f32, f32, f32, [u8; 3])>,
+    eyedropper_backup: Option<(f32, f32, f32, [u8; 3], u8)>,
     recent_colors: Vec<[u8; 3]>,
     lasso_draft: Option<Vec<(f32, f32)>>,
     lasso_cursor: Option<(f32, f32)>,
@@ -163,11 +186,15 @@ impl PhotoEditApp {
             cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "32", "G").with_compact(true));
         let rgb_b_input =
             cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "32", "B").with_compact(true));
+        let rgb_a_input =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "255", "A").with_compact(true));
         cx.observe(&rgb_r_input, |this, _, cx| this.apply_rgb_inputs(cx))
             .detach();
         cx.observe(&rgb_g_input, |this, _, cx| this.apply_rgb_inputs(cx))
             .detach();
         cx.observe(&rgb_b_input, |this, _, cx| this.apply_rgb_inputs(cx))
+            .detach();
+        cx.observe(&rgb_a_input, |this, _, cx| this.apply_rgb_inputs(cx))
             .detach();
         let (picker_h, picker_s, picker_v) = rgb_to_hsv(PAINT_DEFAULT);
         Self {
@@ -178,6 +205,8 @@ impl PhotoEditApp {
             erase_target: EraseTarget::Trace,
             trace_erase: TraceErase::Dab,
             layer_tex: Vec::new(),
+            layer_thumbs: HashMap::new(),
+            thumb_epoch: HashMap::new(),
             gpu_drop: Vec::new(),
             zoom: 1.0,
             pan: point(0.0, 0.0),
@@ -215,13 +244,19 @@ impl PhotoEditApp {
             nav_only: false,
             canvas_hover: None,
             paint_color: PAINT_DEFAULT,
+            paint_alpha: 255,
             layer_bounds: HashMap::new(),
+            layer_clip: None,
+            sel_clip: None,
+            clip_on_canvas: true,
+            layer_clip_watch: None,
             side_origin: (0.0, 0.0),
             side_bounds: Bounds::default(),
             picker_layer_bounds: Bounds::default(),
             paint_swatch_bounds: Bounds::default(),
             sb_bounds: Bounds::default(),
             hue_bounds: Bounds::default(),
+            alpha_track: Bounds::default(),
             color_picker_open: false,
             picker_h,
             picker_s,
@@ -231,6 +266,7 @@ impl PhotoEditApp {
             rgb_r_input,
             rgb_g_input,
             rgb_b_input,
+            rgb_a_input,
             rgb_syncing: false,
             eyedropper_armed: false,
             eyedropper_backup: None,
@@ -389,6 +425,108 @@ impl PhotoEditApp {
         for g in old {
             self.drop_layer_gpu(g);
         }
+        self.clear_layer_thumbs();
+    }
+
+    fn clear_layer_thumbs(&mut self) {
+        let old = std::mem::take(&mut self.layer_thumbs);
+        self.thumb_epoch.clear();
+        for thumb in old.into_values() {
+            self.gpu_drop.push(thumb.tex);
+        }
+    }
+
+    fn note_thumb_dirty(&mut self, id: &str) {
+        let n = self.thumb_epoch.entry(id.to_string()).or_insert(0);
+        *n = n.wrapping_add(1);
+    }
+
+    /// 图层面板打开时补缩略图. 涂抹和缩放拖动中先跳过, 松手后再做整页缩小.
+    pub(crate) fn sync_layer_thumbs(&mut self) {
+        let Some(doc) = self.doc.as_ref() else {
+            self.clear_layer_thumbs();
+            return;
+        };
+        let defer = matches!(
+            self.drag,
+            Some(DragKind::Brush | DragKind::Erase { .. } | DragKind::LayerScale { .. })
+        );
+        let snaps: Vec<(String, f32, Arc<RgbaImage>, Option<Arc<RgbaImage>>)> = doc
+            .layers
+            .iter()
+            .map(|layer| {
+                (
+                    layer.id.clone(),
+                    layer.rotation,
+                    layer.pixels.clone(),
+                    layer.ink.clone(),
+                )
+            })
+            .collect();
+        let live_ids: std::collections::HashSet<&str> =
+            snaps.iter().map(|(id, ..)| id.as_str()).collect();
+        let stale: Vec<String> = self
+            .layer_thumbs
+            .keys()
+            .filter(|id| !live_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale {
+            if let Some(old) = self.layer_thumbs.remove(&id) {
+                self.gpu_drop.push(old.tex);
+            }
+            self.thumb_epoch.remove(&id);
+        }
+        for (id, rotation, pixels, ink) in snaps {
+            let epoch = self.thumb_epoch.get(&id).copied().unwrap_or(0);
+            let rot_key = (rotation * 2.0).round() as i32;
+            let cached = self.layer_thumbs.get(&id).map(|have| {
+                (
+                    have.epoch,
+                    have.rot_key,
+                    (have.epoch == epoch && have.rot_key != rot_key).then(|| have.flat.clone()),
+                )
+            });
+            match cached {
+                Some((have_epoch, have_rot, _)) if have_epoch == epoch && have_rot == rot_key => {
+                    continue;
+                }
+                Some((have_epoch, _, Some(flat))) if have_epoch == epoch => {
+                    let turned = if rotation.abs() < 0.5 {
+                        flat
+                    } else {
+                        crate::process::box_thumb(&crate::geom::rotate_rgba(&flat, rotation), 64)
+                    };
+                    let tex = upload_bgra_rect(&turned, 0, 0, turned.width(), turned.height());
+                    if let Some(old) = self.layer_thumbs.get_mut(&id) {
+                        let prev = std::mem::replace(&mut old.tex, tex);
+                        old.rot_key = rot_key;
+                        self.gpu_drop.push(prev);
+                    }
+                    continue;
+                }
+                _ if defer => continue,
+                _ => {}
+            }
+            let flat = crate::process::layer_thumb_rgba(pixels.as_ref(), ink.as_deref(), 0.0, 64);
+            let shown = if rotation.abs() < 0.5 {
+                flat.clone()
+            } else {
+                crate::process::box_thumb(&crate::geom::rotate_rgba(&flat, rotation), 64)
+            };
+            let tex = upload_bgra_rect(&shown, 0, 0, shown.width(), shown.height());
+            if let Some(old) = self.layer_thumbs.insert(
+                id,
+                LayerThumb {
+                    epoch,
+                    rot_key,
+                    flat,
+                    tex,
+                },
+            ) {
+                self.gpu_drop.push(old.tex);
+            }
+        }
     }
 
     fn drop_layer_gpu(&mut self, g: LayerGpu) {
@@ -542,6 +680,7 @@ impl PhotoEditApp {
         mark_dirty: bool,
         only: Option<&[(u32, u32)]>,
     ) {
+        self.note_thumb_dirty(id);
         let Some(g) = self.layer_tex.iter_mut().find(|g| g.id == id) else {
             return;
         };
@@ -890,6 +1029,17 @@ impl PhotoEditApp {
         }
     }
 
+    fn watch_layer_clip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layer_clip_watch.is_some() {
+            return;
+        }
+        let handle = self.focus_handle.clone();
+        self.layer_clip_watch = Some(cx.on_focus_out(&handle, window, |this, _, _, _| {
+            this.layer_clip = None;
+            this.sel_clip = None;
+        }));
+    }
+
     pub fn request_restore(&mut self, cx: &mut Context<Self>) {
         self.host_cmd = Some(HostCmd::Restore);
         self.notify_chrome(cx);
@@ -905,6 +1055,8 @@ impl PhotoEditApp {
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(|this, _: &DeleteLayer, _, cx| this.delete_active_layer(cx)))
+            .on_action(cx.listener(|this, _: &CopyLayer, _, cx| this.copy_layer(cx)))
+            .on_action(cx.listener(|this, _: &PasteLayer, window, cx| this.paste_layer(window, cx)))
             .on_action(
                 cx.listener(|this, _: &NewLayerFromSel, _, cx| this.new_layer_from_selection(cx)),
             )
@@ -977,6 +1129,7 @@ impl Focusable for PhotoEditApp {
 
 impl Render for PhotoEditApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.watch_layer_clip(window, cx);
         for img in self.take_gpu_drops() {
             let _ = window.drop_image(img);
         }
@@ -1072,6 +1225,8 @@ pub fn bind_embedded_keys(cx: &mut App) {
     cx.bind_keys(apply_bg::bind_primary("z", Undo, Some("PhotoEdit")));
     cx.bind_keys(apply_bg::bind_primary("y", Redo, Some("PhotoEdit")));
     cx.bind_keys(apply_bg::bind_primary("shift-z", Redo, Some("PhotoEdit")));
+    cx.bind_keys(apply_bg::bind_primary("c", CopyLayer, Some("PhotoEdit")));
+    cx.bind_keys(apply_bg::bind_primary("v", PasteLayer, Some("PhotoEdit")));
 }
 
 pub fn run_gui(initial: Option<PathBuf>) {

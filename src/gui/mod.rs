@@ -128,6 +128,7 @@ pub(crate) struct ScoreSyncApp {
     canvas_tool: CanvasTool,
     mask_tool: Entity<MaskToolApp>,
     photo_edit: Entity<PhotoEditApp>,
+    vector_edit: Entity<vector_edit::VectorEditApp>,
     apply_bg: Entity<ApplyBgApp>,
     score_video: Entity<ScoreVideoApp>,
     photo_session: Option<photo::PhotoSession>,
@@ -335,6 +336,17 @@ impl ScoreSyncApp {
             }
         })
         .detach();
+        let vector_edit = cx.new(|cx| vector_edit::VectorEditApp::new(cx, false));
+        cx.observe(&vector_edit, |this, edit, cx| {
+            let p = edit.read(cx);
+            if p.has_host_cmd() {
+                this.photo_cmd_pending = true;
+                cx.notify();
+            } else if !p.is_nav_only() {
+                cx.notify();
+            }
+        })
+        .detach();
         let apply_bg = cx.new(ApplyBgApp::new);
         cx.observe(&apply_bg, |_, _, cx| cx.notify()).detach();
         let score_video = cx.new(ScoreVideoApp::new);
@@ -384,6 +396,7 @@ impl ScoreSyncApp {
             canvas_tool: CanvasTool::Normal,
             mask_tool,
             photo_edit,
+            vector_edit,
             photo_session: None,
             photo_cmd_pending: false,
             apply_bg,
@@ -553,7 +566,11 @@ impl Render for ScoreSyncApp {
         let focus = if organize_open {
             self.focus_handle.clone()
         } else if photo_open {
-            self.photo_edit.read(cx).focus_handle_ref().clone()
+            if self.vector_session() {
+                self.vector_edit.read(cx).focus_handle_ref().clone()
+            } else {
+                self.photo_edit.read(cx).focus_handle_ref().clone()
+            }
         } else if mask_mode {
             self.mask_tool.read(cx).focus_handle_ref().clone()
         } else if video_mode {
@@ -564,7 +581,11 @@ impl Render for ScoreSyncApp {
         let key_ctx = if organize_open {
             "PageOrganize"
         } else if photo_open {
-            "PhotoEdit"
+            if self.vector_session() {
+                "VectorEdit"
+            } else {
+                "PhotoEdit"
+            }
         } else if mask_mode {
             "MaskTool"
         } else if video_mode {
@@ -802,6 +823,9 @@ impl Render for ScoreSyncApp {
                     this.apply_param_edit(window, cx);
                 } else if this.region_y_edit.is_some() {
                     this.apply_edit_y(window, cx);
+                } else {
+                    // 没有浮层时把 Enter 交回去, 文本框自己的确认才能接到.
+                    cx.propagate();
                 }
             }))
             .on_action(cx.listener(|this, _: &CancelParamEdit, window, cx| {
@@ -813,6 +837,10 @@ impl Render for ScoreSyncApp {
                     this.cancel_edit_y(window, cx);
                 } else if this.has_modal_overlay(cx) {
                     this.dismiss_blocking_overlays(cx);
+                } else if this.vector_session() {
+                    this.vector_edit.update(cx, |p, cx| {
+                        p.on_escape(cx);
+                    });
                 } else if this.photo_open() {
                     this.photo_edit.update(cx, |p, cx| p.on_escape(cx));
                 } else {
@@ -877,6 +905,35 @@ impl Render for ScoreSyncApp {
                 cx.listener(|this, _: &photo_edit::gui::DeleteLayer, _, cx| {
                     this.photo_edit
                         .update(cx, |p, cx| p.delete_active_layer(cx));
+                }),
+            )
+            .on_action(cx.listener(|this, _: &photo_edit::gui::CopyLayer, _, cx| {
+                if this.photo_session.is_none() || this.vector_session() {
+                    return;
+                }
+                this.photo_edit.update(cx, |p, cx| p.copy_layer(cx));
+            }))
+            .on_action(cx.listener(|this, _: &photo_edit::gui::PasteLayer, window, cx| {
+                if this.photo_session.is_none() || this.vector_session() {
+                    return;
+                }
+                this.photo_edit.update(cx, |p, cx| p.paste_layer(window, cx));
+            }))
+            .on_action(
+                cx.listener(|this, _: &vector_edit::gui::CopyLayer, window, cx| {
+                    if !this.vector_session() {
+                        return;
+                    }
+                    this.vector_edit.update(cx, |p, cx| p.copy_layer(window, cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &vector_edit::gui::PasteLayer, window, cx| {
+                    if !this.vector_session() {
+                        return;
+                    }
+                    this.vector_edit
+                        .update(cx, |p, cx| p.paste_layer(window, cx));
                 }),
             )
             .on_action(
@@ -952,7 +1009,9 @@ impl Render for ScoreSyncApp {
                 this.photo_edit.update(cx, |p, cx| p.nudge(0, 1, cx));
             }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| {
-                if this.photo_session.is_some() {
+                if this.vector_session() {
+                    this.vector_edit.update(cx, |p, cx| p.undo(cx));
+                } else if this.photo_session.is_some() {
                     this.photo_edit.update(cx, |p, cx| p.undo(cx));
                 } else if this.page_organize.is_some() {
                     this.undo_organize(cx);
@@ -961,7 +1020,9 @@ impl Render for ScoreSyncApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &Redo, _, cx| {
-                if this.photo_session.is_some() {
+                if this.vector_session() {
+                    this.vector_edit.update(cx, |p, cx| p.redo(cx));
+                } else if this.photo_session.is_some() {
                     this.photo_edit.update(cx, |p, cx| p.redo(cx));
                 } else if this.page_organize.is_some() {
                     this.redo_organize(cx);
@@ -1336,7 +1397,9 @@ pub fn run_gui(initial: Vec<PathBuf>) {
         ));
         keys.extend(apply_bg::bind_primary("shift-m", DumpMemory, None));
         photo_edit::gui::bind_embedded_keys(cx);
+        vector_edit::bind_embedded_keys(cx);
         keys.extend(apply_bg::bind_primary("s", SaveProject, Some("PhotoEdit")));
+        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("VectorEdit")));
         keys.extend(apply_bg::bind_primary(
             "shift-s",
             SaveProjectAs,
@@ -1351,6 +1414,21 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             "shift-n",
             NewProject,
             Some("PhotoEdit"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-s",
+            SaveProjectAs,
+            Some("VectorEdit"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-o",
+            OpenProject,
+            Some("VectorEdit"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "shift-n",
+            NewProject,
+            Some("VectorEdit"),
         ));
         cx.bind_keys(keys);
         let bounds = default_window_bounds(cx);

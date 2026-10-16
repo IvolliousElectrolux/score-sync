@@ -93,6 +93,7 @@ struct MaskPreviewMemberSnap {
     image: Option<Arc<image::RgbImage>>,
     disk_path: PathBuf,
     override_path: Option<PathBuf>,
+    vector_scene: Option<PathBuf>,
     vector: Option<crate::vector_page::VectorSource>,
     anchor: Option<i32>,
 }
@@ -126,21 +127,39 @@ fn collect_mask_preview_members(
             if y1 < y0 {
                 return None;
             }
-            let override_path = if doc.region_edit_applies(rid) {
+            let vector_edit = page.is_vector()
+                && doc.region_edit_applies(rid)
+                && doc.region_edit_kind(rid) == crate::model::EditKind::Vector;
+            let edit_size = if vector_edit {
+                doc.region_edit_size(rid)
+            } else {
+                None
+            };
+            let override_path = if doc.region_edit_applies(rid) && !vector_edit {
                 Some(crate::model::DocState::region_edit_dir(rid).join("flat.png"))
             } else {
                 None
             };
+            let (img_w, height) = if let Some((ew, eh)) = edit_size {
+                (ew.max(1), eh.max(1))
+            } else {
+                (page.width().max(1), y1 - y0 + 1)
+            };
             Some(MaskPreviewMemberSnap {
                 rid: rid.clone(),
                 page_idx: pi,
-                img_w: page.width().max(1),
+                img_w,
                 img_h: page.height().max(1),
                 y0,
-                height: y1 - y0 + 1,
+                height,
                 image: page.image.clone(),
                 disk_path: page.disk_path.clone(),
                 override_path,
+                vector_scene: if vector_edit {
+                    Some(crate::model::DocState::region_edit_dir(rid))
+                } else {
+                    None
+                },
                 vector: page.vector.clone(),
                 anchor: doc.region_staff_anchors.get(rid).copied().flatten(),
             })
@@ -172,6 +191,67 @@ fn build_mask_preview(
     let mut vector_rgba: Vec<Option<image::RgbaImage>> = Vec::new();
     let mut vector_anchor: Vec<Option<Option<i32>>> = Vec::new();
     for m in members {
+        if let Some(dir) = m.vector_scene.clone() {
+            let scene = vector_edit::VecDocument::load_from_dir(&dir)
+                .map_err(|e| format!("读取矢量修图失败: {e}"))?;
+            let cw = scene.canvas_w.max(1.0);
+            let ch = scene.canvas_h.max(1.0);
+            let logical_w = m.img_w.max(1);
+            let logical_h = m.height.max(1);
+            let px = crate::vector_page::export_px_per_pt(cw).min(4.0);
+            let mut tex_w = (cw * px).round().max(1.0) as u32;
+            let mut tex_h = (ch * px).round().max(1.0) as u32;
+            let side = tex_w.max(tex_h);
+            if side > 1400 {
+                let s = 1400.0 / side as f32;
+                tex_w = (tex_w as f32 * s).round().max(1.0) as u32;
+                tex_h = (tex_h as f32 * s).round().max(1.0) as u32;
+            }
+            let rgba = vector_edit::rasterize_rgba_size(&scene, tex_w, tex_h)
+                .map_err(|e| format!("光栅矢量修图失败: {e}"))?;
+            let pad = crate::vector_page::polarity_pad(&rgba);
+            let rgb = crate::vector_page::flatten_rgba(&rgba, pad);
+            let keep_alpha = bg_enabled;
+            let scene_zoom = scene.clone();
+            let raster: mask_tool::gui::PieceRaster =
+                std::sync::Arc::new(move |x, y, w, h, tw, th| {
+                    let lw = logical_w as f32;
+                    let lh = logical_h as f32;
+                    let x_pt = x as f32 / lw * scene_zoom.canvas_w;
+                    let y_pt = y as f32 / lh * scene_zoom.canvas_h;
+                    let w_pt = (w as f32 / lw * scene_zoom.canvas_w).max(0.5);
+                    let h_pt = (h as f32 / lh * scene_zoom.canvas_h).max(0.5);
+                    let rgba = vector_edit::rasterize_rect(
+                        &scene_zoom, x_pt, y_pt, w_pt, h_pt, tw, th,
+                    )
+                    .ok()?;
+                    if keep_alpha {
+                        Some(rgba)
+                    } else {
+                        let pad = crate::vector_page::polarity_pad(&rgba);
+                        Some(rgb_to_opaque_rgba(&crate::vector_page::flatten_rgba(
+                            &rgba, pad,
+                        )))
+                    }
+                });
+            orig_sizes.push((logical_w, logical_h));
+            vector_rgba.push(if keep_alpha { Some(rgba) } else { None });
+            vector_anchor.push(Some(m.anchor));
+            pieces.push((
+                m.rid,
+                rgb,
+                Some(mask_tool::gui::PieceDisk {
+                    path: m.disk_path.clone(),
+                    flat: true,
+                    page_w: logical_w,
+                    page_h: logical_h,
+                    band_y: 0,
+                    band_h: logical_h,
+                    raster: Some(raster),
+                }),
+            ));
+            continue;
+        }
         if let Some(src) = m.vector.clone() {
             if m.override_path.is_none() {
                 let logical_w = m.img_w.max(1);
@@ -1853,11 +1933,9 @@ impl ScoreSyncApp {
         cx: &mut Context<Self>,
     ) {
         if self.photo_open() {
-            let next = if tool == SideTool::Mask {
-                None
-            } else {
-                Some(tool)
-            };
+            // 点当前这一栏只退出修图. 点别的栏, 退出后进入那一栏.
+            // 蒙版里的修图当前就是蒙版; 底色修图当前是底色, 点蒙版也要切过去.
+            let next = if tool == self.side_tool { None } else { Some(tool) };
             self.request_leave_photo(next, window, cx);
             return;
         }
@@ -2607,6 +2685,7 @@ mod mask_preview_wait_probe {
             image: Some(Arc::new(page)),
             disk_path: PathBuf::from("unused"),
             override_path: None,
+            vector_scene: None,
             vector: None,
             anchor: None,
         }];

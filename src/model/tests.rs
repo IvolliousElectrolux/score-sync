@@ -699,6 +699,7 @@ fn group_heights_use_region_edit() {
     doc.region_edits.insert(
         "r0".into(),
         RegionEditMeta {
+            kind: EditKind::Raster,
             canvas_w: 40,
             canvas_h: 22,
             paper_rgb: [250, 250, 250],
@@ -735,6 +736,7 @@ fn region_edit_detaches_when_crop_changes_and_reattaches() {
     doc.region_edits.insert(
         "r0".into(),
         RegionEditMeta {
+            kind: EditKind::Raster,
             canvas_w: 40,
             canvas_h: 22,
             paper_rgb: [250, 250, 250],
@@ -802,6 +804,7 @@ fn shared_footnote_edit_height_applies_to_all_groups() {
     doc.region_edits.insert(
         "note".into(),
         RegionEditMeta {
+            kind: EditKind::Raster,
             canvas_w: 80,
             canvas_h: 18,
             paper_rgb: [250, 250, 250],

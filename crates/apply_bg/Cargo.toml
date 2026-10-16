@@ -13,6 +13,7 @@ rayon = "1.10"
 rfd = "0.15"
 unicode-segmentation = "1"
 thiserror = "2"
+smallvec = "1"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

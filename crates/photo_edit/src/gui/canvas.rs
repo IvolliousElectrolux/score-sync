@@ -137,12 +137,12 @@ impl PhotoEditApp {
             .bg(rgb(0x2b2b2b))
             .overflow_hidden()
             .relative()
-            .occlude()
             .cursor(live_cursor)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev, window, cx| {
                     this.focus_handle.focus(window);
+                    this.note_canvas_target();
                     this.on_mouse_down(ev, window, cx);
                 }),
             )
@@ -936,6 +936,22 @@ impl PhotoEditApp {
         None
     }
 
+    pub(crate) fn canvas_pointer(&self, window: &Window) -> Option<(f32, f32)> {
+        let p = window.mouse_position();
+        let b = self.view_bounds;
+        let right = b.origin.x + b.size.width;
+        let bottom = b.origin.y + b.size.height;
+        if b.size.width < px(1.) || b.size.height < px(1.) {
+            return None;
+        }
+        if p.x < b.origin.x || p.y < b.origin.y || p.x >= right || p.y >= bottom {
+            return None;
+        }
+        let x = f32::from(p.x - b.origin.x);
+        let y = f32::from(p.y - b.origin.y);
+        Some(self.view_xform().screen_to_image(x, y))
+    }
+
     pub(crate) fn view_xform(&self) -> ViewXform {
         let vw = f32::from(self.view_bounds.size.width);
         let vh = f32::from(self.view_bounds.size.height);
@@ -983,7 +999,8 @@ impl PhotoEditApp {
                 DragKind::Slider(_)
                 | DragKind::LayerReorder { .. }
                 | DragKind::PaletteSb
-                | DragKind::PaletteHue,
+                | DragKind::PaletteHue
+                | DragKind::PaletteAlpha,
             ) => self.hover_cursor,
             None => self.hover_cursor,
         }
@@ -1238,6 +1255,10 @@ impl PhotoEditApp {
             self.set_palette_hue_from_y(f32::from(ev.position.y), cx);
             return;
         }
+        if matches!(self.drag, Some(DragKind::PaletteAlpha)) {
+            self.set_palette_alpha_from_x(f32::from(ev.position.x), cx);
+            return;
+        }
         if matches!(self.drag, Some(DragKind::LayerReorder { .. })) {
             self.update_layer_reorder(f32::from(ev.position.x), f32::from(ev.position.y), cx);
             return;
@@ -1245,8 +1266,8 @@ impl PhotoEditApp {
         let (ix, iy) = self.image_pos_move(ev);
         let snap_tol = (EDGE_SNAP_SCREEN_PX / self.view_xform().scale.max(0.0001)).max(1.0);
         if self.eyedropper_armed {
-            if let Some(rgb) = self.sample_canvas_rgb(ix.round() as i32, iy.round() as i32) {
-                self.preview_eyedropper_rgb(rgb, cx);
+            if let Some((rgb, alpha)) = self.sample_canvas_rgba(ix.round() as i32, iy.round() as i32) {
+                self.preview_eyedropper_rgb(rgb, alpha, cx);
             }
             return;
         }
@@ -1397,7 +1418,7 @@ impl PhotoEditApp {
             }
             Some(DragKind::Erase { .. }) => {}
             Some(DragKind::Slider(_)) => {}
-            Some(DragKind::PaletteSb | DragKind::PaletteHue) => {}
+            Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::PaletteAlpha) => {}
             Some(DragKind::LassoStroke { .. }) => {}
             Some(DragKind::LayerReorder { .. }) => {}
             Some(DragKind::Pan { last_x, last_y }) => {
@@ -1573,7 +1594,7 @@ impl PhotoEditApp {
                     self.finalize_lasso(cx);
                 }
             }
-            Some(DragKind::PaletteSb | DragKind::PaletteHue) => {}
+            Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::PaletteAlpha) => {}
             Some(DragKind::SelResize {
                 orig,
                 orig_mask,

@@ -1,0 +1,20 @@
+[package]
+name = "vector_edit"
+version.workspace = true
+edition.workspace = true
+description = "谱面分块矢量修图 (GPUI)"
+license.workspace = true
+
+[dependencies]
+apply_bg = { path = "../apply_bg" }
+clap = { version = "4", features = ["derive"] }
+fontdue = "0.9"
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest", "font-kit"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_6406", "image", "thread_safe"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+tiny-skia = "0.11"
+uuid = { version = "1", features = ["v4"] }

@@ -75,6 +75,8 @@ struct ProjectRegionEdit {
     paper_rgb: [u8; 3],
     #[serde(default)]
     source: Option<photo_edit::SourceFingerprint>,
+    #[serde(default)]
+    kind: crate::model::EditKind,
 }
 
 /// 视频面板时间轴的纯数据快照.
@@ -460,6 +462,7 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
                         canvas_h: v.canvas_h,
                         paper_rgb: v.paper_rgb,
                         source: v.source.clone(),
+                        kind: v.kind,
                     },
                 )
             })
@@ -519,7 +522,7 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
             if !dir.is_dir() {
                 continue;
             }
-            for name in ["manifest.json", "flat.png"] {
+            for name in ["manifest.json", "flat.png", "preview.png"] {
                 let p = dir.join(name);
                 if p.is_file() {
                     let rel = format!("edits/{rid}/{name}");
@@ -528,15 +531,18 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
                     copy_file_into_zip(&mut zip, &p)?;
                 }
             }
-            let layer_dir = dir.join("layers");
-            if let Ok(rd) = std::fs::read_dir(&layer_dir) {
+            for sub in ["layers", "images"] {
+                let sub_dir = dir.join(sub);
+                let Ok(rd) = std::fs::read_dir(&sub_dir) else {
+                    continue;
+                };
                 for ent in rd.flatten() {
                     let p = ent.path();
                     if !p.is_file() {
                         continue;
                     }
                     let fname = ent.file_name().to_string_lossy().into_owned();
-                    let rel = format!("edits/{rid}/layers/{fname}");
+                    let rel = format!("edits/{rid}/{sub}/{fname}");
                     zip.start_file(&rel, png_opts)
                         .map_err(|e| format!("写入 {rel} 失败: {e}"))?;
                     copy_file_into_zip(&mut zip, &p)?;
@@ -774,6 +780,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         doc.region_edits.insert(
             rid,
             crate::model::RegionEditMeta {
+                kind: e.kind,
                 canvas_w: e.canvas_w,
                 canvas_h: e.canvas_h,
                 paper_rgb: e.paper_rgb,

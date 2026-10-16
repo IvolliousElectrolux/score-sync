@@ -83,6 +83,8 @@ struct GroupRenderPart {
     height: u32,
     inline: Option<RgbImage>,
     override_path: Option<PathBuf>,
+    /// 已套用的矢量修图目录. 成片按当次 px 光栅, 不读 flat.png.
+    vector_scene: Option<PathBuf>,
     vector: Option<VectorBand>,
 }
 
@@ -229,7 +231,12 @@ impl GroupRenderJob {
         };
         let mut parts = Vec::with_capacity(self.members.len());
         for m in &self.members {
-            let rgba = if let Some(v) = &m.vector {
+            let rgba = if let Some(dir) = &m.vector_scene {
+                let scene = vector_edit::VecDocument::load_from_dir(dir)
+                    .map_err(|e| format!("读取矢量修图失败: {e}"))?;
+                vector_edit::rasterize_rgba(&scene, px)
+                    .map_err(|e| format!("光栅矢量修图失败: {e}"))?
+            } else if let Some(v) = &m.vector {
                 let tex_w = (v.page_w_pt * px).round().max(1.0) as u32;
                 let tex_h = (m.height as f32 * px).round().max(1.0) as u32;
                 crate::pdf::render_vector_rect_rgba(
@@ -636,7 +643,10 @@ impl DocState {
             if vector.is_none() && inline.is_none() && !page.disk_path.is_file() {
                 continue;
             }
-            let override_path = if self.region_edit_applies(rid) {
+            let vector_edit = vector.is_some()
+                && self.region_edit_applies(rid)
+                && self.region_edit_kind(rid) == EditKind::Vector;
+            let override_path = if self.region_edit_applies(rid) && !vector_edit {
                 Some(Self::region_edit_dir(rid).join("flat.png"))
             } else {
                 None
@@ -652,6 +662,11 @@ impl DocState {
                     inline
                 },
                 override_path,
+                vector_scene: if vector_edit {
+                    Some(Self::region_edit_dir(rid))
+                } else {
+                    None
+                },
                 vector,
             });
         }

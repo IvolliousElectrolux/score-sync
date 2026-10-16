@@ -24,7 +24,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use compose::compose_parts_impl;
 pub use compose::GroupRenderJob;
-pub use edits::{groups_using_region, remap_masks_after_height_change, RegionEditMeta};
+pub use edits::{groups_using_region, remap_masks_after_height_change, EditKind, RegionEditMeta};
 pub use mask_tool::guide::GuideState;
 pub use mask_tool::layout::BlockAdjust;
 pub(crate) use types::crop_band_fast;

@@ -8,8 +8,18 @@ use photo_edit::{EditDocument, SourceFingerprint};
 
 use super::*;
 
+/// 同一 `edits/{id}/` 目录: 位图修图有 `flat.png`, 矢量修图只有场景 manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditKind {
+    #[default]
+    Raster,
+    Vector,
+}
+
 #[derive(Clone, Debug)]
 pub struct RegionEditMeta {
+    pub kind: EditKind,
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub paper_rgb: [u8; 3],
@@ -23,9 +33,22 @@ impl DocState {
             .join(region_id)
     }
 
+    pub fn region_edit_kind(&self, region_id: &str) -> EditKind {
+        self.region_edits
+            .get(region_id)
+            .map(|m| m.kind)
+            .unwrap_or(EditKind::Raster)
+    }
+
     pub fn has_region_edit(&self, region_id: &str) -> bool {
-        self.region_edits.contains_key(region_id)
-            && Self::region_edit_dir(region_id).join("flat.png").is_file()
+        let Some(meta) = self.region_edits.get(region_id) else {
+            return false;
+        };
+        let dir = Self::region_edit_dir(region_id);
+        match meta.kind {
+            EditKind::Raster => dir.join("flat.png").is_file(),
+            EditKind::Vector => dir.join("manifest.json").is_file(),
+        }
     }
 
     /// 页与 y0/y1 仍是烘焙时的那一条. 没有指纹的旧工程视为仍匹配.
@@ -69,6 +92,7 @@ impl DocState {
         let dir = Self::region_edit_dir(region_id);
         doc.save_to_dir(&dir)?;
         let meta = RegionEditMeta {
+            kind: EditKind::Raster,
             canvas_w: doc.canvas_w.max(1),
             canvas_h: doc.canvas_h.max(1),
             paper_rgb: doc.paper_rgb,
@@ -94,11 +118,40 @@ impl DocState {
             .map(|i| i.to_rgb8())
     }
 
+    pub fn write_vector_region_edit(
+        &mut self,
+        region_id: &str,
+        doc: &vector_edit::VecDocument,
+    ) -> Result<RegionEditMeta, String> {
+        let dir = Self::region_edit_dir(region_id);
+        doc.save_to_dir(&dir)?;
+        let (canvas_w, canvas_h) = doc.rounded_size();
+        let meta = RegionEditMeta {
+            kind: EditKind::Vector,
+            canvas_w,
+            canvas_h,
+            paper_rgb: [0, 0, 0],
+            source: doc.source.as_ref().map(photo_fp_from_vector),
+        };
+        self.region_edits
+            .insert(region_id.to_string(), meta.clone());
+        Ok(meta)
+    }
+
     pub fn load_region_document(&self, region_id: &str) -> Option<EditDocument> {
-        if !self.has_region_edit(region_id) {
+        if self.region_edit_kind(region_id) != EditKind::Raster || !self.has_region_edit(region_id)
+        {
             return None;
         }
         EditDocument::load_from_dir(&Self::region_edit_dir(region_id)).ok()
+    }
+
+    pub fn load_vector_document(&self, region_id: &str) -> Option<vector_edit::VecDocument> {
+        if self.region_edit_kind(region_id) != EditKind::Vector || !self.region_edit_applies(region_id)
+        {
+            return None;
+        }
+        vector_edit::VecDocument::load_from_dir(&Self::region_edit_dir(region_id)).ok()
     }
 
     pub fn prune_orphan_edits(&mut self) {
@@ -136,6 +189,20 @@ pub fn remap_masks_after_height_change(
         if (m.y0 as i64) >= old_bottom {
             m.translate(0, dh as i32);
         }
+    }
+}
+
+fn photo_fp_from_vector(s: &vector_edit::SourceFingerprint) -> SourceFingerprint {
+    SourceFingerprint {
+        page_id: s.page_id.clone(),
+        y0: s.y0,
+        y1: s.y1,
+        w: s.w,
+        h: s.h,
+        extra_top: s.extra_top,
+        extra_bottom: s.extra_bottom,
+        extra_left: s.extra_left,
+        extra_right: s.extra_right,
     }
 }
 

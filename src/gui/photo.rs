@@ -10,6 +10,7 @@ pub(super) enum PhotoSession {
     Block {
         group_id: String,
         region_id: String,
+        vector: bool,
     },
     /// `original` 是进入修图时的底色图, 还原用, 不写回工程.
     Background {
@@ -60,9 +61,7 @@ impl ScoreSyncApp {
             .map(|p| p.is_vector())
             .unwrap_or(false)
         {
-            self.status = "矢量页的修图还没做".into();
-            self.hint = self.status.clone();
-            cx.notify();
+            self.open_vector_edit(&gid, &rid, window, cx);
             return;
         }
         match self.load_block_for_photo(&gid, &rid) {
@@ -84,6 +83,7 @@ impl ScoreSyncApp {
                 self.photo_session = Some(PhotoSession::Block {
                     group_id: gid,
                     region_id: rid,
+                    vector: false,
                 });
                 self.photo_edit
                     .read(cx)
@@ -100,6 +100,156 @@ impl ScoreSyncApp {
             Err(e) => self.show_error("打开修图失败", e, cx),
         }
         cx.notify();
+    }
+
+    pub(super) fn vector_session(&self) -> bool {
+        matches!(
+            self.photo_session,
+            Some(PhotoSession::Block { vector: true, .. })
+        )
+    }
+
+    /// 点左侧画布或工具条时, 接下来的 Ctrl+C/V 作用于选中内容.
+    pub(super) fn focus_photo_editor(&self, window: &mut Window, cx: &mut App) {
+        if self.photo_session.is_none() {
+            return;
+        }
+        let handle = if self.vector_session() {
+            self.vector_edit.update(cx, |p, _| {
+                p.note_canvas_target();
+                p.focus_handle_ref().clone()
+            })
+        } else {
+            self.photo_edit.update(cx, |p, _| {
+                p.note_canvas_target();
+                p.focus_handle_ref().clone()
+            })
+        };
+        handle.focus(window);
+    }
+
+    fn open_vector_edit(
+        &mut self,
+        gid: &str,
+        rid: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.prepare_vector_document(gid, rid) {
+            Ok((doc, source, note)) => {
+                self.flush_mask_to_doc(cx);
+                let hint = self.vector_fit_hint(gid, rid);
+                let imports = self.vector_import_options(gid, rid);
+                self.vector_edit.update(cx, |p, cx| {
+                    p.open_document(doc, cx);
+                    p.set_source(source);
+                    p.set_fit_hint(hint, cx);
+                    p.set_import_options(imports, cx);
+                });
+                let mask_warn = self.block_has_intersecting_masks(gid, rid);
+                self.photo_session = Some(PhotoSession::Block {
+                    group_id: gid.to_string(),
+                    region_id: rid.to_string(),
+                    vector: true,
+                });
+                self.vector_edit
+                    .read(cx)
+                    .focus_handle_ref()
+                    .clone()
+                    .focus(window);
+                self.status = if mask_warn {
+                    "P 图 · 矢量 (这块上的遮盖可能错位, 提交后只平移块下方蒙版)".into()
+                } else if note.is_empty() {
+                    "P 图 · 矢量".into()
+                } else {
+                    format!("P 图 · 矢量 ({note})").into()
+                };
+                self.hint = self.status.clone();
+            }
+            Err(e) => self.show_error("打开修图失败", e, cx),
+        }
+        cx.notify();
+    }
+
+    fn prepare_vector_document(
+        &self,
+        gid: &str,
+        rid: &str,
+    ) -> Result<(vector_edit::VecDocument, vector_edit::SourceFingerprint, String), String> {
+        let (pi, r) = self.doc.find_region(rid).ok_or("找不到该分块")?;
+        let page = self.doc.pages.get(pi).ok_or("找不到页")?;
+        let src = page.vector.as_ref().ok_or("这一页不是矢量页")?;
+        let adj = mask_tool::layout::BlockAdjust::find(self.doc.get_block_layout(gid), rid)
+            .cloned()
+            .unwrap_or_default();
+        let source = vector_edit::SourceFingerprint {
+            page_id: r.page_id.clone(),
+            y0: r.y0,
+            y1: r.y1,
+            w: src.w_pt.round().max(1.0) as u32,
+            h: (r.y1 - r.y0 + 1).max(1) as u32,
+            extra_top: adj.extra_top,
+            extra_bottom: adj.extra_bottom,
+            extra_left: adj.extra_left,
+            extra_right: adj.extra_right,
+        };
+        if let Some(mut doc) = self.doc.load_vector_document(rid) {
+            doc.source = Some(source.clone());
+            return Ok((doc, source, String::new()));
+        }
+        let report = vector_edit::import_band(&vector_edit::ImportRequest {
+            pdf_path: src.pdf_path.clone(),
+            page_index: src.page_index,
+            y0: r.y0 as f32,
+            y1: (r.y1 + 1) as f32,
+            extra_top: adj.extra_top,
+            extra_bottom: adj.extra_bottom,
+            extra_left: adj.extra_left,
+            extra_right: adj.extra_right,
+            page_id: r.page_id.clone(),
+        })?;
+        let (w, h) = report.doc.rounded_size();
+        let source = vector_edit::SourceFingerprint { w, h, ..source };
+        let note = if report.truncated_forms > 0 {
+            format!("有 {} 个过深的外观已跳过", report.truncated_forms)
+        } else {
+            String::new()
+        };
+        Ok((report.doc, source, note))
+    }
+
+    fn vector_fit_hint(&self, gid: &str, rid: &str) -> vector_edit::FitHint {
+        let photo = self.photo_fit_hint(gid, rid, 0);
+        vector_edit::FitHint {
+            other_h: photo.other_h,
+            sheet_w: photo.sheet_w,
+            aspect_w: photo.aspect_w,
+            aspect_h: photo.aspect_h,
+            bg_enabled: photo.bg_enabled,
+            snap_w: photo.snap_w,
+            snap_h: photo.snap_h,
+        }
+    }
+
+    fn vector_import_options(&self, gid: &str, current: &str) -> Vec<vector_edit::ImportOption> {
+        let Some(g) = self.doc.groups.iter().find(|g| g.id == gid) else {
+            return Vec::new();
+        };
+        g.region_ids
+            .iter()
+            .filter(|id| id.as_str() != current)
+            .filter_map(|rid| {
+                let (pi, r) = self.doc.find_region(rid)?;
+                let page = self.doc.pages.get(pi)?;
+                if !page.is_vector() {
+                    return None;
+                }
+                Some(vector_edit::ImportOption {
+                    id: rid.clone(),
+                    label: format!("P{} {}", pi + 1, r.kind),
+                })
+            })
+            .collect()
     }
 
     pub(super) fn try_open_bg_photo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -261,6 +411,7 @@ impl ScoreSyncApp {
     pub(super) fn close_photo_session(&mut self, cx: &mut Context<Self>) {
         self.photo_session = None;
         self.photo_edit.update(cx, |p, cx| p.close_session(cx));
+        self.vector_edit.update(cx, |p, cx| p.close_session(cx));
         if self.side_tool == SideTool::Mask {
             self.sync_mask_image(cx);
         }
@@ -271,6 +422,10 @@ impl ScoreSyncApp {
         let Some(sess) = self.photo_session.clone() else {
             return;
         };
+        if self.vector_session() {
+            self.apply_vector_edit(window, cx);
+            return;
+        }
         let Some(commit) = self.photo_edit.read(cx).take_commit() else {
             self.close_photo_session(cx);
             return;
@@ -339,7 +494,14 @@ impl ScoreSyncApp {
             PhotoSession::Block {
                 group_id,
                 region_id,
-            } => (group_id, region_id),
+                vector,
+            } => {
+                if vector {
+                    self.restore_vector_edit(&group_id, &region_id, cx);
+                    return;
+                }
+                (group_id, region_id)
+            }
         };
         let using = crate::model::groups_using_region(&self.doc.groups, &region_id);
         let old_spans: Vec<(String, i64, i64)> = using
@@ -414,6 +576,10 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn handle_photo_host_cmd(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vector_session() {
+            self.handle_vector_host_cmd(window, cx);
+            return;
+        }
         let cmd = self.photo_edit.update(cx, |p, _| p.take_host_cmd());
         match cmd {
             Some(HostCmd::Apply) => self.apply_photo_edit(window, cx),
@@ -455,7 +621,11 @@ impl ScoreSyncApp {
             }
             return;
         }
-        let dirty = self.photo_edit.read(cx).is_dirty();
+        let dirty = if self.vector_session() {
+            self.vector_edit.read(cx).is_dirty()
+        } else {
+            self.photo_edit.read(cx).is_dirty()
+        };
         if dirty {
             self.dialog = Some(DialogKind::UnsavedPhoto { next });
             cx.notify();
@@ -486,6 +656,133 @@ impl ScoreSyncApp {
         self.apply_photo_edit(window, cx);
         if let Some(t) = next {
             self.set_side_tool(t, window, cx);
+        }
+    }
+
+    fn apply_vector_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(PhotoSession::Block {
+            region_id,
+            vector: true,
+            ..
+        }) = self.photo_session.clone()
+        else {
+            return;
+        };
+        let Some(commit) = self.vector_edit.read(cx).take_commit() else {
+            self.close_photo_session(cx);
+            return;
+        };
+        let using = crate::model::groups_using_region(&self.doc.groups, &region_id);
+        let old_spans: Vec<(String, i64, i64)> = using
+            .iter()
+            .filter_map(|gid| {
+                let spans = self.doc.group_member_spans(gid);
+                spans
+                    .iter()
+                    .find(|(id, ..)| id == &region_id)
+                    .map(|(_, y0, y1)| (gid.clone(), *y0, *y1 - *y0 + 1))
+            })
+            .collect();
+        if let Err(e) = self.doc.write_vector_region_edit(&region_id, &commit.document) {
+            self.show_error("保存修图失败", e, cx);
+            return;
+        }
+        for gid in &using {
+            self.clear_block_edge_adjust(gid, &region_id);
+        }
+        let new_h = commit.document.rounded_size().1 as i64;
+        for (gid, y0, old_h) in old_spans {
+            if let Some(masks) = self.doc.group_masks.get_mut(&gid) {
+                crate::model::remap_masks_after_height_change(masks, y0, old_h, new_h);
+            }
+        }
+        for gid in using {
+            self.mark_video_pool_dirty_group(&gid);
+        }
+        self.dirty = true;
+        self.close_photo_session(cx);
+        self.mask_tool
+            .read(cx)
+            .focus_handle_ref()
+            .clone()
+            .focus(window);
+        self.status = "已应用修图".into();
+        cx.notify();
+    }
+
+    fn restore_vector_edit(&mut self, gid: &str, rid: &str, cx: &mut Context<Self>) {
+        let using = crate::model::groups_using_region(&self.doc.groups, rid);
+        let old_spans: Vec<(String, i64, i64)> = using
+            .iter()
+            .filter_map(|g| {
+                let spans = self.doc.group_member_spans(g);
+                spans
+                    .iter()
+                    .find(|(id, ..)| id == rid)
+                    .map(|(_, y0, y1)| (g.clone(), *y0, *y1 - *y0 + 1))
+            })
+            .collect();
+        let orig_h = self
+            .doc
+            .find_region(rid)
+            .map(|(_, r)| (r.y1 - r.y0 + 1).max(0) as i64)
+            .unwrap_or(0);
+        self.doc.remove_region_edit(rid);
+        for (g, y0, old_h) in old_spans {
+            if let Some(masks) = self.doc.group_masks.get_mut(&g) {
+                crate::model::remap_masks_after_height_change(masks, y0, old_h, orig_h);
+            }
+        }
+        for g in using {
+            self.mark_video_pool_dirty_group(&g);
+        }
+        self.dirty = true;
+        match self.prepare_vector_document(gid, rid) {
+            Ok((doc, source, _)) => {
+                let hint = self.vector_fit_hint(gid, rid);
+                let imports = self.vector_import_options(gid, rid);
+                self.vector_edit.update(cx, |p, cx| {
+                    p.open_document(doc, cx);
+                    p.set_source(source);
+                    p.set_fit_hint(hint, cx);
+                    p.set_import_options(imports, cx);
+                });
+                self.status = "已从 PDF 重新导入这条".into();
+            }
+            Err(e) => self.show_error("还原失败", e, cx),
+        }
+        self.hint = self.status.clone();
+        cx.notify();
+    }
+
+    fn handle_vector_host_cmd(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cmd = self.vector_edit.update(cx, |p, _| p.take_host_cmd());
+        match cmd {
+            Some(vector_edit::HostCmd::Apply) => self.apply_vector_edit(window, cx),
+            Some(vector_edit::HostCmd::Cancel) => self.request_leave_photo(None, window, cx),
+            Some(vector_edit::HostCmd::Restore) => self.restore_photo_edit(window, cx),
+            Some(vector_edit::HostCmd::RequestImport(rid)) => {
+                self.import_block_into_vector(&rid, cx)
+            }
+            None => {}
+        }
+    }
+
+    fn import_block_into_vector(&mut self, rid: &str, cx: &mut Context<Self>) {
+        let gid = match self.photo_session.as_ref() {
+            Some(PhotoSession::Block { group_id, .. }) => Some(group_id.clone()),
+            _ => None,
+        };
+        let Some(gid) = gid else {
+            return;
+        };
+        match self.prepare_vector_document(&gid, rid) {
+            Ok((doc, _, _)) => {
+                let name = format!("导入 {rid}");
+                self.vector_edit
+                    .update(cx, |p, cx| p.import_document_as_layer(doc, &name, cx));
+            }
+            Err(e) => self.show_error("导入分块失败", e, cx),
         }
     }
 }

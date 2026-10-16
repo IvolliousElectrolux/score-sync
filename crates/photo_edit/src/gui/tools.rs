@@ -5,6 +5,36 @@ use image::RgbaImage;
 
 use super::*;
 use crate::document::{EraserHits, Layer, PaintStroke};
+
+fn copy_stem(name: &str) -> &str {
+    if let Some(head) = name.strip_suffix(" 副本") {
+        return head;
+    }
+    if let Some((head, tail)) = name.rsplit_once(" 副本 ") {
+        if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+            return head;
+        }
+    }
+    name
+}
+
+fn unique_layer_name(layers: &[Layer], base: &str) -> String {
+    if layers.iter().all(|layer| layer.name != base) {
+        return base.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let name = format!("{base} {n}");
+        if layers.iter().all(|layer| layer.name != name) {
+            return name;
+        }
+        n += 1;
+    }
+}
+
+fn next_copy_name(layers: &[Layer], source: &str) -> String {
+    unique_layer_name(layers, &format!("{} 副本", copy_stem(source)))
+}
 use crate::process::{
     canvas_to_layer_xy, combine_masks, cut_mask_from_layer, cut_rect_from_layer,
     extract_mask_layer, extract_rect_layer, fill_poly_mask, heal_disk, lift_layer_mask_to_canvas,
@@ -288,8 +318,9 @@ impl PhotoEditApp {
         }
         let heal_offset = self.heal_offset;
         let paint_color = self.paint_color;
+        let paint_alpha = self.paint_alpha;
         if mode == ToolMode::Paint {
-            return self.paint_trace_at(ix, iy, r, hard, paint_color);
+            return self.paint_trace_at(ix, iy, r, hard, paint_color, paint_alpha);
         }
         let Some(doc) = self.doc.as_mut() else {
             return false;
@@ -340,6 +371,7 @@ impl PhotoEditApp {
         let radius = (self.brush * 0.5).round().max(1.0) as i32;
         let hardness = self.brush_hardness;
         let color = self.paint_color;
+        let alpha = self.paint_alpha;
         let Some(layer) = self.doc.as_mut().and_then(|d| d.active_layer_mut()) else {
             return;
         };
@@ -348,6 +380,7 @@ impl PhotoEditApp {
             radius,
             hardness,
             color,
+            alpha,
         });
     }
 
@@ -363,7 +396,15 @@ impl PhotoEditApp {
         }
     }
 
-    fn paint_trace_at(&mut self, ix: i32, iy: i32, r: i32, hard: f32, color: [u8; 3]) -> bool {
+    fn paint_trace_at(
+        &mut self,
+        ix: i32,
+        iy: i32,
+        r: i32,
+        hard: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) -> bool {
         let Some(layer) = self.doc.as_mut().and_then(|d| d.active_layer_mut()) else {
             return false;
         };
@@ -382,12 +423,14 @@ impl PhotoEditApp {
                 radius: r.max(1),
                 hardness: hard,
                 color,
+                alpha,
             });
         }
         let stroke = layer.strokes.last_mut().unwrap();
         let radius = stroke.radius.max(1);
         let hardness = stroke.hardness;
         let rgb = stroke.color;
+        let alpha = stroke.alpha;
         stroke.points.push((lx, ly));
         let w = layer.width();
         let h = layer.height();
@@ -399,7 +442,7 @@ impl PhotoEditApp {
             layer.ink = Some(Arc::new(RgbaImage::new(w, h)));
         }
         let ink = Arc::make_mut(layer.ink.as_mut().unwrap());
-        stamp_color(ink, lx, ly, radius, hardness, rgb);
+        stamp_color(ink, lx, ly, radius, hardness, rgb, alpha);
         layer.stroke_rev = layer.stroke_rev.wrapping_add(1);
         self.dirty = true;
         true
@@ -991,7 +1034,7 @@ impl PhotoEditApp {
         self.notify_chrome(cx);
     }
 
-    pub(crate) fn sample_canvas_rgb(&self, ix: i32, iy: i32) -> Option<[u8; 3]> {
+    pub(crate) fn sample_canvas_rgba(&self, ix: i32, iy: i32) -> Option<([u8; 3], u8)> {
         let doc = self.doc.as_ref()?;
         if ix < 0 || iy < 0 || ix >= doc.canvas_w as i32 || iy >= doc.canvas_h as i32 {
             return None;
@@ -1008,17 +1051,18 @@ impl PhotoEditApp {
             }
             let p = layer.pixels.get_pixel(lx as u32, ly as u32).0;
             if p[3] > 0 {
-                return Some([p[0], p[1], p[2]]);
+                return Some(([p[0], p[1], p[2]], p[3]));
             }
         }
-        Some(doc.paper_rgb)
+        Some((doc.paper_rgb, 255))
     }
 
     pub(crate) fn sample_paint_color(&mut self, ix: i32, iy: i32, cx: &mut Context<Self>) {
-        let Some(c) = self.sample_canvas_rgb(ix, iy) else {
+        let Some((c, a)) = self.sample_canvas_rgba(ix, iy) else {
             return;
         };
         self.paint_color = c;
+        self.paint_alpha = a;
         self.push_recent_color(c);
         let (h, s, v) = rgb_to_hsv(c);
         self.picker_h = h;
@@ -1028,7 +1072,7 @@ impl PhotoEditApp {
             self.rebuild_sb_image();
             self.sync_rgb_inputs_from_picker(cx);
         }
-        self.status = format!("已取色 {} {} {}", c[0], c[1], c[2]).into();
+        self.status = format!("已取色 {} {} {} A{}", c[0], c[1], c[2], a).into();
         self.notify_chrome(cx);
     }
 
@@ -1228,8 +1272,65 @@ impl PhotoEditApp {
         self.notify_chrome(cx);
     }
 
-    pub(crate) fn duplicate_layer(&mut self, cx: &mut Context<Self>) {
+    pub fn note_canvas_target(&mut self) {
+        self.clip_on_canvas = true;
+    }
+
+    pub fn note_side_target(&mut self) {
+        self.clip_on_canvas = false;
+    }
+
+    pub fn copy_layer(&mut self, cx: &mut Context<Self>) {
+        if self.clip_on_canvas {
+            self.copy_selection(cx);
+            return;
+        }
         let Some(src) = self.doc.as_ref().and_then(|d| d.active_layer().cloned()) else {
+            return;
+        };
+        self.layer_clip = Some(src);
+        self.status = "已复制图层".into();
+        self.notify_chrome(cx);
+    }
+
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_none() {
+            self.status = "没有选区".into();
+            self.notify_chrome(cx);
+            return;
+        }
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let Some(layer) = doc.layers.get(doc.active) else {
+            return;
+        };
+        let (pixels, lx, ly) = flattened_layer(layer);
+        let cw = doc.canvas_w;
+        let ch = doc.canvas_h;
+        let extracted = match &self.selection {
+            Selection::None => None,
+            Selection::Rect { x0, y0, x1, y1 } => {
+                Some(extract_rect_layer(&pixels, lx, ly, *x0, *y0, *x1, *y1))
+            }
+            Selection::Mask { data: m, .. } => extract_mask_layer(&pixels, lx, ly, m, cw, ch),
+        };
+        let Some((img, x, y)) = extracted else {
+            self.status = "选区是空的".into();
+            self.notify_chrome(cx);
+            return;
+        };
+        self.sel_clip = Some((Arc::new(img), x, y));
+        self.status = "已复制选区".into();
+        self.notify_chrome(cx);
+    }
+
+    pub fn paste_layer(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.clip_on_canvas {
+            self.paste_selection(window, cx);
+            return;
+        }
+        let Some(src) = self.layer_clip.clone() else {
             return;
         };
         self.push_undo();
@@ -1238,13 +1339,47 @@ impl PhotoEditApp {
         };
         let mut copy = src;
         copy.id = crate::ids::new_id();
-        copy.name = format!("{} 副本", copy.name);
+        copy.name = next_copy_name(&doc.layers, &copy.name);
         copy.x += 8;
         copy.y += 8;
         doc.layers.push(copy);
         doc.active = doc.layers.len() - 1;
         self.dirty = true;
         self.rebuild_preview();
+        self.status = "已粘贴图层".into();
+        self.notify_chrome(cx);
+    }
+
+    fn paste_selection(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some((pixels, x, y)) = self.sel_clip.clone() else {
+            self.status = "没有可粘贴的选区".into();
+            self.notify_chrome(cx);
+            return;
+        };
+        let w = pixels.width();
+        let h = pixels.height();
+        let base = match self.canvas_pointer(window) {
+            Some((px, py)) => ((px - w as f32 * 0.5).round() as i32, (py - h as f32 * 0.5).round() as i32),
+            None => (x + 8, y + 8),
+        };
+        let (nx, ny) = self
+            .doc
+            .as_ref()
+            .map(|doc| clear_slot(&doc.layers, w, h, base.0, base.1))
+            .unwrap_or(base);
+        self.push_undo();
+        let Some(doc) = self.doc.as_mut() else {
+            self.undo_stack.pop();
+            return;
+        };
+        let mut neu = Layer::new(unique_layer_name(&doc.layers, "选区副本"), (*pixels).clone());
+        neu.x = nx;
+        neu.y = ny;
+        doc.layers.push(neu);
+        doc.active = doc.layers.len() - 1;
+        self.dirty = true;
+        self.rebuild_preview();
+        self.status = "已粘贴选区".into();
         self.notify_chrome(cx);
     }
 
@@ -1611,4 +1746,33 @@ fn trace_wand_loops(mask: &[u8], w: u32, h: u32) -> Vec<Vec<(f32, f32)>> {
     } else {
         mask_loops(mask, w, h, 1)
     }
+}
+
+fn clear_slot(layers: &[Layer], w: u32, h: u32, mut x: i32, mut y: i32) -> (i32, i32) {
+    for _ in 0..64 {
+        let taken = layers.iter().any(|layer| {
+            layer.x == x && layer.y == y && layer.width() == w && layer.height() == h
+        });
+        if !taken {
+            return (x, y);
+        }
+        x += 8;
+        y += 8;
+    }
+    (x, y)
+}
+
+fn flattened_layer(layer: &Layer) -> (RgbaImage, i32, i32) {
+    let mut base = (*layer.pixels).clone();
+    if let Some(ink) = &layer.ink {
+        crate::document::blit_ink_over(&mut base, ink);
+    }
+    if layer.rotation.abs() < 0.05 {
+        return (base, layer.x, layer.y);
+    }
+    let (cx, cy) = layer.center();
+    let img = rotate_rgba(&base, layer.rotation);
+    let x = (cx - img.width() as f32 * 0.5).round() as i32;
+    let y = (cy - img.height() as f32 * 0.5).round() as i32;
+    (img, x, y)
 }

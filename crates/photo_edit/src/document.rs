@@ -17,6 +17,12 @@ pub struct PaintStroke {
     pub radius: i32,
     pub hardness: f32,
     pub color: [u8; 3],
+    #[serde(default = "opaque_alpha")]
+    pub alpha: u8,
+}
+
+fn opaque_alpha() -> u8 {
+    255
 }
 
 impl PaintStroke {
@@ -90,6 +96,7 @@ impl PaintStroke {
                 radius: self.radius,
                 hardness: self.hardness,
                 color: self.color,
+                alpha: self.alpha,
             })
             .collect();
         Some((parts, removed))
@@ -264,6 +271,7 @@ fn stamp_strokes_into(dst: &mut RgbaImage, strokes: &[PaintStroke], origin_x: i3
                 radius,
                 stroke.hardness,
                 stroke.color,
+                stroke.alpha,
             );
         }
     }
@@ -810,6 +818,7 @@ mod tests {
             radius: 2,
             hardness: 1.0,
             color: [1, 2, 3],
+            alpha: 255,
         }
     }
 
@@ -846,6 +855,7 @@ mod tests {
             radius: 8,
             hardness: 0.0,
             color: [10, 20, 30],
+            alpha: 255,
         });
         layer.rebuild_ink_full();
         let ink = layer.ink.as_ref().unwrap();
@@ -893,12 +903,14 @@ mod tests {
             radius: 7,
             hardness: 0.25,
             color: [20, 40, 60],
+            alpha: 255,
         });
         layer.strokes.push(PaintStroke {
             points: vec![(40, 24), (52, 28)],
             radius: 5,
             hardness: 1.0,
             color: [200, 10, 10],
+            alpha: 255,
         });
         layer.rebuild_ink_full();
         let hits = EraserHits::new(&[(40, 24), (48, 24)], 3);

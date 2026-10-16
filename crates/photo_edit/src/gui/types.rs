@@ -327,6 +327,7 @@ pub(crate) enum DragKind {
     },
     PaletteSb,
     PaletteHue,
+    PaletteAlpha,
     LayerReorder {
         from: usize,
         to: usize,

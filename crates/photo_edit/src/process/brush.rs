@@ -208,6 +208,7 @@ pub fn stamp_color(
     radius: i32,
     hardness: f32,
     rgb: [u8; 3],
+    alpha: u8,
 ) {
     let radius = radius.max(1);
     let dw = dst.width() as i32;
@@ -235,21 +236,28 @@ pub fn stamp_color(
             }
             let i = (x as usize) * 4;
             let px = &mut row[i..i + 4];
-            if a >= 0.999 {
-                if px[0] == rgb[0] && px[1] == rgb[1] && px[2] == rgb[2] && px[3] == 255 {
+            if alpha == 255 {
+                if a >= 0.999 {
+                    if px[0] == rgb[0] && px[1] == rgb[1] && px[2] == rgb[2] && px[3] == 255 {
+                        continue;
+                    }
+                    px[0] = rgb[0];
+                    px[1] = rgb[1];
+                    px[2] = rgb[2];
+                    px[3] = 255;
                     continue;
                 }
-                px[0] = rgb[0];
-                px[1] = rgb[1];
-                px[2] = rgb[2];
-                px[3] = 255;
-                continue;
+                let inv = 1.0 - a;
+                px[0] = (px[0] as f32 * inv + rgb[0] as f32 * a).round() as u8;
+                px[1] = (px[1] as f32 * inv + rgb[1] as f32 * a).round() as u8;
+                px[2] = (px[2] as f32 * inv + rgb[2] as f32 * a).round() as u8;
+                px[3] = (px[3] as f32 * inv + 255.0 * a).round().min(255.0) as u8;
+            } else {
+                let src = Rgba([rgb[0], rgb[1], rgb[2], alpha]);
+                let dst = Rgba([px[0], px[1], px[2], px[3]]);
+                let out = blend(dst, src, a);
+                px.copy_from_slice(&out.0);
             }
-            let inv = 1.0 - a;
-            px[0] = (px[0] as f32 * inv + rgb[0] as f32 * a).round() as u8;
-            px[1] = (px[1] as f32 * inv + rgb[1] as f32 * a).round() as u8;
-            px[2] = (px[2] as f32 * inv + rgb[2] as f32 * a).round() as u8;
-            px[3] = (px[3] as f32 * inv + 255.0 * a).round().min(255.0) as u8;
         }
     }
 }
@@ -289,7 +297,7 @@ mod tests {
     #[test]
     fn stamp_color_paints_center() {
         let mut img = RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255]));
-        stamp_color(&mut img, 4, 4, 2, 1.0, [10, 20, 30]);
+        stamp_color(&mut img, 4, 4, 2, 1.0, [10, 20, 30], 255);
         assert_eq!(img.get_pixel(4, 4).0, [10, 20, 30, 255]);
     }
 
@@ -338,10 +346,10 @@ mod tests {
     fn stamp_color_matches_reference_blend() {
         let mut a = RgbaImage::from_pixel(24, 24, Rgba([8, 16, 24, 200]));
         let mut b = a.clone();
-        stamp_color(&mut a, 11, 13, 6, 0.4, [180, 40, 20]);
+        stamp_color(&mut a, 11, 13, 6, 0.4, [180, 40, 20], 255);
         stamp_color_ref(&mut b, 11, 13, 6, 0.4, [180, 40, 20]);
         assert_eq!(a.as_raw(), b.as_raw());
-        stamp_color(&mut a, 14, 13, 6, 0.4, [180, 40, 20]);
+        stamp_color(&mut a, 14, 13, 6, 0.4, [180, 40, 20], 255);
         stamp_color_ref(&mut b, 14, 13, 6, 0.4, [180, 40, 20]);
         assert_eq!(a.as_raw(), b.as_raw());
     }

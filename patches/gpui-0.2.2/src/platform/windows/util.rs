@@ -123,7 +123,11 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
     let (lock, name) = match style {
         CursorStyle::IBeam | CursorStyle::IBeamCursorForVerticalLayout => (&IBEAM, IDC_IBEAM),
         CursorStyle::Crosshair => (&CROSS, IDC_CROSS),
-        CursorStyle::PointingHand | CursorStyle::DragLink => (&HAND, IDC_HAND),
+        // 系统没有张开/握拳的抓手, 手形和拖动都用 IDC_HAND, 否则会落到箭头上.
+        CursorStyle::PointingHand
+        | CursorStyle::DragLink
+        | CursorStyle::OpenHand
+        | CursorStyle::ClosedHand => (&HAND, IDC_HAND),
         CursorStyle::ResizeLeft
         | CursorStyle::ResizeRight
         | CursorStyle::ResizeLeftRight

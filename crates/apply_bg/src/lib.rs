@@ -3,6 +3,7 @@
 pub mod config;
 pub mod gui;
 pub mod keys;
+pub mod palette;
 pub mod process;
 pub mod text_input;
 

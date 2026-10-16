@@ -1,6 +1,6 @@
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, DispatchPhase, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString,
+    canvas, div, img, prelude::*, px, relative, rgb, DispatchPhase, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, SharedString,
 };
 
 use super::grade::{filter_caption, tone_caption};
@@ -132,7 +132,7 @@ impl PhotoEditApp {
     fn action_btn(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -169,7 +169,7 @@ impl PhotoEditApp {
             )
     }
 
-    pub fn side_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn side_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let fit = self.fit_label();
         div()
             .id("photo_side")
@@ -184,8 +184,13 @@ impl PhotoEditApp {
             .flex()
             .flex_col()
             .relative()
-            .occlude()
             .bg(rgb(0xf1f5f9))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseDownEvent, _, _| {
+                    this.note_side_target();
+                }),
+            )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
                 // 轨道只有十几像素高. 按住后移到轨道外, 事件不再打在滑条上.
                 if let Some(DragKind::Slider(kind)) = &this.drag {
@@ -207,6 +212,8 @@ impl PhotoEditApp {
                     );
                 } else if matches!(this.drag, Some(DragKind::PaletteHue)) {
                     this.set_palette_hue_from_y(f32::from(ev.position.y), cx);
+                } else if matches!(this.drag, Some(DragKind::PaletteAlpha)) {
+                    this.set_palette_alpha_from_x(f32::from(ev.position.x), cx);
                 }
             }))
             .on_mouse_up(
@@ -214,7 +221,7 @@ impl PhotoEditApp {
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     if matches!(
                         this.drag,
-                        Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::Slider(_))
+                        Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::PaletteAlpha | DragKind::Slider(_))
                     ) {
                         if matches!(this.drag, Some(DragKind::Slider(kind)) if kind.previews_grade())
                         {
@@ -232,7 +239,7 @@ impl PhotoEditApp {
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     if matches!(
                         this.drag,
-                        Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::Slider(_))
+                        Some(DragKind::PaletteSb | DragKind::PaletteHue | DragKind::PaletteAlpha | DragKind::Slider(_))
                     ) {
                         if matches!(this.drag, Some(DragKind::Slider(kind)) if kind.previews_grade())
                         {
@@ -307,7 +314,8 @@ impl PhotoEditApp {
             })
     }
 
-    fn layer_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn layer_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_layer_thumbs();
         let mut list = div().id("photo_layers").flex().flex_col().px_1().gap_1();
         let drag_from = match &self.drag {
             Some(DragKind::LayerReorder {
@@ -331,6 +339,8 @@ impl PhotoEditApp {
                 let active = storage == doc.active;
                 let vis = layer.visible;
                 let name = layer.name.clone();
+                let thumb = self.layer_thumbs.get(&layer.id).map(|t| t.tex.clone());
+                let fade = if vis { layer.opacity.clamp(0.15, 1.0) } else { 0.35 };
                 let dragging = drag_from == Some(display);
                 let show_line = line_at == Some(display);
                 list = list.child(
@@ -360,7 +370,16 @@ impl PhotoEditApp {
                             div()
                                 .id(SharedString::from(format!("lyv-{storage}")))
                                 .w(px(18.))
-                                .child(if vis { "●" } else { "○" })
+                                .h(px(16.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .child(apply_bg::palette::eye_icon(
+                                    vis,
+                                    if active { rgb(0xffffff) } else { rgb(0x334155) },
+                                ))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -378,7 +397,13 @@ impl PhotoEditApp {
                         .child(
                             div()
                                 .flex_1()
-                                .child(name)
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(layer_thumb_slot(thumb, fade))
+                                .child(div().flex_1().min_w(px(0.)).truncate().child(name))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -422,22 +447,32 @@ impl PhotoEditApp {
                 );
             }
         }
-        list.child(
-            div()
-                .flex()
-                .flex_row()
-                .px_1()
-                .gap_1()
-                .child(self.action_btn("dup", "复制层", |t, _, cx| t.duplicate_layer(cx), cx))
-                .child(self.action_btn(
-                    "dell",
-                    "删层 (Del)",
-                    |t, _, cx| t.delete_active_layer(cx),
-                    cx,
-                )),
-        )
+        list
     }
+}
 
+fn layer_thumb_slot(
+    tex: Option<std::sync::Arc<gpui::RenderImage>>,
+    fade: f32,
+) -> gpui::Div {
+    let mut slot = div()
+        .w(px(36.))
+        .h(px(28.))
+        .flex_shrink_0()
+        .rounded_sm()
+        .overflow_hidden()
+        .bg(rgb(0xd4d4d8))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(fade);
+    if let Some(tex) = tex {
+        slot = slot.child(img(tex).size_full().object_fit(ObjectFit::Contain));
+    }
+    slot
+}
+
+impl PhotoEditApp {
     fn measure_layer_bounds(entity: gpui::Entity<Self>, key: usize) -> impl IntoElement {
         canvas(
             move |bounds, _, cx| {
@@ -685,13 +720,23 @@ impl PhotoEditApp {
                     .w(px(22.))
                     .h(px(22.))
                     .rounded_sm()
+                    .overflow_hidden()
                     .border_1()
                     .border_color(rgb(0x94a3b8))
-                    .bg(rgb(((c[0] as u32) << 16)
-                        | ((c[1] as u32) << 8)
-                        | c[2] as u32))
                     .cursor_pointer()
                     .hover(|s| s.border_color(rgb(0x334155)))
+                    .child(apply_bg::palette::checkerboard(4.0))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui::rgba(
+                                (u32::from(c[0]) << 24)
+                                    | (u32::from(c[1]) << 16)
+                                    | (u32::from(c[2]) << 8)
+                                    | u32::from(self.paint_alpha),
+                            )),
+                    )
                     .child(
                         canvas(
                             {
