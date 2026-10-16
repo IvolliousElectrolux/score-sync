@@ -269,6 +269,8 @@ pub struct MaskToolApp {
     pub(crate) preview_only: bool,
     /// 预览态普通滚轮: 宿主取出后切组合. -1 上一组, +1 下一组.
     pub(crate) preview_wheel: i32,
+    /// 蒙版编辑态 Ctrl+Shift+滚轮: 宿主取出后切组合. -1 上一组, +1 下一组.
+    pub(crate) page_step_wheel: i32,
     /// 宿主滴管: 从预览图取色, 不改蒙版色.
     pub(crate) host_pick_armed: bool,
     pub(crate) host_pick_hover: Option<[u8; 3]>,
@@ -385,6 +387,7 @@ impl MaskToolApp {
             canvas_loading: false,
             preview_only: false,
             preview_wheel: 0,
+            page_step_wheel: 0,
             host_pick_armed: false,
             host_pick_hover: None,
             host_pick_click: None,
@@ -497,12 +500,19 @@ impl MaskToolApp {
             self.host_pick_hover = None;
             self.host_pick_click = None;
             self.preview_wheel = 0;
+            self.page_step_wheel = 0;
         }
     }
 
     pub fn take_preview_wheel(&mut self) -> i32 {
         let v = self.preview_wheel;
         self.preview_wheel = 0;
+        v
+    }
+
+    pub fn take_page_step_wheel(&mut self) -> i32 {
+        let v = self.page_step_wheel;
+        self.page_step_wheel = 0;
         v
     }
 

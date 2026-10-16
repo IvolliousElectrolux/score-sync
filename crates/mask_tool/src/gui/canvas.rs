@@ -951,6 +951,18 @@ impl MaskToolApp {
         if !self.has_canvas_preview() {
             return;
         }
+        // Ctrl+滚轮仍是缩放. Ctrl+Shift+滚轮交给宿主换组合.
+        if !self.preview_only
+            && apply_bg::is_primary_mod(&ev.modifiers)
+            && ev.modifiers.shift
+        {
+            if let Some(dir) = apply_bg::wheel_page_delta(ev) {
+                self.page_step_wheel = dir;
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.preview_only && !apply_bg::is_primary_mod(&ev.modifiers) {
             let dy = match ev.delta {
                 ScrollDelta::Pixels(p) => f32::from(p.y),

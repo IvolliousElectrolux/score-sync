@@ -69,6 +69,8 @@ actions!(
         Redo,
         SelectAllPageRegions,
         OpenPhotoEdit,
+        PrevPage,
+        NextPage,
     ]
 );
 
@@ -320,6 +322,10 @@ impl ScoreSyncApp {
             let dragging = mt.read(cx).is_block_dragging();
             this.sync_block_layout_from_mask_tool(&mt, cx);
             this.handle_guide_host_cmd(cx);
+            let step = mt.update(cx, |m, _| m.take_page_step_wheel());
+            if step != 0 && !dragging {
+                this.step_tab_direct(step as isize, cx);
+            }
             if !dragging {
                 cx.notify();
             }
@@ -1042,6 +1048,12 @@ impl Render for ScoreSyncApp {
                 this.scroll_group_list_to_active();
                 this.after_doc_change(cx);
             }))
+            .on_action(cx.listener(|this, _: &PrevPage, window, cx| {
+                this.step_tab(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextPage, window, cx| {
+                this.step_tab(1, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &mask_tool::gui::Undo, _, cx| {
                 this.mask_tool.update(cx, |m, cx| m.undo(cx));
             }))
@@ -1347,6 +1359,13 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             SelectAllPageRegions,
             Some("ScoreSync"),
         ));
+        // 分块 / 蒙版: Ctrl+方向键换页 (蒙版换的是组合页签). 裸方向键不绑, 避免误触.
+        for ctx in ["ScoreSync", "MaskTool"] {
+            keys.extend(apply_bg::bind_primary("left", PrevPage, Some(ctx)));
+            keys.extend(apply_bg::bind_primary("right", NextPage, Some(ctx)));
+            keys.extend(apply_bg::bind_primary("up", PrevPage, Some(ctx)));
+            keys.extend(apply_bg::bind_primary("down", NextPage, Some(ctx)));
+        }
         keys.extend(apply_bg::bind_primary("z", Undo, Some("PageOrganize")));
         keys.extend(apply_bg::bind_primary("y", Redo, Some("PageOrganize")));
         keys.extend(apply_bg::bind_primary(

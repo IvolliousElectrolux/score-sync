@@ -89,7 +89,67 @@ impl ScoreSyncApp {
         (from, None, false)
     }
 
-    /// 竖直列表 (成员): 原位无反应; 上半→该项上边, 下半→该项下边.
+    /// Ctrl+方向键. 分块换页, 蒙版换组合页签. 文本框聚焦, 浮层, 拖拽中不响应.
+    pub(super) fn step_tab(&mut self, delta: isize, window: &Window, cx: &mut Context<Self>) {
+        if window
+            .context_stack()
+            .iter()
+            .any(|ctx| ctx.contains("TextInput"))
+        {
+            return;
+        }
+        self.step_tab_direct(delta, cx);
+    }
+
+    /// 与 `step_tab` 相同, 但不看文本框焦点. 滚轮从蒙版画布回来时没有窗口焦点栈.
+    pub(super) fn step_tab_direct(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if delta == 0 {
+            return;
+        }
+        if self.has_modal_overlay(cx) || self.photo_open() || self.drag.is_some() {
+            return;
+        }
+        if self.side_tool == SideTool::Mask && self.mask_tool.read(cx).is_block_dragging() {
+            return;
+        }
+        match self.side_tool {
+            SideTool::Crop => self.step_page(delta, cx),
+            SideTool::Mask => self.step_mask_group(delta, cx),
+            _ => {}
+        }
+    }
+
+    fn step_page(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = self.doc.pages.len() as isize;
+        if n == 0 {
+            return;
+        }
+        let next = self.doc.current_page_index as isize + delta;
+        if (0..n).contains(&next) {
+            self.switch_page(next as usize, cx);
+        }
+    }
+
+    fn step_mask_group(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = self.doc.groups.len() as isize;
+        if n == 0 {
+            return;
+        }
+        let cur = match self.mask_active_group_index() {
+            Some(ix) => ix as isize,
+            None if delta > 0 => -1,
+            None => n,
+        };
+        let next = cur + delta;
+        if !(0..n).contains(&next) {
+            return;
+        }
+        let Some(gid) = self.doc.groups.get(next as usize).map(|g| g.id.clone()) else {
+            return;
+        };
+        self.set_mask_target(gid, true, cx);
+    }
+
     pub(super) fn switch_page(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.doc.pages.len() {
             return;

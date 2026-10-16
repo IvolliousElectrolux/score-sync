@@ -561,6 +561,14 @@ impl ScoreSyncApp {
         if self.dialog.is_some() {
             return;
         }
+        // Ctrl+滚轮仍是缩放. Ctrl+Shift+滚轮换页, 不缩放也不平移.
+        if is_primary_mod(&event.modifiers) && event.modifiers.shift {
+            if let Some(dir) = apply_bg::wheel_page_delta(event) {
+                self.step_tab(dir as isize, _window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         let (delta_x, delta_y) = match event.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(l) => (l.x * 30.0, l.y * 30.0),
