@@ -26,16 +26,20 @@ impl ToolMode {
         }
     }
 
-    pub fn hint(self) -> &'static str {
+    pub fn hint(self) -> String {
+        let m = apply_bg::primary_mod();
+        let a = apply_bg::alt_mod();
         match self {
-            ToolMode::Select => "V 点选或框选完全包住的元素. 点组合先选整组, 再点一次选里面的元素. Shift 追加, Ctrl 切换, Alt 拖动复制, Ctrl+A 全选",
-            ToolMode::Node => "A 拖锚点, 双击平滑/尖角, Delete 删点, 点另一条路径可切换",
-            ToolMode::Canvas => "K 拖四边改画布大小",
-            ToolMode::Hand => "H 或按住空格拖动平移, 滚轮平移, Ctrl 滚轮缩放",
-            ToolMode::Pen => "P 单击加点, 拖出手柄, 靠近起点会吸附并闭合, Enter 结束",
-            ToolMode::Pencil => "B 按住描绘, Alt 滚轮改粗细, Alt 单击吸取",
-            ToolMode::Eraser => "E 十字准星对准一个元素, 按下就删掉这一个",
-            ToolMode::Lasso => "L 圈住完全包在里面的元素. Shift 追加, Ctrl 切换, Alt 去掉",
+            ToolMode::Select => format!(
+                "V 点选或框选完全包住的元素. 点组合先选整组, 再点一次选里面的元素. Shift 追加, {m}切换, {a} 拖动复制, {m}A 全选"
+            ),
+            ToolMode::Node => "A 拖锚点, 双击平滑/尖角, Delete 删点, 点另一条路径可切换".into(),
+            ToolMode::Canvas => "K 拖四边改画布大小".into(),
+            ToolMode::Hand => format!("H 或按住空格拖动平移, 滚轮平移, {m}滚轮缩放"),
+            ToolMode::Pen => "P 单击加点, 拖出手柄, 靠近起点会吸附并闭合, Enter 结束".into(),
+            ToolMode::Pencil => format!("B 按住描绘, {a}+滚轮改粗细, {a} 单击吸取"),
+            ToolMode::Eraser => "E 十字准星对准一个元素, 按下就删掉这一个".into(),
+            ToolMode::Lasso => format!("L 圈住完全包在里面的元素. Shift 追加, {m}切换, {a} 去掉"),
         }
     }
 }

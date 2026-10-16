@@ -26,6 +26,24 @@ pub fn primary_shift() -> &'static str {
     }
 }
 
+/// Option 或 Alt. macOS 的 ⌥ 对应 Windows 的 Alt, 不是 Win 键.
+pub fn alt_mod() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌥"
+    } else {
+        "Alt"
+    }
+}
+
+/// `"⌘⌥"` 或 `"Ctrl+Alt+"`. Control (macOS) 和 Win 键都不是这一组.
+pub fn primary_alt() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘⌥"
+    } else {
+        "Ctrl+Alt+"
+    }
+}
+
 pub fn with_mod(name: &str, key: &str) -> String {
     format!("{name} ({}{key})", primary_mod())
 }

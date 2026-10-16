@@ -1901,7 +1901,7 @@ impl VectorEditApp {
                 this.note_pointer_modifiers(
                     ev.modifiers.shift,
                     ev.modifiers.alt,
-                    ev.modifiers.control,
+                    apply_bg::is_primary_mod(&ev.modifiers),
                     cx,
                 );
             }))

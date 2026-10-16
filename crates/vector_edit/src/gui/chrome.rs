@@ -139,7 +139,12 @@ impl VectorEditApp {
                         .child(self.stroke_slider(cx)),
                 ),
         );
-        bottom = bottom.child(div().text_xs().text_color(rgb(0x94a3b8)).child("Alt+滚轮调线宽"));
+        bottom = bottom.child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x94a3b8))
+                .child(format!("{}+滚轮调线宽", apply_bg::alt_mod())),
+        );
         if !self.import_options.is_empty() {
             bottom = bottom.child(div().text_sm().child("导入其它块"));
             for opt in self.import_options.clone() {
@@ -366,11 +371,7 @@ impl VectorEditApp {
         let can_paste_layer = self.layer_clip.is_some();
         let group_hint = format!("{}G", apply_bg::primary_mod());
         let ungroup_hint = format!("{}G", apply_bg::primary_shift());
-        let regroup_hint = if cfg!(target_os = "macos") {
-            "⌘⌥G".to_string()
-        } else {
-            "Ctrl+Alt+G".to_string()
-        };
+        let regroup_hint = format!("{}G", apply_bg::primary_alt());
         let copy_hint = format!("{}C", apply_bg::primary_mod());
         let paste_hint = format!("{}V", apply_bg::primary_mod());
         let mut col = div()
@@ -519,11 +520,7 @@ impl VectorEditApp {
         let can_paste_obj = self.obj_clip.is_some();
         let group_hint = format!("{}G", apply_bg::primary_mod());
         let ungroup_hint = format!("{}G", apply_bg::primary_shift());
-        let regroup_hint = if cfg!(target_os = "macos") {
-            "⌘⌥G".to_string()
-        } else {
-            "Ctrl+Alt+G".to_string()
-        };
+        let regroup_hint = format!("{}G", apply_bg::primary_alt());
         let copy_hint = format!("{}C", apply_bg::primary_mod());
         let paste_hint = format!("{}V", apply_bg::primary_mod());
         let mut col = div()
@@ -959,7 +956,7 @@ impl VectorEditApp {
                             id.clone(),
                             layer_index,
                             ev.modifiers.shift,
-                            ev.modifiers.control,
+                            apply_bg::is_primary_mod(&ev.modifiers),
                             cx,
                         );
                     }),

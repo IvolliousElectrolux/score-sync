@@ -1224,7 +1224,7 @@ impl PhotoEditApp {
                     return;
                 }
                 if self.mode == ToolMode::Clone && self.clone_src.is_none() {
-                    self.status = "先按住 Alt 点一下取样".into();
+                    self.status = format!("先按住 {} 点一下取样", apply_bg::alt_mod()).into();
                     self.notify_chrome(cx);
                     return;
                 }

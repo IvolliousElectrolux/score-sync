@@ -192,8 +192,16 @@ impl MaskToolApp {
         match mode {
             ToolMode::Draw => "框选".into(),
             ToolMode::Poly => "套索: 单击折线, 按住拖轨迹, 靠近首点点击或拖回起点闭环".into(),
-            ToolMode::Brush => "画笔 (拖动画布涂抹; 可改颜色/粗细; Alt+滚轮调大小)".into(),
-            ToolMode::Eraser => "橡皮: 单击擦最上层 · 拖动擦光; Alt+滚轮调大小".into(),
+            ToolMode::Brush => format!(
+                "画笔 (拖动画布涂抹; 可改颜色/粗细; {}+滚轮调大小)",
+                apply_bg::alt_mod()
+            )
+            .into(),
+            ToolMode::Eraser => format!(
+                "橡皮: 单击擦最上层 · 拖动擦光; {}+滚轮调大小",
+                apply_bg::alt_mod()
+            )
+            .into(),
             ToolMode::Select => format!(
                 "选择 (可 {}多选 / Shift 拖选); 未选中蒙版时拖块上下移, 拖四边裁切, Shift+拖左右移",
                 apply_bg::primary_mod()

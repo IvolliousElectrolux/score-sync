@@ -764,7 +764,7 @@ impl PhotoEditApp {
                 div()
                     .flex_1()
                     .text_color(rgb(0x64748b))
-                    .child("点色块开调色盘 · Alt 取样"),
+                    .child(format!("点色块开调色盘 · {} 取样", apply_bg::alt_mod())),
             )
             .child(self.chip(
                 "paper_c",

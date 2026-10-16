@@ -285,7 +285,12 @@ impl VectorEditApp {
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .cursor(self.canvas_cursor())
             .on_modifiers_changed(cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _, cx| {
-                this.note_pointer_modifiers(ev.modifiers.shift, ev.modifiers.alt, ev.modifiers.control, cx);
+                this.note_pointer_modifiers(
+                    ev.modifiers.shift,
+                    ev.modifiers.alt,
+                    apply_bg::is_primary_mod(&ev.modifiers),
+                    cx,
+                );
             }))
             .child(self.canvas_context_menu(cx))
     }
@@ -523,7 +528,7 @@ impl VectorEditApp {
         self.focus_handle.focus(window);
         self.shift_down = ev.modifiers.shift;
         self.alt_down = ev.modifiers.alt;
-        self.ctrl_down = ev.modifiers.control;
+        self.ctrl_down = apply_bg::is_primary_mod(&ev.modifiers);
         self.outline_menu = None;
         self.lock_user_view();
         self.drag = Some(DragKind::Pan {
@@ -539,7 +544,7 @@ impl VectorEditApp {
         self.outline_menu = None;
         self.shift_down = ev.modifiers.shift;
         self.alt_down = ev.modifiers.alt;
-        self.ctrl_down = ev.modifiers.control;
+        self.ctrl_down = apply_bg::is_primary_mod(&ev.modifiers);
         let (x, y) = self.doc_pt(f32::from(ev.position.x), f32::from(ev.position.y));
         if self.space_down || self.mode == ToolMode::Hand {
             self.lock_user_view();
@@ -869,7 +874,7 @@ impl VectorEditApp {
     fn on_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.shift_down = ev.modifiers.shift;
         self.alt_down = ev.modifiers.alt;
-        self.ctrl_down = ev.modifiers.control;
+        self.ctrl_down = apply_bg::is_primary_mod(&ev.modifiers);
         if let Some(DragKind::Slider(kind)) = self.drag {
             self.set_slider_from_x(f32::from(ev.position.x), kind, cx);
             return;
@@ -1066,7 +1071,7 @@ impl VectorEditApp {
     fn on_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.shift_down = ev.modifiers.shift;
         self.alt_down = ev.modifiers.alt;
-        self.ctrl_down = ev.modifiers.control;
+        self.ctrl_down = apply_bg::is_primary_mod(&ev.modifiers);
         let before = self.selected.clone();
         let drag = self.drag.take();
         let (x, y) = self.doc_pt(f32::from(ev.position.x), f32::from(ev.position.y));
