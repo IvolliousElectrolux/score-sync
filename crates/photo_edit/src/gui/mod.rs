@@ -58,6 +58,16 @@ actions!(
     ]
 );
 
+struct TileBatch {
+    id: String,
+    pixels: Arc<RgbaImage>,
+    ink: Option<Arc<RgbaImage>>,
+    rev: u64,
+    w: u32,
+    h: u32,
+    coords: Vec<(u32, u32)>,
+}
+
 struct LayerGpu {
     id: String,
     pixels_ptr: usize,
@@ -65,6 +75,8 @@ struct LayerGpu {
     cols: u32,
     rows: u32,
     tiles: Vec<Option<TileSprite>>,
+    /// 原图还没贴完时盖住整层的缩小图. 贴完就丢掉.
+    preview: Option<TileSprite>,
 }
 
 struct LayerThumb {
@@ -83,6 +95,8 @@ pub struct PhotoEditApp {
     pub(crate) erase_target: EraseTarget,
     pub(crate) trace_erase: TraceErase,
     layer_tex: Vec<LayerGpu>,
+    /// 分帧贴原图的代数. 重开或整层重贴时加一, 旧的分帧停掉.
+    tile_pump: u64,
     layer_thumbs: HashMap<String, LayerThumb>,
     /// 像素或笔迹变了就加一. 和指针无关, 原地改像素也能让缩略图失效.
     thumb_epoch: HashMap<String, u64>,
@@ -205,6 +219,7 @@ impl PhotoEditApp {
             erase_target: EraseTarget::Trace,
             trace_erase: TraceErase::Dab,
             layer_tex: Vec::new(),
+            tile_pump: 0,
             layer_thumbs: HashMap::new(),
             thumb_epoch: HashMap::new(),
             gpu_drop: Vec::new(),
@@ -347,9 +362,28 @@ impl PhotoEditApp {
     }
 
     pub fn open_rgb(&mut self, img: RgbImage, paper: Option<[u8; 3]>, cx: &mut Context<Self>) {
-        self.reset_grade_ui();
         let paper = paper.unwrap_or_else(|| crate::process::sample_paper(&img, 200));
-        self.doc = Some(EditDocument::from_rgb(&img, paper));
+        let rgba = crate::document::rgb_to_rgba(&img);
+        let preview = crate::document::opening_preview(&rgba);
+        let (w, h) = img.dimensions();
+        let doc = EditDocument::from_rgba(rgba, paper);
+        self.open_streaming(doc, preview, format!("画布 {w}×{h}"), cx);
+    }
+
+    pub fn open_document(&mut self, doc: EditDocument, cx: &mut Context<Self>) {
+        self.open_streaming(doc, None, "已载入上次修图", cx);
+    }
+
+    /// 大图先贴缩小预览, 原图分帧上传. 小图仍一次贴完.
+    pub fn open_streaming(
+        &mut self,
+        doc: EditDocument,
+        preview: Option<RgbaImage>,
+        status: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_grade_ui();
+        self.doc = Some(doc);
         self.selection = Selection::None;
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -358,22 +392,21 @@ impl PhotoEditApp {
         self.heal_offset = None;
         self.clamp_brush_size();
         self.fit_to_view(cx);
-        self.rebuild_preview();
-        self.status = format!("画布 {}×{}", img.width(), img.height()).into();
-        self.notify_chrome(cx);
-    }
-
-    pub fn open_document(&mut self, doc: EditDocument, cx: &mut Context<Self>) {
-        self.reset_grade_ui();
-        self.doc = Some(doc);
-        self.selection = Selection::None;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.dirty = false;
-        self.clamp_brush_size();
-        self.fit_to_view(cx);
-        self.rebuild_preview();
-        self.status = "已载入上次修图".into();
+        self.tile_pump = self.tile_pump.wrapping_add(1);
+        let gen = self.tile_pump;
+        self.install_layer_slots();
+        if let Some(preview) = preview {
+            self.attach_opening_preview(preview);
+        }
+        if self.missing_tile_count() == 0 {
+            self.clear_opening_previews();
+        } else if !self.stream_tiles() {
+            self.upload_missing_tiles(usize::MAX);
+            self.clear_opening_previews();
+        } else {
+            self.schedule_tile_pump(gen, cx);
+        }
+        self.status = status.into();
         self.notify_chrome(cx);
     }
 
@@ -529,7 +562,10 @@ impl PhotoEditApp {
         }
     }
 
-    fn drop_layer_gpu(&mut self, g: LayerGpu) {
+    fn drop_layer_gpu(&mut self, mut g: LayerGpu) {
+        if let Some(preview) = g.preview.take() {
+            self.gpu_drop.push(preview.tex);
+        }
         for tile in g.tiles.into_iter().flatten() {
             self.gpu_drop.push(tile.tex);
         }
@@ -590,7 +626,12 @@ impl PhotoEditApp {
                 } else {
                     None
                 };
-                let tiles = tiles.unwrap_or_else(|| g.tiles.iter().flatten().cloned().collect());
+                let mut tiles = tiles.unwrap_or_else(|| g.tiles.iter().flatten().cloned().collect());
+                if g.tiles.iter().any(|t| t.is_none()) {
+                    if let Some(preview) = &g.preview {
+                        tiles.insert(0, preview.clone());
+                    }
+                }
                 Some(LayerPaint {
                     tiles,
                     x,
@@ -780,13 +821,176 @@ impl PhotoEditApp {
             cols,
             rows,
             tiles: vec![None; (cols * rows) as usize],
+            preview: None,
         });
         self.upload_tiles(
             id, pixels, ink, stroke_rev, w, h, 0, 0, w as i32, h as i32, false, None,
         );
     }
 
+    fn install_layer_slots(&mut self) {
+        let Some(doc) = self.doc.as_ref() else {
+            self.drop_all_layer_tex();
+            return;
+        };
+        let mut next = Vec::with_capacity(doc.layers.len());
+        let mut old = std::mem::take(&mut self.layer_tex);
+        for layer in &doc.layers {
+            let ptr = Arc::as_ptr(&layer.pixels) as usize;
+            if let Some(idx) = old.iter().position(|g| {
+                g.id == layer.id && g.pixels_ptr == ptr && g.stroke_rev == layer.stroke_rev
+            }) {
+                next.push(old.swap_remove(idx));
+            } else {
+                let cols = tile_count(layer.width());
+                let rows = tile_count(layer.height());
+                next.push(LayerGpu {
+                    id: layer.id.clone(),
+                    pixels_ptr: ptr,
+                    stroke_rev: layer.stroke_rev,
+                    cols,
+                    rows,
+                    tiles: vec![None; (cols * rows) as usize],
+                    preview: None,
+                });
+            }
+        }
+        for g in old {
+            self.drop_layer_gpu(g);
+        }
+        self.layer_tex = next;
+    }
+
+    fn attach_opening_preview(&mut self, preview: RgbaImage) {
+        let Some(layer) = self.doc.as_ref().and_then(|d| d.layers.first()) else {
+            return;
+        };
+        let id = layer.id.clone();
+        let lw = layer.width();
+        let lh = layer.height();
+        let tex = upload_bgra_rect(&preview, 0, 0, preview.width(), preview.height());
+        let Some(g) = self.layer_tex.iter_mut().find(|g| g.id == id) else {
+            return;
+        };
+        g.preview = Some(TileSprite {
+            tex,
+            x: 0,
+            y: 0,
+            w: lw,
+            h: lh,
+            pad_l: 0,
+            pad_t: 0,
+            pad_r: 0,
+            pad_b: 0,
+        });
+    }
+
+    fn missing_tile_count(&self) -> usize {
+        self.layer_tex
+            .iter()
+            .map(|g| g.tiles.iter().filter(|t| t.is_none()).count())
+            .sum()
+    }
+
+    fn stream_tiles(&self) -> bool {
+        self.missing_tile_count() > 12
+    }
+
+    fn clear_opening_previews(&mut self) {
+        let mut drop = Vec::new();
+        for g in &mut self.layer_tex {
+            if let Some(preview) = g.preview.take() {
+                drop.push(preview.tex);
+            }
+        }
+        self.gpu_drop.extend(drop);
+    }
+
+    fn upload_missing_tiles(&mut self, budget: usize) {
+        if budget == 0 {
+            return;
+        }
+        let mut left = budget;
+        let ids: Vec<String> = self.layer_tex.iter().map(|g| g.id.clone()).collect();
+        for id in ids {
+            if left == 0 {
+                break;
+            }
+            let Some(batch) = self.next_tile_batch(&id, left) else {
+                continue;
+            };
+            left = left.saturating_sub(batch.coords.len());
+            self.upload_tiles(
+                &batch.id,
+                batch.pixels.as_ref(),
+                batch.ink.as_deref(),
+                batch.rev,
+                batch.w,
+                batch.h,
+                0,
+                0,
+                0,
+                0,
+                false,
+                Some(&batch.coords),
+            );
+        }
+    }
+
+    fn next_tile_batch(&self, id: &str, budget: usize) -> Option<TileBatch> {
+        let g = self.layer_tex.iter().find(|g| g.id == id)?;
+        let layer = self.doc.as_ref()?.layers.iter().find(|l| l.id == id)?;
+        let mut coords = Vec::new();
+        for (idx, tile) in g.tiles.iter().enumerate() {
+            if tile.is_some() {
+                continue;
+            }
+            let cols = g.cols.max(1);
+            coords.push(((idx as u32) % cols, (idx as u32) / cols));
+            if coords.len() >= budget {
+                break;
+            }
+        }
+        if coords.is_empty() {
+            return None;
+        }
+        Some(TileBatch {
+            id: id.to_string(),
+            pixels: layer.pixels.clone(),
+            ink: layer.ink.clone(),
+            rev: layer.stroke_rev,
+            w: layer.width(),
+            h: layer.height(),
+            coords,
+        })
+    }
+
+    fn schedule_tile_pump(&mut self, gen: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1))
+                .await;
+            this.update(cx, |this, cx| this.pump_tile_stream(gen, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn pump_tile_stream(&mut self, gen: u64, cx: &mut Context<Self>) {
+        if self.tile_pump != gen {
+            return;
+        }
+        self.upload_missing_tiles(4);
+        if self.missing_tile_count() > 0 {
+            self.schedule_tile_pump(gen, cx);
+        } else {
+            self.clear_opening_previews();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn rebuild_preview(&mut self) {
+        self.tile_pump = self.tile_pump.wrapping_add(1);
         let Some(doc) = self.doc.as_ref() else {
             self.drop_all_layer_tex();
             return;
@@ -825,6 +1029,7 @@ impl PhotoEditApp {
                     cols,
                     rows,
                     tiles: vec![None; (cols * rows) as usize],
+                    preview: None,
                 });
             }
         }
@@ -869,6 +1074,7 @@ impl PhotoEditApp {
             cols,
             rows,
             tiles: vec![None; (cols * rows) as usize],
+            preview: None,
         };
         if let Some(g) = self.layer_tex.iter_mut().find(|g| g.id == id) {
             let old = std::mem::replace(g, neu);

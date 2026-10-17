@@ -14,16 +14,19 @@ use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::model::{BlockAdjust, DocState, Group, Page, Region};
+use crate::model::{BlockAdjust, DocState, Group, Page, Region, SheetLayout};
 use crate::staff_detect::StaffGrouping;
 use score_video::model::FadeKind;
 
 pub const PROJECT_EXT: &str = "staffcrop";
-pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct ProjectFile {
     version: u32,
+    /// 缺省为谱表分块. 对开工程写成 2, 旧程序会拒绝打开.
+    #[serde(default)]
+    sheet_layout: SheetLayout,
     margin: i32,
     ink_threshold: i32,
     #[serde(default)]
@@ -161,6 +164,9 @@ struct ProjectPage {
     w_pt: f32,
     #[serde(default)]
     h_pt: f32,
+    /// 对开空位. 不带页图, 和奇数末页旁边的空页一样.
+    #[serde(default)]
+    blank: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -197,6 +203,8 @@ struct ProjectBlockAdjust {
     gap_after: i32,
     #[serde(default)]
     shift_x: i32,
+    #[serde(default)]
+    shift_y: i32,
 }
 
 impl From<&BlockAdjust> for ProjectBlockAdjust {
@@ -210,6 +218,7 @@ impl From<&BlockAdjust> for ProjectBlockAdjust {
             gap_before: a.gap_before,
             gap_after: a.gap_after,
             shift_x: a.shift_x,
+            shift_y: a.shift_y,
         }
     }
 }
@@ -225,6 +234,7 @@ impl From<ProjectBlockAdjust> for BlockAdjust {
             gap_before: a.gap_before,
             gap_after: a.gap_after,
             shift_x: a.shift_x,
+            shift_y: a.shift_y,
         }
     }
 }
@@ -301,6 +311,15 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
                 src.w_pt,
                 src.h_pt,
             )
+        } else if page.blank {
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                0,
+                0.0,
+                0.0,
+            )
         } else {
             if !page.disk_path.is_file() && page.image.is_none() {
                 return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));
@@ -337,6 +356,7 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
             pdf_page,
             w_pt,
             h_pt,
+            blank: page.blank,
         });
     }
 
@@ -421,6 +441,7 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
 
     let meta = ProjectFile {
         version: PROJECT_VERSION,
+        sheet_layout: doc.sheet_layout,
         margin: doc.margin,
         ink_threshold: doc.ink_threshold,
         staff_grouping: doc.staff_grouping,
@@ -487,6 +508,9 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
 
         let mut written_pdfs: HashSet<String> = HashSet::new();
         for page in &doc.pages {
+            if page.blank {
+                continue;
+            }
             if let Some(src) = page.vector.as_ref() {
                 let Some(rel) = pdf_rels.get(&src.pdf_path) else {
                     continue;
@@ -636,6 +660,34 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
     let session = crate::page_cache::session_dir();
     let mut pdf_files: HashMap<String, PathBuf> = HashMap::new();
     for p in &meta.pages {
+        let title_stem = std::path::Path::new(&p.title)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(p.title.as_str());
+        let blank = p.blank
+            || title_stem
+                .split("_copy")
+                .next()
+                .unwrap_or(title_stem)
+                .starts_with("blank_");
+        if blank {
+            pages.push(Page {
+                id: p.id.clone(),
+                path: if p.title.is_empty() {
+                    PathBuf::from(format!("blank_{}.png", p.id))
+                } else {
+                    PathBuf::from(&p.title)
+                },
+                disk_path: PathBuf::new(),
+                image: None,
+                img_w: 1,
+                img_h: 1,
+                regions: HashMap::new(),
+                vector: None,
+                blank: true,
+            });
+            continue;
+        }
         let vector = if p.coord == "pt" && !p.pdf.is_empty() {
             let pdf_path = if let Some(path) = pdf_files.get(&p.pdf) {
                 path.clone()
@@ -694,6 +746,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             img_h: h,
             regions,
             vector,
+            blank: false,
         });
     }
 
@@ -737,6 +790,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             .clamp(),
         // 工程文件内的 groups 顺序即导出顺序
         groups_manual_order: true,
+        sheet_layout: meta.sheet_layout,
         bg_enabled: false,
         bg_image: None,
         bg_solid: None,
@@ -888,9 +942,9 @@ mod tests {
         let page_id = "page-a".to_string();
         let mut regions = HashMap::new();
         regions.insert(
-            "r0".into(),
+            "r-rt".into(),
             Region {
-                id: "r0".into(),
+                id: "r-rt".into(),
                 page_id: page_id.clone(),
                 y0: 0,
                 y1: 9,
@@ -909,17 +963,18 @@ mod tests {
             img_h: 20,
             regions,
             vector: None,
+            blank: false,
         });
         doc.groups.push(Group {
             id: "g-late".into(),
-            region_ids: vec!["r0".into()],
+            region_ids: vec!["r-rt".into()],
             name: String::new(),
         });
         doc.groups.insert(
             0,
             Group {
                 id: "g-early".into(),
-                region_ids: vec!["r0".into()],
+                region_ids: vec!["r-rt".into()],
                 name: String::new(),
             },
         );
@@ -937,7 +992,7 @@ mod tests {
             h: 10,
             ..Default::default()
         });
-        doc.write_region_edit("r0", &edit).unwrap();
+        doc.write_region_edit("r-rt", &edit).unwrap();
 
         let mut bg = RgbImage::new(4, 2);
         bg.put_pixel(0, 0, Rgb([10, 20, 30]));
@@ -945,7 +1000,7 @@ mod tests {
         doc.set_project_bg_arc(Arc::new(bg), None, 16, 9).unwrap();
 
         let path = save_project(&doc, &dir.join("piece")).unwrap();
-        let _ = std::fs::remove_dir_all(DocState::region_edit_dir("r0"));
+        let _ = std::fs::remove_dir_all(DocState::region_edit_dir("r-rt"));
         let loaded = load_project(&path).unwrap();
 
         assert!(loaded.groups_manual_order);
@@ -957,24 +1012,102 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["g-early", "g-late"]
         );
-        assert!(loaded.region_edit_applies("r0"));
-        assert!(loaded.load_region_flat("r0").is_some());
+        assert!(loaded.region_edit_applies("r-rt"));
+        assert!(loaded.load_region_flat("r-rt").is_some());
         assert!(loaded.bg_solid.is_none());
         let img = loaded.bg_image.as_ref().unwrap();
         assert_eq!(img.get_pixel(0, 0).0, [10, 20, 30]);
         assert!(loaded.bg_source_path.is_none());
 
         let mut detached = loaded;
-        detached.get_region_mut("r0").unwrap().y1 = 14;
-        assert!(detached.region_edit_detached("r0"));
-        assert!(!detached.region_edit_applies("r0"));
-        assert!(detached.load_region_flat("r0").is_none());
+        detached.get_region_mut("r-rt").unwrap().y1 = 14;
+        assert!(detached.region_edit_detached("r-rt"));
+        assert!(!detached.region_edit_applies("r-rt"));
+        assert!(detached.load_region_flat("r-rt").is_none());
         assert_eq!(detached.group_member_heights("g-early")[0].1, 15);
-        detached.get_region_mut("r0").unwrap().y1 = 9;
-        assert!(detached.region_edit_applies("r0"));
-        assert!(detached.load_region_flat("r0").is_some());
+        detached.get_region_mut("r-rt").unwrap().y1 = 9;
+        assert!(detached.region_edit_applies("r-rt"));
+        assert!(detached.load_region_flat("r-rt").is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(DocState::region_edit_dir("r0"));
+        let _ = std::fs::remove_dir_all(DocState::region_edit_dir("r-rt"));
+    }
+
+    #[test]
+    fn version_1_opens_as_staff_and_spread_round_trips_shift_y() {
+        let dir = std::env::temp_dir().join(format!(
+            "score_sync_proj_spread_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let v1 = dir.join("v1.staffcrop");
+        write_version_zip(&v1, 1);
+        let loaded_v1 = load_project(&v1).unwrap();
+        assert_eq!(loaded_v1.sheet_layout, SheetLayout::Staff);
+
+        let page_png = dir.join("page.png");
+        RgbImage::from_pixel(8, 20, Rgb([255, 255, 255]))
+            .save(&page_png)
+            .unwrap();
+        let mut regions = HashMap::new();
+        regions.insert(
+            "r-spread".into(),
+            Region {
+                id: "r-spread".into(),
+                page_id: "page-spread".into(),
+                y0: 0,
+                y1: 19,
+                kind: "page".into(),
+                color: "#e74c3c".into(),
+            },
+        );
+        let mut doc = DocState::new();
+        doc.sheet_layout = SheetLayout::Spread;
+        doc.pages.push(Page {
+            id: "page-spread".into(),
+            path: PathBuf::from("page.png"),
+            disk_path: page_png,
+            image: None,
+            img_w: 8,
+            img_h: 20,
+            regions,
+            vector: None,
+            blank: false,
+        });
+        doc.groups.push(Group {
+            id: "g-spread".into(),
+            region_ids: vec!["r-spread".into()],
+            name: String::new(),
+        });
+        doc.group_block_layout.insert(
+            "g-spread".into(),
+            vec![BlockAdjust {
+                region_id: "r-spread".into(),
+                shift_y: 12,
+                shift_x: -3,
+                ..Default::default()
+            }],
+        );
+        doc.rebuild_rid_index();
+        let path = save_project(&doc, &dir.join("spread")).unwrap();
+
+        let file = File::open(&path).unwrap();
+        let mut zip = ZipArchive::new(file).unwrap();
+        let mut json = String::new();
+        zip.by_name("project.json")
+            .unwrap()
+            .read_to_string(&mut json)
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta["version"], 2);
+        assert_eq!(meta["sheet_layout"], "spread");
+        assert_eq!(meta["group_block_layout"]["g-spread"][0]["shift_y"], 12);
+
+        let loaded = load_project(&path).unwrap();
+        assert_eq!(loaded.sheet_layout, SheetLayout::Spread);
+        let adj = &loaded.group_block_layout["g-spread"][0];
+        assert_eq!(adj.shift_y, 12);
+        assert_eq!(adj.shift_x, -3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

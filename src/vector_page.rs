@@ -718,6 +718,7 @@ pub fn scale_adjust(adj: &BlockAdjust, scale: f32) -> BlockAdjust {
         gap_before: scale_i32(adj.gap_before, scale),
         gap_after: scale_i32(adj.gap_after, scale),
         shift_x: scale_i32(adj.shift_x, scale),
+        shift_y: scale_i32(adj.shift_y, scale),
     }
 }
 
@@ -882,18 +883,76 @@ pub fn stitch_rgba(parts: &[(String, RgbaImage)], layout: &[BlockAdjust]) -> Opt
     Some(out)
 }
 
+/// 对开: 左右并排. `layout` 已经是像素. 后面的页盖住前面的页.
+pub fn stitch_rgba_spread(
+    parts: &[(String, RgbaImage)],
+    layout: &[BlockAdjust],
+) -> Option<RgbaImage> {
+    if parts.is_empty() {
+        return None;
+    }
+    let sizes: Vec<(String, u32, u32)> = parts
+        .iter()
+        .map(|(id, img)| (id.clone(), img.width(), img.height()))
+        .collect();
+    let (boxes, w, h) = mask_tool::layout::spread_layout(&sizes, layout);
+    let mut out = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 0]));
+    for b in boxes {
+        let Some((_, img)) = parts.iter().find(|(id, _)| id == &b.region_id) else {
+            continue;
+        };
+        let adj = BlockAdjust::find(layout, &b.region_id)
+            .cloned()
+            .unwrap_or_default();
+        let (trim_l, _, _, _, content_w) =
+            mask_tool::layout::effective_h_metrics(img.width() as i32, &adj);
+        let (_, _, content_h, _, trim_top) =
+            mask_tool::layout::effective_metrics(img.height() as i32, &adj);
+        if content_w == 0 || content_h == 0 {
+            continue;
+        }
+        let ox = (b.origin_x + trim_l as i64) as i32;
+        let oy = (b.origin_y + trim_top as i64) as i32;
+        blit_rgba_rect(
+            &mut out, img, trim_l, trim_top, content_w, content_h, ox, oy,
+        );
+    }
+    Some(out)
+}
+
 fn blit_rgba(dst: &mut RgbaImage, src: &RgbaImage, ox: i32, oy: i32) {
-    for y in 0..src.height() {
+    blit_rgba_rect(dst, src, 0, 0, src.width(), src.height(), ox, oy);
+}
+
+fn blit_rgba_rect(
+    dst: &mut RgbaImage,
+    src: &RgbaImage,
+    src_x0: u32,
+    src_y0: u32,
+    src_w: u32,
+    src_h: u32,
+    ox: i32,
+    oy: i32,
+) {
+    for y in 0..src_h {
+        let sy = src_y0 + y;
+        if sy >= src.height() {
+            break;
+        }
         let dy = oy + y as i32;
         if dy < 0 || dy >= dst.height() as i32 {
             continue;
         }
-        for x in 0..src.width() {
+        for x in 0..src_w {
+            let sx = src_x0 + x;
+            if sx >= src.width() {
+                break;
+            }
             let dx = ox + x as i32;
             if dx < 0 || dx >= dst.width() as i32 {
                 continue;
             }
-            *dst.get_pixel_mut(dx as u32, dy as u32) = *src.get_pixel(x, y);
+            *dst.get_pixel_mut(dx as u32, dy as u32) = *src.get_pixel(sx, sy);
         }
     }
 }
@@ -1213,5 +1272,30 @@ mod tests {
         assert_eq!(paper.get_pixel(0, 0).0, [180, 140, 90]);
         assert_eq!(paper.get_pixel(1, 0).0, [255, 255, 255]);
         assert_eq!(paper.get_pixel(2, 0).0, [180, 140, 90]);
+    }
+
+    #[test]
+    fn stitch_rgba_spread_keeps_shift_and_lets_later_page_cover() {
+        let mut left = RgbaImage::from_pixel(4, 2, Rgba([10, 0, 0, 255]));
+        left.put_pixel(3, 0, Rgba([2, 0, 0, 255]));
+        let right = RgbaImage::from_pixel(3, 2, Rgba([0, 10, 0, 255]));
+        let parts = vec![("L".into(), left), ("R".into(), right)];
+        let side = stitch_rgba_spread(&parts, &[]).unwrap();
+        assert_eq!(side.dimensions(), (7, 2));
+        assert_eq!(side.get_pixel(3, 0).0, [2, 0, 0, 255]);
+        assert_eq!(side.get_pixel(4, 0).0, [0, 10, 0, 255]);
+        let overlap = stitch_rgba_spread(
+            &parts,
+            &[BlockAdjust {
+                region_id: "R".into(),
+                shift_x: -2,
+                shift_y: 1,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        assert_eq!(overlap.dimensions(), (5, 3));
+        assert_eq!(overlap.get_pixel(2, 1).0, [0, 10, 0, 255]);
+        assert_eq!(overlap.get_pixel(2, 0).0, [10, 0, 0, 255]);
     }
 }

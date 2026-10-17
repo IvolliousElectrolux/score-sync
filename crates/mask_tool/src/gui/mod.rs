@@ -107,6 +107,17 @@ actions!(
     ]
 );
 
+/// 对开拖动开始时的画布补齐和谱面摆放. 拖动中用它抵消负坐标平移和底色居中,
+/// 没被拖到的那一页才留在原地.
+#[derive(Clone, Copy)]
+struct SpreadDragPin {
+    pad_x: i64,
+    pad_y: i64,
+    hoff: i64,
+    voff: i64,
+    content_scale: f32,
+}
+
 pub struct MaskToolApp {
     focus_handle: FocusHandle,
     image_path: Option<PathBuf>,
@@ -187,6 +198,15 @@ pub struct MaskToolApp {
     /// 「组合分块」各成员原始高度 (未应用位置/尺寸微调), 与 `block_layout`
     /// 一起换算命中测试/叠加线坐标; 实际像素拼接 (含底色合成) 由宿主负责.
     pub(crate) block_heights: Vec<(String, u32)>,
+    /// 对开组合: 块左右并排, 本体拖动写 `shift_x` / `shift_y` 并进入成片.
+    pub(crate) spread: bool,
+    /// 对开左右对称, 默认开. 拖一页时另一页走相反的横向位移.
+    /// 关掉后只移动被拖的那一页, 另一页留在原地.
+    pub(crate) spread_mirror_x: bool,
+    /// 本次对开拖动开始时的补齐与摆放, 见 `SpreadDragPin`.
+    spread_drag_pin: Option<SpreadDragPin>,
+    /// 对开各块逻辑宽 (region_id, 宽). 贴图到达前用来算画布.
+    piece_widths: Vec<(String, u32)>,
     /// 当前块位置/尺寸微调 (拖动时实时更新; 宿主按需 pull 持久化并重算).
     pub(crate) block_layout: Vec<BlockAdjust>,
     /// 组合拼合图在当前画布中的纵向偏移 (底色合成居中时非 0).
@@ -354,6 +374,10 @@ impl MaskToolApp {
             session_key: None,
             prefs_dirty: false,
             block_heights: Vec::new(),
+            spread: false,
+            spread_mirror_x: true,
+            spread_drag_pin: None,
+            piece_widths: Vec::new(),
             block_layout: Vec::new(),
             block_voff: 0,
             block_hoff: 0,

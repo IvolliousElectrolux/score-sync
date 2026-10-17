@@ -479,8 +479,12 @@ struct ManifestLayer {
 
 impl EditDocument {
     pub fn from_rgb(img: &RgbImage, paper: [u8; 3]) -> Self {
+        Self::from_rgba(rgb_to_rgba(img), paper)
+    }
+
+    pub fn from_rgba(img: RgbaImage, paper: [u8; 3]) -> Self {
         let (w, h) = img.dimensions();
-        let layer = Layer::new("背景", rgb_to_rgba(img));
+        let layer = Layer::new("背景", img);
         Self {
             canvas_w: w.max(1),
             canvas_h: h.max(1),
@@ -669,13 +673,37 @@ impl EditDocument {
     }
 }
 
+/// 整页贴图块数超过这个数时, 先给一张缩小预览, 原图分帧再传.
+/// 一条谱表通常低于此数, 仍一次贴完.
+const OPEN_STREAM_TILES: u32 = 12;
+const OPEN_PREVIEW_SIDE: u32 = 1536;
+
+pub fn opening_preview(img: &RgbaImage) -> Option<RgbaImage> {
+    let w = img.width();
+    let h = img.height();
+    let tiles = w.max(1).div_ceil(512) * h.max(1).div_ceil(512);
+    if tiles <= OPEN_STREAM_TILES {
+        return None;
+    }
+    let max = w.max(h).max(1);
+    if max <= OPEN_PREVIEW_SIDE {
+        return Some(img.clone());
+    }
+    let tw = ((w as u64 * OPEN_PREVIEW_SIDE as u64) / max as u64).max(1) as u32;
+    let th = ((h as u64 * OPEN_PREVIEW_SIDE as u64) / max as u64).max(1) as u32;
+    Some(image::imageops::thumbnail(img, tw, th))
+}
+
 pub fn rgb_to_rgba(img: &RgbImage) -> RgbaImage {
     let (w, h) = img.dimensions();
-    let mut out = RgbaImage::new(w, h);
-    for (x, y, p) in img.enumerate_pixels() {
-        out.put_pixel(x, y, Rgba([p[0], p[1], p[2], 255]));
+    let src = img.as_raw();
+    let mut buf = vec![255u8; src.len() / 3 * 4];
+    for (s, d) in src.chunks_exact(3).zip(buf.chunks_exact_mut(4)) {
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
     }
-    out
+    RgbaImage::from_raw(w, h, buf).expect("rgba")
 }
 
 pub fn blit_rgba(dst: &mut RgbImage, src: &RgbaImage, dx: i32, dy: i32, opacity: f32) {

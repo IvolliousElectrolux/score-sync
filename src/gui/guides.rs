@@ -39,6 +39,7 @@ impl ScoreSyncApp {
             GuideHostCmd::RedoGlobal(token) => self.redo_guide_global(Some(token), cx),
             GuideHostCmd::UndoGlobalFallback => self.undo_guide_global(None, cx),
             GuideHostCmd::RedoGlobalFallback => self.redo_guide_global(None, cx),
+            GuideHostCmd::SyncSpreadX => self.sync_spread_x_from_current(cx),
         }
     }
 
@@ -93,12 +94,24 @@ impl ScoreSyncApp {
         &mut self,
         cx: &mut Context<Self>,
         refresh_preview: bool,
+        note: &'static str,
         apply: impl FnOnce(&mut Self) -> SharedString,
     ) {
         self.flush_mask_to_doc(cx);
         let before = self.capture_mask_global_snap();
         let status = apply(self);
         let after = self.capture_mask_global_snap();
+        if before.group_block_layout == after.group_block_layout
+            && before.group_masks == after.group_masks
+            && before.group_guides == after.group_guides
+            && before.group_voff_shift == after.group_voff_shift
+            && before.guides_global == after.guides_global
+            && before.guides_sync_positions == after.guides_sync_positions
+        {
+            self.status = status;
+            cx.notify();
+            return;
+        }
         let token = self.next_guide_token;
         self.next_guide_token = self.next_guide_token.wrapping_add(1);
         self.guide_undo.push(GuideHistEntry {
@@ -106,6 +119,7 @@ impl ScoreSyncApp {
             before,
             after,
             refresh_preview,
+            note,
         });
         if self.guide_undo.len() > CROP_HISTORY_LIMIT {
             self.guide_undo.remove(0);
@@ -151,15 +165,16 @@ impl ScoreSyncApp {
         };
         let entry = self.guide_undo.remove(i);
         let refresh = entry.refresh_preview;
+        let note = entry.note;
         self.apply_mask_global_snap(entry.before.clone());
         if token.is_none() {
             self.mask_tool
                 .update(cx, |m, _| m.purge_host_token(entry.token));
         }
         self.guide_redo.push(entry);
-        self.mark_dirty();
+        self.mark_video_pool_dirty_all();
         self.sync_current_mask_after_guides(cx, refresh);
-        self.status = "已撤回全局辅助线操作.".into();
+        self.status = format!("已撤回{note}.").into();
         cx.notify();
     }
 
@@ -178,6 +193,7 @@ impl ScoreSyncApp {
         };
         let entry = self.guide_redo.remove(i);
         let refresh = entry.refresh_preview;
+        let note = entry.note;
         self.apply_mask_global_snap(entry.after.clone());
         if token.is_none() {
             self.mask_tool
@@ -187,14 +203,14 @@ impl ScoreSyncApp {
         if self.guide_undo.len() > CROP_HISTORY_LIMIT {
             self.guide_undo.remove(0);
         }
-        self.mark_dirty();
+        self.mark_video_pool_dirty_all();
         self.sync_current_mask_after_guides(cx, refresh);
-        self.status = "已重做全局辅助线操作.".into();
+        self.status = format!("已重做{note}.").into();
         cx.notify();
     }
 
     fn guides_enable_all(&mut self, cx: &mut Context<Self>) {
-        self.commit_guide_global(cx, false, |this| {
+        self.commit_guide_global(cx, false, "全局辅助线操作", |this| {
             this.doc.apply_guides_global_on();
             let n = this.doc.groups.len();
             format!("已全局开启辅助线 ({n} 个组合).").into()
@@ -202,7 +218,7 @@ impl ScoreSyncApp {
     }
 
     fn guides_disable_all(&mut self, cx: &mut Context<Self>) {
-        self.commit_guide_global(cx, false, |this| {
+        self.commit_guide_global(cx, false, "全局辅助线操作", |this| {
             this.doc.apply_guides_global_off();
             "已关闭全部组合的辅助线.".into()
         });
@@ -248,6 +264,113 @@ impl ScoreSyncApp {
             self.status = format!("已同步辅助线位置到 {n} 个同样根数的组合.").into();
         }
         cx.notify();
+    }
+
+    /// 把当前对开里各页相对自己槽位的横向偏移, 套到其余每一对的同一侧.
+    /// 页更窄、移不到那么远时停在成片边缘. 已画上的蒙版跟着页走.
+    fn sync_spread_x_from_current(&mut self, cx: &mut Context<Self>) {
+        if !self.doc.is_spread() {
+            self.status = "只有双页对开可以同步左右位置.".into();
+            cx.notify();
+            return;
+        }
+        self.commit_guide_global(cx, false, "同步左右", |this| this.apply_spread_x_sync())
+    }
+
+    fn apply_spread_x_sync(&mut self) -> SharedString {
+        let Some(src_gid) = self.mask_target.clone() else {
+            return "没有正在编辑的对开.".into();
+        };
+        let src_sizes = self.doc.group_member_sizes(&src_gid);
+        if src_sizes.is_empty() {
+            return "当前对开没有页面.".into();
+        }
+        let src_layout = self.doc.get_block_layout(&src_gid).to_vec();
+        let src_shifts: Vec<i32> = src_sizes
+            .iter()
+            .map(|(id, _, _)| {
+                BlockAdjust::find(&src_layout, id)
+                    .map(|a| a.shift_x)
+                    .unwrap_or(0)
+            })
+            .collect();
+        let gids: Vec<String> = self.doc.groups.iter().map(|g| g.id.clone()).collect();
+        if gids.iter().all(|gid| gid == &src_gid) {
+            return "只有这一对.".into();
+        }
+        let mut books = 0usize;
+        let mut clamped = 0usize;
+        for gid in gids {
+            if gid == src_gid {
+                continue;
+            }
+            let sizes = self.doc.group_member_sizes(&gid);
+            if sizes.is_empty() {
+                continue;
+            }
+            let old = self.doc.get_block_layout(&gid).to_vec();
+            let mut layout = old.clone();
+            for (i, (rid, _, _)) in sizes.iter().enumerate() {
+                let Some(&want) = src_shifts.get(i) else {
+                    continue;
+                };
+                let prev = BlockAdjust::find(&old, rid).map(|a| a.shift_x).unwrap_or(0);
+                let (next, got) = layout::write_spread_shift_x(&sizes, &layout, rid, want);
+                if got != want && got != prev {
+                    clamped += 1;
+                }
+                layout = next;
+            }
+            if layout == old {
+                continue;
+            }
+            let deltas = layout::spread_content_shifts(&sizes, &old, &layout);
+            if !deltas.is_empty() {
+                let old_boxes = layout::spread_boxes(&sizes, &old);
+                if let Some(masks) = self.doc.group_masks.get_mut(&gid) {
+                    for m in masks.iter_mut() {
+                        let target = m
+                            .bound_block
+                            .clone()
+                            .filter(|b| sizes.iter().any(|(id, ..)| id == b))
+                            .or_else(|| {
+                                let cx = (m.x0 + m.x1) as f32 / 2.0;
+                                let cy = (m.y0 + m.y1) as f32 / 2.0;
+                                old_boxes
+                                    .iter()
+                                    .find(|b| {
+                                        cx >= b.x as f32
+                                            && cx <= (b.x + b.w) as f32
+                                            && cy >= b.y as f32
+                                            && cy <= (b.y + b.h) as f32
+                                    })
+                                    .map(|b| b.region_id.clone())
+                            });
+                        if let Some(rid) = target {
+                            if let Some(&(dx, dy)) = deltas.get(&rid) {
+                                m.translate(dx, dy);
+                            }
+                        }
+                    }
+                }
+            }
+            self.doc.set_block_layout(&gid, layout);
+            self.mark_video_pool_dirty_group(&gid);
+            books += 1;
+        }
+        if books == 0 {
+            return "其它对开的左右位置已经和当前这一对一样.".into();
+        }
+        let side = if src_shifts.len() < 2 {
+            "当前只有左页, 只同步了各对的左页. "
+        } else {
+            ""
+        };
+        if clamped > 0 {
+            format!("{side}已同步 {books} 对. 有 {clamped} 页比当前页窄, 停在成片边缘.").into()
+        } else {
+            format!("{side}已把当前这一对的左右位置套到 {books} 对.").into()
+        }
     }
 
     pub(super) fn cancel_align_all(&mut self) {
@@ -414,7 +537,7 @@ impl ScoreSyncApp {
         self.doc.ingest_region_staff_anchors(result.new_anchors);
         let n_fail = result.n_fail;
         let groups = result.groups;
-        self.commit_guide_global(cx, true, move |this| {
+        self.commit_guide_global(cx, true, "全局辅助线操作", move |this| {
             let mut n = 0u32;
             for g in groups {
                 if this.apply_group_align_result(
@@ -997,9 +1120,7 @@ fn align_one_group(
                 let lines = g
                     .guide_lines
                     .iter()
-                    .map(|y| {
-                        (((*y as f32) - frame.voff as f32) / cs).round() as i32
-                    })
+                    .map(|y| (((*y as f32) - frame.voff as f32) / cs).round() as i32)
                     .collect();
                 (0, 0, lines)
             } else {

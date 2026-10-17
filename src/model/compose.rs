@@ -21,10 +21,26 @@ pub(crate) fn compose_parts_impl(
     parts: &[(String, image::RgbImage)],
     layout: &[BlockAdjust],
     ink_threshold: i32,
+    spread: bool,
     stats: Option<&std::collections::HashMap<String, mask_tool::layout::PieceStats>>,
 ) -> Option<image::RgbImage> {
     if parts.is_empty() {
         return None;
+    }
+    if spread {
+        let piece_stats: Vec<mask_tool::layout::PieceStats> = parts
+            .iter()
+            .map(|(rid, img)| {
+                stats
+                    .and_then(|cache| cache.get(rid).copied())
+                    .unwrap_or_else(|| mask_tool::layout::compute_piece_stats(img, ink_threshold))
+            })
+            .collect();
+        return Some(mask_tool::layout::stitch_spread(
+            parts,
+            &piece_stats,
+            layout,
+        ));
     }
     if layout.is_empty() && parts.len() == 1 {
         let max_w = parts.iter().map(|(_, p)| p.width()).max().unwrap_or(1);
@@ -101,6 +117,7 @@ pub struct GroupRenderJob {
     mask_opacity: f32,
     content_scale: f32,
     sheet_w: u32,
+    spread: bool,
     bg_enabled: bool,
     bg: Option<GroupRenderBg>,
 }
@@ -149,8 +166,14 @@ impl GroupRenderJob {
             return self.render_vector();
         }
         let parts = self.collect_full_parts()?;
-        let mut combined = compose_parts_impl(&parts, &self.block_layout, self.ink_threshold, None)
-            .ok_or_else(|| "无成员片段".to_string())?;
+        let mut combined = compose_parts_impl(
+            &parts,
+            &self.block_layout,
+            self.ink_threshold,
+            self.spread,
+            None,
+        )
+        .ok_or_else(|| "无成员片段".to_string())?;
         drop(parts);
         if !self.masks.is_empty() {
             mask_tool::mask::apply_masks_to_sheet(
@@ -208,19 +231,37 @@ impl GroupRenderJob {
             .unwrap_or(1.0);
         let px = if all_vector {
             if let Some(bg) = &self.bg {
-                let sheet_h = self
-                    .members
-                    .iter()
-                    .map(|m| m.height as f32)
-                    .sum::<f32>()
-                    .max(1.0);
+                let (sheet_w, sheet_h) = if self.spread {
+                    let sizes: Vec<(String, u32, u32)> = self
+                        .members
+                        .iter()
+                        .map(|m| {
+                            let w = m
+                                .vector
+                                .as_ref()
+                                .map(|v| v.page_w_pt)
+                                .unwrap_or(m.height as f32);
+                            (m.rid.clone(), w.round().max(1.0) as u32, m.height.max(1))
+                        })
+                        .collect();
+                    let (_, w, h) = mask_tool::layout::spread_layout(&sizes, &self.block_layout);
+                    (w as f32, h as f32)
+                } else {
+                    let sheet_h = self
+                        .members
+                        .iter()
+                        .map(|m| m.height as f32)
+                        .sum::<f32>()
+                        .max(1.0);
+                    (page_w, sheet_h)
+                };
                 let tw = bg.aspect_w.max(1) as f32;
                 let th = bg.aspect_h.max(1) as f32;
-                let scale_w = tw / page_w.max(1.0);
+                let scale_w = tw / sheet_w.max(1.0);
                 let px = if sheet_h * scale_w <= th {
                     scale_w
                 } else {
-                    th / sheet_h
+                    th / sheet_h.max(1.0)
                 };
                 px.clamp(1.0, 32.0)
             } else {
@@ -263,8 +304,12 @@ impl GroupRenderJob {
         } else {
             self.block_layout.clone()
         };
-        let mut sheet = crate::vector_page::stitch_rgba(&parts, &layout)
-            .ok_or_else(|| "无成员片段".to_string())?;
+        let mut sheet = if self.spread {
+            crate::vector_page::stitch_rgba_spread(&parts, &layout)
+        } else {
+            crate::vector_page::stitch_rgba(&parts, &layout)
+        }
+        .ok_or_else(|| "无成员片段".to_string())?;
         drop(parts);
         let masks: Vec<MaskRect> = if all_vector {
             let cs = if self.content_scale > 0.0001 {
@@ -359,8 +404,11 @@ impl DocState {
             .collect()
     }
 
-    /// 拼合图宽: 取成员所在页宽的最大值.
+    /// 拼合图宽: 谱表模式取成员所在页宽的最大值; 对开取并排后的画布宽.
     pub fn group_sheet_width(&self, group_id: &str) -> u32 {
+        if self.is_spread() {
+            return self.spread_sheet_size(group_id).0;
+        }
         let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
             return 1;
         };
@@ -389,7 +437,11 @@ impl DocState {
             return None;
         }
         let sw = self.group_sheet_width(group_id);
-        let sh = mask_tool::layout::sheet_height(&heights, self.get_block_layout(group_id));
+        let sh = if self.is_spread() {
+            self.spread_sheet_size(group_id).1
+        } else {
+            mask_tool::layout::sheet_height(&heights, self.get_block_layout(group_id))
+        };
         if !self.bg_enabled {
             return Some(apply_bg::process::PreviewFrame {
                 canvas_w: sw,
@@ -485,6 +537,7 @@ impl DocState {
             parts,
             self.get_block_layout(group_id),
             self.ink_threshold,
+            self.is_spread(),
             stats,
         )
     }
@@ -494,6 +547,9 @@ impl DocState {
     /// 直接透出来, 见 [`Self::compose_group_preview_from`] 与
     /// [`Self::render_group_final`].
     pub fn group_leading_gap(&self, group_id: &str) -> u32 {
+        if self.is_spread() {
+            return 0;
+        }
         let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
             return 0;
         };
@@ -508,6 +564,9 @@ impl DocState {
     /// 组合最后一块后面的末端留白 (旧版拖过页边后缩小内部块用;
     /// 现已改为碰到页顶/页底即停, 此字段多为工程兼容).
     pub fn group_trailing_gap(&self, group_id: &str) -> u32 {
+        if self.is_spread() {
+            return 0;
+        }
         let Some(g) = self.groups.iter().find(|g| g.id == group_id) else {
             return 0;
         };
@@ -621,6 +680,9 @@ impl DocState {
         for rid in &g.region_ids {
             let (pi, r) = self.find_region(rid)?;
             let page = self.pages.get(pi)?;
+            if page.blank {
+                continue;
+            }
             let y0 = r.y0.max(0) as u32;
             let y1 = (r.y1 as u32).min(page.height().saturating_sub(1));
             if y1 < y0 {
@@ -710,6 +772,7 @@ impl DocState {
             mask_opacity: self.mask_prefs.mask_opacity,
             content_scale,
             sheet_w,
+            spread: self.is_spread(),
             bg_enabled: self.bg_enabled,
             bg,
         })

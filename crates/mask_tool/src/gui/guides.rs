@@ -27,6 +27,8 @@ pub enum GuideHostCmd {
     UndoGlobalFallback,
     /// 本页没有可重做的蒙版操作, 请重做最近一次全局辅助线操作.
     RedoGlobalFallback,
+    /// 把当前对开的左右偏移套到其余对开.
+    SyncSpreadX,
 }
 
 impl MaskToolApp {

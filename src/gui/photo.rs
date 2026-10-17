@@ -18,6 +18,130 @@ pub(super) enum PhotoSession {
     },
 }
 
+/// 打开修图时要在后台做的那一步. 不含界面状态.
+enum BlockPhotoJob {
+    RasterExisting(PathBuf),
+    RasterFresh {
+        path: PathBuf,
+        y0: u32,
+        y1: u32,
+        ink: i32,
+        extra_top: i32,
+        extra_bottom: i32,
+        extra_left: i32,
+        extra_right: i32,
+        source: SourceFingerprint,
+    },
+    VectorExisting {
+        dir: PathBuf,
+        source: vector_edit::SourceFingerprint,
+    },
+    VectorFresh {
+        req: vector_edit::ImportRequest,
+        source: vector_edit::SourceFingerprint,
+    },
+}
+
+enum BlockPhotoReady {
+    Raster {
+        paper: [u8; 3],
+        source: SourceFingerprint,
+        existing: Option<photo_edit::EditDocument>,
+        fresh: Option<image::RgbaImage>,
+        /// 大图的缩小预览, 后台做好. 界面先贴这一张, 不再一次性传完整页.
+        preview: Option<image::RgbaImage>,
+    },
+    Vector {
+        doc: vector_edit::VecDocument,
+        source: vector_edit::SourceFingerprint,
+        note: String,
+    },
+}
+
+fn run_block_photo_job(job: BlockPhotoJob) -> Result<BlockPhotoReady, String> {
+    match job {
+        BlockPhotoJob::RasterExisting(dir) => {
+            let doc = photo_edit::EditDocument::load_from_dir(&dir)?;
+            let paper = doc.paper_rgb;
+            let source = doc.source.clone().unwrap_or_default();
+            let preview = doc
+                .layers
+                .first()
+                .and_then(|layer| photo_edit::opening_preview(&layer.pixels));
+            Ok(BlockPhotoReady::Raster {
+                paper,
+                source,
+                existing: Some(doc),
+                fresh: None,
+                preview,
+            })
+        }
+        BlockPhotoJob::RasterFresh {
+            path,
+            y0,
+            y1,
+            ink,
+            extra_top,
+            extra_bottom,
+            extra_left,
+            extra_right,
+            mut source,
+        } => {
+            let full = crate::page_cache::load_rgb(&path)?;
+            let y1 = y1.min(full.height().saturating_sub(1));
+            if y1 < y0 {
+                return Err("条带为空".into());
+            }
+            let band = crate::model::crop_band_fast(&full, y0, y1 - y0 + 1);
+            let paper = sample_paper(&band, ink);
+            let baked = apply_edge_adjust(
+                &band,
+                extra_top,
+                extra_bottom,
+                extra_left,
+                extra_right,
+                paper,
+            );
+            source.w = band.width();
+            source.h = band.height();
+            let rgba = photo_edit::document::rgb_to_rgba(&baked);
+            let preview = photo_edit::opening_preview(&rgba);
+            Ok(BlockPhotoReady::Raster {
+                paper,
+                source,
+                existing: None,
+                fresh: Some(rgba),
+                preview,
+            })
+        }
+        BlockPhotoJob::VectorExisting { dir, source } => {
+            let mut doc = vector_edit::VecDocument::load_from_dir(&dir)?;
+            doc.source = Some(source.clone());
+            Ok(BlockPhotoReady::Vector {
+                doc,
+                source,
+                note: String::new(),
+            })
+        }
+        BlockPhotoJob::VectorFresh { req, mut source } => {
+            let report = vector_edit::import_band(&req)?;
+            let (w, h) = report.doc.rounded_size();
+            source.w = w;
+            source.h = h;
+            let note = if report.truncated_forms > 0 {
+                format!("有 {} 个过深的外观已跳过", report.truncated_forms)
+            } else {
+                String::new()
+            };
+            Ok(BlockPhotoReady::Vector {
+                doc: report.doc,
+                source,
+                note,
+            })
+        }
+    }
+}
+
 impl ScoreSyncApp {
     pub(super) fn photo_open(&self) -> bool {
         self.photo_session.is_some()
@@ -54,52 +178,91 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
-        if self
+        let vector = self
             .doc
             .find_region(&rid)
             .and_then(|(pi, _)| self.doc.pages.get(pi))
             .map(|p| p.is_vector())
-            .unwrap_or(false)
-        {
-            self.open_vector_edit(&gid, &rid, window, cx);
-            return;
-        }
-        match self.load_block_for_photo(&gid, &rid) {
-            Ok((img, paper, source, existing)) => {
-                self.flush_mask_to_doc(cx);
-                let hint = self.photo_fit_hint(&gid, &rid, img.width());
-                let imports = self.photo_import_options(&gid, &rid);
-                self.photo_edit.update(cx, |p, cx| {
-                    if let Some(doc) = existing {
-                        p.open_document(doc, cx);
-                    } else {
-                        p.open_rgb(img, Some(paper), cx);
-                    }
-                    p.set_source(source);
-                    p.set_fit_hint(hint, cx);
-                    p.set_import_options(imports, cx);
-                });
-                let mask_warn = self.block_has_intersecting_masks(&gid, &rid);
-                self.photo_session = Some(PhotoSession::Block {
-                    group_id: gid,
-                    region_id: rid,
-                    vector: false,
-                });
-                self.photo_edit
-                    .read(cx)
-                    .focus_handle_ref()
-                    .clone()
-                    .focus(window);
-                self.status = if mask_warn {
-                    "P 图 (这块上的遮盖可能错位, 提交后只平移块下方蒙版)".into()
-                } else {
-                    "P 图".into()
-                };
-                self.hint = self.status.clone();
+            .unwrap_or(false);
+        let job = match self.prepare_block_photo_job(&gid, &rid, vector) {
+            Ok(job) => job,
+            Err(e) => {
+                self.show_error("打开修图失败", e, cx);
+                return;
             }
-            Err(e) => self.show_error("打开修图失败", e, cx),
-        }
+        };
+        self.flush_mask_to_doc(cx);
+        let mask_warn = self.block_has_intersecting_masks(&gid, &rid);
+        let photo_hint = self.photo_fit_hint(&gid, &rid, 0);
+        let photo_imports = if vector {
+            Vec::new()
+        } else {
+            self.photo_import_options(&gid, &rid)
+        };
+        let vector_hint = if vector {
+            Some(self.vector_fit_hint(&gid, &rid))
+        } else {
+            None
+        };
+        let vector_imports = if vector {
+            self.vector_import_options(&gid, &rid)
+        } else {
+            Vec::new()
+        };
+        self.photo_edit.update(cx, |p, cx| p.close_session(cx));
+        self.vector_edit.update(cx, |p, cx| p.close_session(cx));
+        self.photo_open_gen = self.photo_open_gen.wrapping_add(1);
+        let gen = self.photo_open_gen;
+        self.photo_session = Some(PhotoSession::Block {
+            group_id: gid,
+            region_id: rid,
+            vector,
+        });
+        let focus = if vector {
+            self.vector_edit.read(cx).focus_handle_ref().clone()
+        } else {
+            self.photo_edit.read(cx).focus_handle_ref().clone()
+        };
+        focus.focus(window);
+        self.status = "正在打开修图…".into();
+        self.hint = self.status.clone();
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            // 矢量导入走 pdfium, 留在主线程; 先让修图界面画出来再读.
+            // 位图解码不碰 pdfium, 放到后台, 界面不用等整页读完.
+            let loaded = if matches!(job, BlockPhotoJob::VectorFresh { .. }) {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                run_block_photo_job(job)
+            } else {
+                cx.background_executor()
+                    .spawn(async move { run_block_photo_job(job) })
+                    .await
+            };
+            this.update(cx, |this, cx| {
+                if this.photo_open_gen != gen {
+                    return;
+                }
+                match loaded {
+                    Ok(ready) => this.show_block_photo(
+                        ready,
+                        mask_warn,
+                        photo_hint,
+                        photo_imports,
+                        vector_hint,
+                        vector_imports,
+                        cx,
+                    ),
+                    Err(e) => {
+                        this.close_photo_session(cx);
+                        this.show_error("打开修图失败", e, cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn vector_session(&self) -> bool {
@@ -128,35 +291,50 @@ impl ScoreSyncApp {
         handle.focus(window);
     }
 
-    fn open_vector_edit(
+    fn show_block_photo(
         &mut self,
-        gid: &str,
-        rid: &str,
-        window: &mut Window,
+        ready: BlockPhotoReady,
+        mask_warn: bool,
+        photo_hint: FitHint,
+        photo_imports: Vec<ImportOption>,
+        vector_hint: Option<vector_edit::FitHint>,
+        vector_imports: Vec<vector_edit::ImportOption>,
         cx: &mut Context<Self>,
     ) {
-        match self.prepare_vector_document(gid, rid) {
-            Ok((doc, source, note)) => {
-                self.flush_mask_to_doc(cx);
-                let hint = self.vector_fit_hint(gid, rid);
-                let imports = self.vector_import_options(gid, rid);
+        match ready {
+            BlockPhotoReady::Raster {
+                paper,
+                source,
+                existing,
+                fresh,
+                preview,
+            } => {
+                self.photo_edit.update(cx, |p, cx| {
+                    if let Some(doc) = existing {
+                        p.open_streaming(doc, preview, "已载入上次修图", cx);
+                    } else if let Some(img) = fresh {
+                        let (w, h) = img.dimensions();
+                        let doc = photo_edit::EditDocument::from_rgba(img, paper);
+                        p.open_streaming(doc, preview, format!("画布 {w}×{h}"), cx);
+                    }
+                    p.set_source(source);
+                    p.set_fit_hint(photo_hint, cx);
+                    p.set_import_options(photo_imports, cx);
+                });
+                self.status = if mask_warn {
+                    "P 图 (这块上的遮盖可能错位, 提交后只平移块下方蒙版)".into()
+                } else {
+                    "P 图".into()
+                };
+            }
+            BlockPhotoReady::Vector { doc, source, note } => {
+                let hint = vector_hint.unwrap_or_default();
                 self.vector_edit.update(cx, |p, cx| {
                     p.open_document(doc, cx);
                     p.set_source(source);
                     p.set_fit_hint(hint, cx);
-                    p.set_import_options(imports, cx);
+                    p.set_import_options(vector_imports, cx);
                 });
-                let mask_warn = self.block_has_intersecting_masks(gid, rid);
-                self.photo_session = Some(PhotoSession::Block {
-                    group_id: gid.to_string(),
-                    region_id: rid.to_string(),
-                    vector: true,
-                });
-                self.vector_edit
-                    .read(cx)
-                    .focus_handle_ref()
-                    .clone()
-                    .focus(window);
                 self.status = if mask_warn {
                     "P 图 · 矢量 (这块上的遮盖可能错位, 提交后只平移块下方蒙版)".into()
                 } else if note.is_empty() {
@@ -164,18 +342,109 @@ impl ScoreSyncApp {
                 } else {
                     format!("P 图 · 矢量 ({note})").into()
                 };
-                self.hint = self.status.clone();
             }
-            Err(e) => self.show_error("打开修图失败", e, cx),
         }
+        self.hint = self.status.clone();
         cx.notify();
+    }
+
+    fn prepare_block_photo_job(
+        &self,
+        gid: &str,
+        rid: &str,
+        vector: bool,
+    ) -> Result<BlockPhotoJob, String> {
+        if vector {
+            let (pi, r) = self.doc.find_region(rid).ok_or("找不到该分块")?;
+            let page = self.doc.pages.get(pi).ok_or("找不到页")?;
+            let src = page.vector.as_ref().ok_or("这一页不是矢量页")?;
+            let adj = mask_tool::layout::BlockAdjust::find(self.doc.get_block_layout(gid), rid)
+                .cloned()
+                .unwrap_or_default();
+            let source = vector_edit::SourceFingerprint {
+                page_id: r.page_id.clone(),
+                y0: r.y0,
+                y1: r.y1,
+                w: src.w_pt.round().max(1.0) as u32,
+                h: (r.y1 - r.y0 + 1).max(1) as u32,
+                extra_top: adj.extra_top,
+                extra_bottom: adj.extra_bottom,
+                extra_left: adj.extra_left,
+                extra_right: adj.extra_right,
+            };
+            if self.doc.region_edit_kind(rid) == crate::model::EditKind::Vector
+                && self.doc.region_edit_applies(rid)
+            {
+                return Ok(BlockPhotoJob::VectorExisting {
+                    dir: DocState::region_edit_dir(rid),
+                    source,
+                });
+            }
+            return Ok(BlockPhotoJob::VectorFresh {
+                req: vector_edit::ImportRequest {
+                    pdf_path: src.pdf_path.clone(),
+                    page_index: src.page_index,
+                    y0: r.y0 as f32,
+                    y1: (r.y1 + 1) as f32,
+                    extra_top: adj.extra_top,
+                    extra_bottom: adj.extra_bottom,
+                    extra_left: adj.extra_left,
+                    extra_right: adj.extra_right,
+                    page_id: r.page_id.clone(),
+                },
+                source,
+            });
+        }
+        if self.doc.region_edit_kind(rid) == crate::model::EditKind::Raster
+            && self.doc.has_region_edit(rid)
+        {
+            return Ok(BlockPhotoJob::RasterExisting(DocState::region_edit_dir(
+                rid,
+            )));
+        }
+        let (pi, r) = self.doc.find_region(rid).ok_or("找不到该分块")?;
+        let page = self.doc.pages.get(pi).ok_or("找不到页")?;
+        if !page.disk_path.is_file() {
+            return Err("页图不在磁盘上".into());
+        }
+        let adj = mask_tool::layout::BlockAdjust::find(self.doc.get_block_layout(gid), rid)
+            .cloned()
+            .unwrap_or_default();
+        Ok(BlockPhotoJob::RasterFresh {
+            path: page.disk_path.clone(),
+            y0: r.y0.max(0) as u32,
+            y1: r.y1 as u32,
+            ink: self.doc.ink_threshold,
+            extra_top: adj.extra_top,
+            extra_bottom: adj.extra_bottom,
+            extra_left: adj.extra_left,
+            extra_right: adj.extra_right,
+            source: SourceFingerprint {
+                page_id: r.page_id.clone(),
+                y0: r.y0,
+                y1: r.y1,
+                w: 0,
+                h: 0,
+                extra_top: adj.extra_top,
+                extra_bottom: adj.extra_bottom,
+                extra_left: adj.extra_left,
+                extra_right: adj.extra_right,
+            },
+        })
     }
 
     fn prepare_vector_document(
         &self,
         gid: &str,
         rid: &str,
-    ) -> Result<(vector_edit::VecDocument, vector_edit::SourceFingerprint, String), String> {
+    ) -> Result<
+        (
+            vector_edit::VecDocument,
+            vector_edit::SourceFingerprint,
+            String,
+        ),
+        String,
+    > {
         let (pi, r) = self.doc.find_region(rid).ok_or("找不到该分块")?;
         let page = self.doc.pages.get(pi).ok_or("找不到页")?;
         let src = page.vector.as_ref().ok_or("这一页不是矢量页")?;
@@ -409,6 +678,7 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn close_photo_session(&mut self, cx: &mut Context<Self>) {
+        self.photo_open_gen = self.photo_open_gen.wrapping_add(1);
         self.photo_session = None;
         self.photo_edit.update(cx, |p, cx| p.close_session(cx));
         self.vector_edit.update(cx, |p, cx| p.close_session(cx));
@@ -683,7 +953,10 @@ impl ScoreSyncApp {
                     .map(|(_, y0, y1)| (gid.clone(), *y0, *y1 - *y0 + 1))
             })
             .collect();
-        if let Err(e) = self.doc.write_vector_region_edit(&region_id, &commit.document) {
+        if let Err(e) = self
+            .doc
+            .write_vector_region_edit(&region_id, &commit.document)
+        {
             self.show_error("保存修图失败", e, cx);
             return;
         }

@@ -1121,7 +1121,8 @@ impl MaskToolApp {
         let content_scale = self.content_scale;
         let masks_are_sheet = self.masks_are_sheet;
         let canvas_loading = self.canvas_loading;
-        let allow_tile_overflow = !self.preview_only;
+        let allow_tile_overflow = !self.preview_only || self.spread;
+        let spread_paint = self.spread;
         let view_detail = self.view_detail.clone();
         let cursor = if self.host_pick_armed || self.eyedropper_armed {
             CursorStyle::Crosshair
@@ -1260,6 +1261,7 @@ impl MaskToolApp {
                                 allow_tile_overflow,
                                 &view_detail,
                                 device_scale,
+                                spread_paint,
                             );
                         } else if let Some(ref img) = render {
                             let _ = window.paint_image(
@@ -1711,6 +1713,7 @@ fn paint_live_block_tiles(
     allow_overflow: bool,
     details: &[PieceDetail],
     device_scale: f32,
+    spread: bool,
 ) {
     if tiles.is_empty() {
         return;
@@ -1804,6 +1807,78 @@ fn paint_live_block_tiles(
         intersect_bounds(img_rect(hx, 0.0, dw, img_h), img_bounds)
     };
     window.with_content_mask(Some(ContentMask { bounds: tile_clip }), |window| {
+        if spread {
+            let sizes: Vec<(String, u32, u32)> = tiles
+                .iter()
+                .map(|t| (t.region_id.clone(), t.width, t.height))
+                .collect();
+            let boxes = crate::layout::spread_boxes(&sizes, layout);
+            for b in boxes {
+                let Some(tile) = tiles.iter().find(|t| t.region_id == b.region_id) else {
+                    continue;
+                };
+                let adj = BlockAdjust::find(layout, &tile.region_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if !tile.transparent_edges {
+                    fill_rect(
+                        window,
+                        canvas_x(b.x as f32),
+                        canvas_y(b.y as f32),
+                        canvas_s(b.w as f32),
+                        canvas_s(b.h as f32),
+                        tile.top_fill,
+                    );
+                }
+                let (trim_l, _, _, _, content_w) =
+                    crate::layout::effective_h_metrics(tile.width as i32, &adj);
+                let (_, _, content_h, _, trim_top) =
+                    crate::layout::effective_metrics(tile.height as i32, &adj);
+                if content_w > 0 && content_h > 0 {
+                    let origin_x = canvas_x(b.origin_x as f32);
+                    let origin_y = canvas_y(b.origin_y as f32);
+                    let piece_bounds = img_rect(
+                        origin_x,
+                        origin_y,
+                        canvas_s(tile.width as f32),
+                        canvas_s(tile.height as f32),
+                    );
+                    let clip = img_rect(
+                        canvas_x((b.origin_x + trim_l as i64) as f32),
+                        canvas_y((b.origin_y + trim_top as i64) as f32),
+                        canvas_s(content_w as f32),
+                        canvas_s(content_h as f32),
+                    );
+                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                        let _ = window.paint_image(
+                            piece_bounds,
+                            Corners::default(),
+                            tile.image.clone(),
+                            0,
+                            false,
+                        );
+                        for d in details.iter().filter(|d| d.region_id == tile.region_id) {
+                            let _ = window.paint_image(
+                                snap_device_bounds(
+                                    img_rect(
+                                        origin_x + d.x as f32 * cs,
+                                        origin_y + d.y as f32 * cs,
+                                        d.w as f32 * cs,
+                                        d.h as f32 * cs,
+                                    ),
+                                    device_scale,
+                                ),
+                                Corners::default(),
+                                d.tex.clone(),
+                                0,
+                                false,
+                            );
+                        }
+                    });
+                }
+            }
+            return;
+        }
         let mut yy: i64 = 0;
         let mut prev_bottom: Option<[u8; 3]> = None;
         for (i, tile) in tiles.iter().enumerate() {

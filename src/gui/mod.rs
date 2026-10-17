@@ -26,6 +26,7 @@ mod mem;
 mod page_organize;
 mod pdf_import;
 mod photo;
+mod spread_view;
 mod sync;
 mod tabs;
 mod types;
@@ -71,6 +72,8 @@ actions!(
         OpenPhotoEdit,
         PrevPage,
         NextPage,
+        CopySpreadPages,
+        PasteSpreadPages,
     ]
 );
 
@@ -134,6 +137,8 @@ pub(crate) struct ScoreSyncApp {
     apply_bg: Entity<ApplyBgApp>,
     score_video: Entity<ScoreVideoApp>,
     photo_session: Option<photo::PhotoSession>,
+    /// 打开修图的代数. 离开或再次打开后, 还在后台的那次结果作废.
+    photo_open_gen: u64,
     photo_cmd_pending: bool,
     bg: bg::BgUi,
     /// 当前蒙版编辑目标: group_id (拼合图)
@@ -189,6 +194,9 @@ pub(crate) struct ScoreSyncApp {
     org_thumbs: HashMap<String, Arc<RenderImage>>,
     /// 组织缩略图后台代次; 换工程时自增, 丢掉旧任务.
     org_thumb_gen: u64,
+    org_thumb_busy: bool,
+    org_thumb_miss: HashSet<String>,
+    spread_thumb_queued: bool,
     pdf_w_input: Entity<TextInput>,
     pdf_h_input: Entity<TextInput>,
     pdf_scale_input: Entity<TextInput>,
@@ -205,8 +213,16 @@ pub(crate) struct ScoreSyncApp {
     help_scroll: ScrollHandle,
     update_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
-    /// 「组织页面」网格滚动
+    /// 「组织页面」网格滚动; 对开网格共用.
     page_organize_scroll: ScrollHandle,
+    spread_cells: HashMap<usize, Bounds<Pixels>>,
+    /// 点选顺序. 复制时按这个顺序收成一串, 不按页序.
+    spread_selected: Vec<String>,
+    spread_anchor: Option<String>,
+    /// Ctrl+C 记下的页 id, 仍是点选顺序. Ctrl+V 再贴.
+    spread_clip: Vec<String>,
+    spread_drag: Option<spread_view::SpreadDrag>,
+    spread_menu: Option<spread_view::SpreadMenu>,
     /// 蒙版组合页签独立滚动状态; 与分块页签的 `tab_scroll` 分开, 避免切换
     /// 面板时共用同一 handle 导致上一帧 max_offset 对不上, 滚动条抽搐一下.
     mask_tab_scroll: ScrollHandle,
@@ -404,6 +420,7 @@ impl ScoreSyncApp {
             photo_edit,
             vector_edit,
             photo_session: None,
+            photo_open_gen: 0,
             photo_cmd_pending: false,
             apply_bg,
             score_video,
@@ -433,6 +450,9 @@ impl ScoreSyncApp {
             page_organize: None,
             org_thumbs: HashMap::new(),
             org_thumb_gen: 0,
+            org_thumb_busy: false,
+            org_thumb_miss: HashSet::new(),
+            spread_thumb_queued: false,
             pdf_w_input,
             pdf_h_input,
             pdf_scale_input,
@@ -447,6 +467,12 @@ impl ScoreSyncApp {
             update_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             page_organize_scroll: ScrollHandle::new(),
+            spread_cells: HashMap::new(),
+            spread_selected: Vec::new(),
+            spread_anchor: None,
+            spread_clip: Vec::new(),
+            spread_drag: None,
+            spread_menu: None,
             mask_tab_scroll: ScrollHandle::new(),
             tab_bounds: HashMap::new(),
             member_bounds: HashMap::new(),
@@ -519,6 +545,10 @@ impl ScoreSyncApp {
     /// 分块面板专属快捷键 (识别/开图/加块等). 蒙版、底色、视频和组织页面 overlay 都不走这套.
     fn crop_keys_live(&self) -> bool {
         self.side_tool == SideTool::Crop && self.page_organize.is_none()
+    }
+
+    fn staff_keys_live(&self) -> bool {
+        self.crop_keys_live() && !self.doc.is_spread()
     }
 }
 
@@ -736,37 +766,37 @@ impl Render for ScoreSyncApp {
                 cx.listener(|this, _: &SaveProjectAs, window, cx| this.save_project_as(window, cx)),
             )
             .on_action(cx.listener(|this, _: &DetectPage, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.run_detect(cx)
             }))
             .on_action(cx.listener(|this, _: &DetectAll, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.run_detect_all(cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleAddBlock, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.toggle_add_block(cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleSplitBlock, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.toggle_split_block(cx)
             }))
             .on_action(cx.listener(|this, _: &MergeSelected, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.merge_selected(cx)
             }))
             .on_action(cx.listener(|this, _: &PairUngrouped, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.pair_ungrouped(cx)
@@ -774,6 +804,10 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
                 if this.page_organize.is_some() {
                     this.delete_organize_selected(cx);
+                    return;
+                }
+                if this.crop_keys_live() && this.doc.is_spread() {
+                    this.delete_spread_selected(cx);
                     return;
                 }
                 if !this.crop_keys_live() {
@@ -788,18 +822,21 @@ impl Render for ScoreSyncApp {
                 this.export_groups_ui(window, cx)
             }))
             .on_action(cx.listener(|this, _: &ResetGroups, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.reset_groups(cx)
             }))
             .on_action(cx.listener(|this, _: &FitView, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.fit_to_view(cx)
             }))
             .on_action(cx.listener(|this, _: &OrganizePages, window, cx| {
+                if this.doc.is_spread() && this.side_tool == SideTool::Crop {
+                    return;
+                }
                 if this.page_organize.is_none() && this.side_tool != SideTool::Crop {
                     return;
                 }
@@ -811,13 +848,13 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
             .on_action(cx.listener(|this, _: &DumpMemory, _, cx| this.dump_memory_now(cx)))
             .on_action(cx.listener(|this, _: &ShareIntoGroup, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.share_into_group(cx)
             }))
             .on_action(cx.listener(|this, _: &UngroupActive, _, cx| {
-                if !this.crop_keys_live() {
+                if !this.staff_keys_live() {
                     return;
                 }
                 this.ungroup_active(cx)
@@ -919,18 +956,22 @@ impl Render for ScoreSyncApp {
                 }
                 this.photo_edit.update(cx, |p, cx| p.copy_layer(cx));
             }))
-            .on_action(cx.listener(|this, _: &photo_edit::gui::PasteLayer, window, cx| {
-                if this.photo_session.is_none() || this.vector_session() {
-                    return;
-                }
-                this.photo_edit.update(cx, |p, cx| p.paste_layer(window, cx));
-            }))
+            .on_action(
+                cx.listener(|this, _: &photo_edit::gui::PasteLayer, window, cx| {
+                    if this.photo_session.is_none() || this.vector_session() {
+                        return;
+                    }
+                    this.photo_edit
+                        .update(cx, |p, cx| p.paste_layer(window, cx));
+                }),
+            )
             .on_action(
                 cx.listener(|this, _: &vector_edit::gui::CopyLayer, window, cx| {
                     if !this.vector_session() {
                         return;
                     }
-                    this.vector_edit.update(cx, |p, cx| p.copy_layer(window, cx));
+                    this.vector_edit
+                        .update(cx, |p, cx| p.copy_layer(window, cx));
                 }),
             )
             .on_action(
@@ -1036,9 +1077,19 @@ impl Render for ScoreSyncApp {
                     this.redo_action(cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &CopySpreadPages, _, cx| {
+                this.copy_spread_clipboard(cx);
+            }))
+            .on_action(cx.listener(|this, _: &PasteSpreadPages, _, cx| {
+                this.paste_spread_clipboard(cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectAllPageRegions, _, cx| {
                 if this.page_organize.is_some() {
                     this.select_all_organize_pages(cx);
+                    return;
+                }
+                if this.side_tool == SideTool::Crop && this.doc.is_spread() {
+                    this.select_all_spread_pages(cx);
                     return;
                 }
                 if this.side_tool != SideTool::Crop {
@@ -1221,9 +1272,11 @@ impl Render for ScoreSyncApp {
             )
             .child(self.dialog_overlay(window, cx))
             .child(self.tab_context_menu_overlay(cx))
+            .child(self.spread_menu_overlay(cx))
             .child(self.guide_context_menu_overlay(cx))
             .child(self.tab_tooltip_overlay(cx))
             .child(self.tab_drop_line_overlay())
+            .child(self.spread_drag_ghost())
             .child(self.tab_drag_ghost())
             .child(self.member_drag_ghost())
             .child(self.group_drag_ghost())
@@ -1413,6 +1466,16 @@ pub fn run_gui(initial: Vec<PathBuf>) {
             "shift-z",
             mask_tool::gui::Redo,
             Some("MaskTool"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "c",
+            CopySpreadPages,
+            Some("ScoreSync"),
+        ));
+        keys.extend(apply_bg::bind_primary(
+            "v",
+            PasteSpreadPages,
+            Some("ScoreSync"),
         ));
         keys.extend(apply_bg::bind_primary("shift-m", DumpMemory, None));
         photo_edit::gui::bind_embedded_keys(cx);

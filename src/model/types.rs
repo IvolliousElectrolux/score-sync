@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use image::RgbImage;
+use serde::{Deserialize, Serialize};
 
 pub const COLORS: &[&str] = &[
     "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22", "#2980b9",
@@ -15,6 +16,16 @@ pub const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bm
 
 pub const DEFAULT_MARGIN: i32 = 20;
 pub const DEFAULT_INK_THRESHOLD: i32 = 200;
+
+/// 工程版式. 旧工程缺这个字段时按谱表分块.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SheetLayout {
+    #[default]
+    Staff,
+    /// 总谱双页对开: 按页序两两并排, 不做谱表分块.
+    Spread,
+}
 
 #[derive(Clone, Debug)]
 pub struct Region {
@@ -57,6 +68,8 @@ pub struct Page {
     pub regions: HashMap<String, Region>,
     /// 有值时这一页是矢量: 坐标为 point, 像素只在预览和成片时光栅.
     pub vector: Option<crate::vector_page::VectorSource>,
+    /// 对开占位. 占页序, 不画内容, 和奇数末页旁边的空页一样.
+    pub blank: bool,
 }
 
 impl Page {
@@ -76,6 +89,47 @@ impl Page {
             .unwrap_or_else(|| fallback_index1.to_string());
         let copy = copy_mark_from_stem(stem);
         format!("{src}{copy}")
+    }
+
+    /// 不随当前位置变化的标记: 文件名里的原页码和复制次数. 没有这些则为空.
+    pub fn stable_mark(&self) -> String {
+        let stem = self.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let copy = copy_mark_from_stem(stem);
+        match source_page_no_from_stem(stem) {
+            Some(n) if copy.is_empty() => format!("原页 {n}"),
+            Some(n) => format!("原页 {n} · {copy}"),
+            None => copy,
+        }
+    }
+
+    /// 对开缩略图下的文件名 (空白页单独标出). 不含当前序号, 拖动换位后仍能认出是哪一页.
+    /// 第二项是文件名里的原页码或尺寸, 界面不显示.
+    pub fn spread_caption(&self) -> (String, String) {
+        let stem = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("page");
+        let blank = self.blank
+            || stem
+                .split("_copy")
+                .next()
+                .unwrap_or(stem)
+                .starts_with("blank_");
+        let title = if blank {
+            "空白页".to_string()
+        } else {
+            stem.to_string()
+        };
+        let mark = self.stable_mark();
+        let meta = if !mark.is_empty() {
+            mark
+        } else if blank {
+            String::new()
+        } else {
+            format!("{}×{}", self.img_w, self.img_h)
+        };
+        (title, meta)
     }
 
     pub fn width(&self) -> u32 {

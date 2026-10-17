@@ -36,9 +36,12 @@ pub struct BlockAdjust {
     /// / 向下拖过页底后改用高度缩放宽度」会写入这里; 现在两边碰到页边
     /// 即停, 不再新增. 已有工程里的残留值仍会在向下拖时优先被吃掉.
     pub gap_after: i32,
-    /// 块内容相对拼合图左缘的横向偏移 (像素, 正值向右). 蒙版界面允许
-    /// 超出原块左右仍画出; 拼接 / 导出 / 视频 / 底色预览按原块左右截掉.
+    /// 块内容相对拼合图左缘的横向偏移 (像素, 正值向右). 谱表模式的蒙版界面
+    /// 允许超出原块左右仍画出; 拼接 / 导出 / 视频 / 底色预览按原块左右截掉.
+    /// 对开模式里这个偏移进入成片.
     pub shift_x: i32,
+    /// 对开模式里相对顶对齐的纵向偏移 (像素, 正值向下). 谱表竖向拼合忽略.
+    pub shift_y: i32,
 }
 
 impl BlockAdjust {
@@ -50,6 +53,7 @@ impl BlockAdjust {
             && self.gap_before == 0
             && self.gap_after == 0
             && self.shift_x == 0
+            && self.shift_y == 0
     }
 
     pub fn find<'a>(layout: &'a [BlockAdjust], region_id: &str) -> Option<&'a BlockAdjust> {
@@ -442,6 +446,434 @@ pub fn stitch_with_stats(
         }
     }
     combined
+}
+
+/// 对开里一页在拼合图中的框. 坐标已归一化, 左上角不会为负.
+#[derive(Clone, Debug)]
+pub struct SpreadBox {
+    pub region_id: String,
+    /// 含向外扩展的外框左上角.
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
+    /// 未裁页图的左上角 (内容从这里再加 trim).
+    pub origin_x: i64,
+    pub origin_y: i64,
+}
+
+/// 按页序并排. 第 i 页的槽位是前面各页未平移时的右缘, 再加该页自己的
+/// `shift_x`; y 是 `shift_y`. 拖一页不会把后一页推走. 向左扩出的部分叠进
+/// 前一页, 不重复推开后一页. `gap_before` / `gap_after` 不参与.
+/// 负坐标会整张平移进画布.
+pub fn spread_boxes(sizes: &[(String, u32, u32)], layout: &[BlockAdjust]) -> Vec<SpreadBox> {
+    let (boxes, _, _) = spread_layout(sizes, layout);
+    boxes
+}
+
+fn spread_raw_boxes(sizes: &[(String, u32, u32)], layout: &[BlockAdjust]) -> Vec<SpreadBox> {
+    let mut natural_x: i64 = 0;
+    let mut raw: Vec<SpreadBox> = Vec::with_capacity(sizes.len());
+    for (id, w, h) in sizes {
+        let adj = BlockAdjust::find(layout, id).cloned().unwrap_or_default();
+        // 向外扩进成片; 向内裁不缩小占位, 空出来的一列仍用谱纸色填.
+        let grow_l = adj.extra_left.max(0) as i64;
+        let grow_r = adj.extra_right.max(0) as i64;
+        let grow_t = adj.extra_top.max(0) as i64;
+        let grow_b = adj.extra_bottom.max(0) as i64;
+        let visual_w = (*w as i64 + grow_l + grow_r).max(1);
+        let visual_h = (*h as i64 + grow_t + grow_b).max(1);
+        let origin_x = natural_x + adj.shift_x as i64;
+        let origin_y = adj.shift_y as i64;
+        let x = origin_x - grow_l;
+        let y = origin_y - grow_t;
+        raw.push(SpreadBox {
+            region_id: id.clone(),
+            x,
+            y,
+            w: visual_w,
+            h: visual_h,
+            origin_x,
+            origin_y,
+        });
+        // 槽位只按未平移的占位前进. `shift_x` 不把后一页推走;
+        // 左扩叠进前一页, 右扩仍把后一页往右推.
+        natural_x += visual_w - grow_l;
+    }
+    raw
+}
+
+/// 负坐标平移进画布时加到每个框上的量. 已经落在第一象限时为 `(0, 0)`.
+pub fn spread_canvas_pad(sizes: &[(String, u32, u32)], layout: &[BlockAdjust]) -> (i64, i64) {
+    let raw = spread_raw_boxes(sizes, layout);
+    if raw.is_empty() {
+        return (0, 0);
+    }
+    let min_x = raw.iter().map(|b| b.x).min().unwrap_or(0).min(0);
+    let min_y = raw.iter().map(|b| b.y).min().unwrap_or(0).min(0);
+    (-min_x, -min_y)
+}
+
+/// `(boxes, canvas_w, canvas_h)`.
+pub fn spread_layout(
+    sizes: &[(String, u32, u32)],
+    layout: &[BlockAdjust],
+) -> (Vec<SpreadBox>, u32, u32) {
+    let mut raw = spread_raw_boxes(sizes, layout);
+    if raw.is_empty() {
+        return (raw, 1, 1);
+    }
+    let min_x = raw.iter().map(|b| b.x).min().unwrap_or(0).min(0);
+    let min_y = raw.iter().map(|b| b.y).min().unwrap_or(0).min(0);
+    if min_x != 0 || min_y != 0 {
+        for b in &mut raw {
+            b.x -= min_x;
+            b.y -= min_y;
+            b.origin_x -= min_x;
+            b.origin_y -= min_y;
+        }
+    }
+    let canvas_w = raw
+        .iter()
+        .map(|b| b.x + b.w)
+        .max()
+        .unwrap_or(1)
+        .max(1) as u32;
+    let canvas_h = raw
+        .iter()
+        .map(|b| b.y + b.h)
+        .max()
+        .unwrap_or(1)
+        .max(1) as u32;
+    (raw, canvas_w, canvas_h)
+}
+
+/// 对开上下边界: 各页外框留在「`shift_y` 全为 0 时的画布高」里.
+/// 顶到上沿不能再往上, 底到画布下沿不能再往下. 两页一样高时上下都已到边.
+pub fn clamp_spread_shift_y(
+    sizes: &[(String, u32, u32)],
+    layout: &[BlockAdjust],
+) -> Vec<BlockAdjust> {
+    let mut rest = layout.to_vec();
+    for adj in &mut rest {
+        adj.shift_y = 0;
+    }
+    let frame_h = spread_layout(sizes, &rest).2 as i32;
+    let mut layout = layout.to_vec();
+    for (id, _, h) in sizes {
+        let (grow_t, grow_b) = layout
+            .iter()
+            .find(|a| a.region_id == *id)
+            .map(|a| (a.extra_top.max(0), a.extra_bottom.max(0)))
+            .unwrap_or((0, 0));
+        let visual_h = (*h as i32 + grow_t + grow_b).max(1);
+        let min_sy = grow_t;
+        let max_sy = (frame_h - visual_h + grow_t).max(min_sy);
+        if let Some(adj) = layout.iter_mut().find(|a| a.region_id == *id) {
+            adj.shift_y = adj.shift_y.clamp(min_sy, max_sy);
+        }
+    }
+    layout
+}
+
+/// 横向拼合. 后面的页盖住前面的页. 向外扩进成片, 向内裁出的空位用谱纸色填.
+pub fn stitch_spread(
+    parts: &[(String, RgbImage)],
+    stats: &[PieceStats],
+    layout: &[BlockAdjust],
+) -> RgbImage {
+    let default_stats = PieceStats::default();
+    let sizes: Vec<(String, u32, u32)> = parts
+        .iter()
+        .map(|(id, img)| (id.clone(), img.width(), img.height()))
+        .collect();
+    let (boxes, canvas_w, canvas_h) = spread_layout(&sizes, layout);
+    let mut combined =
+        RgbImage::from_pixel(canvas_w, canvas_h, image::Rgb([255, 255, 255]));
+    for (i, b) in boxes.iter().enumerate() {
+        let Some((_, img)) = parts.iter().find(|(id, _)| id == &b.region_id) else {
+            continue;
+        };
+        let paper = stats.get(i).unwrap_or(&default_stats).top.0;
+        let adj = BlockAdjust::find(layout, &b.region_id)
+            .cloned()
+            .unwrap_or_default();
+        fill_rect_rgb(
+            &mut combined,
+            b.x,
+            b.y,
+            b.w.max(1) as u32,
+            b.h.max(1) as u32,
+            paper,
+        );
+        let (trim_l, _trim_r, _ext_l, _ext_r, content_w) =
+            effective_h_metrics(img.width() as i32, &adj);
+        let (_gap, _ext_top, content_h, _ext_bottom, trim_top) =
+            effective_metrics(img.height() as i32, &adj);
+        if content_w > 0 && content_h > 0 {
+            blit_src_rect(
+                &mut combined,
+                img,
+                trim_l as i64,
+                trim_top,
+                content_w as i64,
+                content_h,
+                b.origin_x + trim_l as i64,
+                b.origin_y + trim_top as i64,
+            );
+        }
+    }
+    combined
+}
+
+/// 对开内容原点 (含 trim 与画布归一化) 的位移, 供蒙版跟着页走.
+pub fn spread_content_shifts(
+    sizes: &[(String, u32, u32)],
+    old_layout: &[BlockAdjust],
+    new_layout: &[BlockAdjust],
+) -> std::collections::HashMap<String, (i32, i32)> {
+    let old_boxes = spread_boxes(sizes, old_layout);
+    let new_boxes = spread_boxes(sizes, new_layout);
+    let content = |boxes: &[SpreadBox], layout: &[BlockAdjust], id: &str| -> Option<(i64, i64)> {
+        let b = boxes.iter().find(|b| b.region_id == id)?;
+        let adj = BlockAdjust::find(layout, id).cloned().unwrap_or_default();
+        let (_tw, th) = sizes
+            .iter()
+            .find(|(rid, ..)| rid == id)
+            .map(|(_, w, h)| (*w as i32, *h as i32))
+            .unwrap_or((1, 1));
+        let (trim_l, _, _, _, _) = effective_h_metrics(_tw, &adj);
+        let (_, _, _, _, trim_top) = effective_metrics(th, &adj);
+        Some((
+            b.origin_x + trim_l as i64,
+            b.origin_y + trim_top as i64,
+        ))
+    };
+    let mut deltas = std::collections::HashMap::new();
+    for (id, _, _) in sizes {
+        let (Some((ox, oy)), Some((nx, ny))) = (
+            content(&old_boxes, old_layout, id),
+            content(&new_boxes, new_layout, id),
+        ) else {
+            continue;
+        };
+        let dx = (nx - ox) as i32;
+        let dy = (ny - oy) as i32;
+        if dx != 0 || dy != 0 {
+            deltas.insert(id.clone(), (dx, dy));
+        }
+    }
+    deltas
+}
+
+/// 把期望的 `shift_x` 夹进这一页自己的可移动范围.
+///
+/// 偏移相对各页原来的槽位, 不跟页宽成比例: 40 像素在宽页和窄页上都是
+/// 40 像素. 窄页滑不出那么远时, 停在「只剩 1px 还留在成片里」或对侧边上.
+pub fn clamp_spread_shift_x(
+    sizes: &[(String, u32, u32)],
+    layout: &[BlockAdjust],
+    region_id: &str,
+    shift_x: i32,
+) -> i32 {
+    let (min_o, max_o) = spread_origin_bounds(sizes, layout, region_id);
+    let mut rest = layout.to_vec();
+    for adj in &mut rest {
+        adj.shift_x = 0;
+    }
+    let natural = spread_raw_boxes(sizes, &rest)
+        .into_iter()
+        .find(|b| b.region_id == region_id)
+        .map(|b| b.origin_x)
+        .unwrap_or(0);
+    let origin = (natural + shift_x as i64).clamp(min_o, max_o);
+    (origin - natural).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// 写入一页的横向偏移, 并夹进它自己的范围. 纵向和四边裁扩不动.
+/// 返回 `(新布局, 实际写入的 shift_x)`.
+pub fn write_spread_shift_x(
+    sizes: &[(String, u32, u32)],
+    layout: &[BlockAdjust],
+    region_id: &str,
+    shift_x: i32,
+) -> (Vec<BlockAdjust>, i32) {
+    let shift_x = clamp_spread_shift_x(sizes, layout, region_id, shift_x);
+    let mut out = layout.to_vec();
+    set_spread_shift(&mut out, region_id, shift_x, None);
+    (out, shift_x)
+}
+
+fn set_spread_shift(
+    layout: &mut Vec<BlockAdjust>,
+    region_id: &str,
+    shift_x: i32,
+    shift_y: Option<i32>,
+) {
+    if let Some(a) = layout.iter_mut().find(|a| a.region_id == region_id) {
+        a.shift_x = shift_x;
+        if let Some(y) = shift_y {
+            a.shift_y = y;
+        }
+        return;
+    }
+    let shift_y = shift_y.unwrap_or(0);
+    if shift_x != 0 || shift_y != 0 {
+        layout.push(BlockAdjust {
+            region_id: region_id.to_string(),
+            shift_x,
+            shift_y,
+            ..Default::default()
+        });
+    }
+}
+
+/// 页原点允许的范围, 相对「`shift_x` 全为 0」的成片.
+/// 贴在左缘的页可以向左滑出, 贴在右缘的页可以向右滑出, 直到只剩 1px
+/// 还留在成片里. 往对面拖则停在对侧: 左页右缘贴上成片右缘, 右页左缘贴上
+/// 成片左缘. 初始并排时左右都还没到这条边界, 两个方向都能拖.
+fn spread_origin_bounds(
+    sizes: &[(String, u32, u32)],
+    layout: &[BlockAdjust],
+    region_id: &str,
+) -> (i64, i64) {
+    let mut rest = layout.to_vec();
+    for adj in &mut rest {
+        adj.shift_x = 0;
+    }
+    let raw = spread_raw_boxes(sizes, &rest);
+    let frame_left = raw.iter().map(|b| b.x).min().unwrap_or(0);
+    let frame_right = raw.iter().map(|b| b.x + b.w).max().unwrap_or(1);
+    let Some(b) = raw.iter().find(|b| b.region_id == region_id) else {
+        return (0, 0);
+    };
+    let grow_l = b.origin_x - b.x;
+    let on_left = b.x <= frame_left;
+    let on_right = b.x + b.w >= frame_right;
+    // 同时贴住左右 (单页铺满) 时没有可滑出的外侧, 外框就是边界.
+    let min_box = if on_left && !on_right {
+        frame_left - b.w + 1
+    } else {
+        frame_left
+    };
+    let max_box = if on_right && !on_left {
+        frame_right - 1
+    } else {
+        frame_right - b.w
+    };
+    if min_box > max_box {
+        let o = b.origin_x;
+        return (o, o);
+    }
+    (min_box + grow_l, max_box + grow_l)
+}
+
+fn clamp_spread_drag_dx(
+    sizes: &[(String, u32, u32)],
+    start_layout: &[BlockAdjust],
+    region_id: &str,
+    visual_dx: i64,
+    mirror_partner: Option<&str>,
+) -> i64 {
+    let raw = spread_raw_boxes(sizes, start_layout);
+    let origin_of = |id: &str| {
+        raw.iter()
+            .find(|b| b.region_id == id)
+            .map(|b| b.origin_x)
+            .unwrap_or(0)
+    };
+    let (min_o, max_o) = spread_origin_bounds(sizes, start_layout, region_id);
+    let cur = origin_of(region_id);
+    let mut lo = min_o - cur;
+    let mut hi = max_o - cur;
+    if let Some(partner) = mirror_partner {
+        let (pmin, pmax) = spread_origin_bounds(sizes, start_layout, partner);
+        let pcur = origin_of(partner);
+        lo = lo.max(pcur - pmax);
+        hi = hi.min(pcur - pmin);
+    }
+    if lo > hi {
+        return 0;
+    }
+    visual_dx.clamp(lo, hi)
+}
+
+/// 对开拖动. 每页 `shift_x` 只相对自己的槽位, 不推动后一页.
+/// `mirror_partner` 为 `None` 时只改被拖的页; 给出另一页时, 它走相反的量.
+/// 向外可以滑出未平移时的成片, 直到只剩 1px; 往对面拖则停在成片对侧.
+pub fn apply_spread_drag(
+    sizes: &[(String, u32, u32)],
+    start_layout: &[BlockAdjust],
+    region_id: &str,
+    dx: i32,
+    dy: i32,
+    mirror_partner: Option<&str>,
+    snap: impl Fn(i32) -> i32,
+) -> Vec<BlockAdjust> {
+    let start_shift = BlockAdjust::find(start_layout, region_id)
+        .map(|a| a.shift_x)
+        .unwrap_or(0);
+    let visual_dx = if dx == 0 {
+        0
+    } else {
+        let snapped = snap(start_shift.saturating_add(dx)) as i64 - start_shift as i64;
+        clamp_spread_drag_dx(sizes, start_layout, region_id, snapped, mirror_partner)
+    };
+    let start_sy = BlockAdjust::find(start_layout, region_id)
+        .map(|a| a.shift_y)
+        .unwrap_or(0);
+    let shift_y = if dy == 0 {
+        start_sy
+    } else {
+        snap(start_sy.saturating_add(dy))
+    };
+    let mut layout = start_layout.to_vec();
+    let new_shift = (start_shift as i64 + visual_dx).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    set_spread_shift(
+        &mut layout,
+        region_id,
+        new_shift,
+        Some(shift_y),
+    );
+    if visual_dx != 0 {
+        if let Some(partner) = mirror_partner {
+            let partner_shift = BlockAdjust::find(start_layout, partner)
+                .map(|a| a.shift_x)
+                .unwrap_or(0);
+            let mirrored = (partner_shift as i64 - visual_dx)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            set_spread_shift(&mut layout, partner, mirrored, None);
+        }
+    }
+    layout
+}
+
+/// 从起点快照同时改 `shift_x` 与 `shift_y`.
+pub fn apply_block_shift_xy(
+    start_layout: &[BlockAdjust],
+    region_id: &str,
+    dx: i32,
+    dy: i32,
+    snap: impl Fn(i32) -> i32,
+) -> Vec<BlockAdjust> {
+    let mut layout = start_layout.to_vec();
+    let (sx, sy) = BlockAdjust::find(&layout, region_id)
+        .map(|a| (a.shift_x, a.shift_y))
+        .unwrap_or((0, 0));
+    let shift_x = snap(sx + dx);
+    let shift_y = snap(sy + dy);
+    if let Some(a) = layout.iter_mut().find(|a| a.region_id == region_id) {
+        a.shift_x = shift_x;
+        a.shift_y = shift_y;
+    } else {
+        layout.push(BlockAdjust {
+            region_id: region_id.to_string(),
+            shift_x,
+            shift_y,
+            ..Default::default()
+        });
+    }
+    layout
 }
 
 /// 对比同一组 `heights` 在旧/新 `layout` 下, 算出每个块的内容整体挪动了
@@ -1993,6 +2425,11 @@ mod tests {
             ..Default::default()
         }
         .is_noop());
+        assert!(!BlockAdjust {
+            shift_y: -2,
+            ..Default::default()
+        }
+        .is_noop());
     }
 
     #[test]
@@ -2156,5 +2593,189 @@ mod tests {
         assert_eq!(combined.dimensions(), (8, 4));
         assert_eq!(*combined.get_pixel(0, 0), Rgb([1, 2, 3]));
         assert_eq!(*combined.get_pixel(7, 0), Rgb([10, 20, 30]));
+    }
+
+    #[test]
+    fn stitch_spread_places_pages_side_by_side() {
+        use image::{Rgb, RgbImage};
+        let mut left = RgbImage::from_pixel(4, 2, Rgb([10, 0, 0]));
+        left.put_pixel(0, 0, Rgb([1, 0, 0]));
+        left.put_pixel(3, 0, Rgb([2, 0, 0]));
+        let mut right = RgbImage::from_pixel(3, 2, Rgb([0, 10, 0]));
+        right.put_pixel(0, 0, Rgb([0, 1, 0]));
+        right.put_pixel(2, 0, Rgb([0, 2, 0]));
+        let parts = vec![
+            ("L".to_string(), left),
+            ("R".to_string(), right),
+        ];
+        let stats = vec![PieceStats::default(), PieceStats::default()];
+        let combined = stitch_spread(&parts, &stats, &[]);
+        assert_eq!(combined.dimensions(), (7, 2));
+        assert_eq!(*combined.get_pixel(0, 0), Rgb([1, 0, 0]));
+        assert_eq!(*combined.get_pixel(3, 0), Rgb([2, 0, 0]));
+        assert_eq!(*combined.get_pixel(4, 0), Rgb([0, 1, 0]));
+        assert_eq!(*combined.get_pixel(6, 0), Rgb([0, 2, 0]));
+
+        let shifted = stitch_spread(
+            &parts,
+            &stats,
+            &[BlockAdjust {
+                region_id: "R".into(),
+                shift_x: 2,
+                shift_y: 1,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(shifted.dimensions(), (9, 3));
+        assert_eq!(*shifted.get_pixel(6, 1), Rgb([0, 1, 0]));
+        assert_eq!(*shifted.get_pixel(4, 0), Rgb([255, 255, 255]));
+
+        let overlap = stitch_spread(
+            &parts,
+            &stats,
+            &[BlockAdjust {
+                region_id: "R".into(),
+                shift_x: -2,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(overlap.dimensions(), (5, 2));
+        assert_eq!(*overlap.get_pixel(2, 0), Rgb([0, 1, 0]));
+        assert_eq!(*overlap.get_pixel(3, 0), Rgb([0, 10, 0]));
+        assert_eq!(*overlap.get_pixel(1, 0), Rgb([10, 0, 0]));
+
+        let cropped = stitch_spread(
+            &parts,
+            &[
+                PieceStats {
+                    top: ([9.0, 8.0, 7.0], [1.0, 1.0, 1.0]),
+                    bottom: ([9.0, 8.0, 7.0], [1.0, 1.0, 1.0]),
+                },
+                PieceStats::default(),
+            ],
+            &[BlockAdjust {
+                region_id: "L".into(),
+                extra_left: -1,
+                extra_right: 2,
+                ..Default::default()
+            }],
+        );
+        // 向内裁掉的左列换成谱纸色; 向右扩出的两列也是谱纸色, 并留在成片里.
+        assert_eq!(*cropped.get_pixel(0, 0), Rgb([9, 8, 7]));
+        assert_eq!(*cropped.get_pixel(1, 0), Rgb([10, 0, 0]));
+        assert_eq!(*cropped.get_pixel(3, 0), Rgb([2, 0, 0]));
+        assert_eq!(*cropped.get_pixel(4, 0), Rgb([9, 8, 7]));
+        assert_eq!(*cropped.get_pixel(5, 0), Rgb([9, 8, 7]));
+        assert_eq!(*cropped.get_pixel(6, 0), Rgb([0, 1, 0]));
+    }
+
+    #[test]
+    fn clamp_spread_shift_y_stops_at_the_frame() {
+        let sizes = vec![("L".into(), 4u32, 10u32), ("R".into(), 4u32, 10u32)];
+        let layout = vec![BlockAdjust {
+            region_id: "L".into(),
+            shift_y: 6,
+            ..Default::default()
+        }];
+        let clamped = clamp_spread_shift_y(&sizes, &layout);
+        assert_eq!(
+            BlockAdjust::find(&clamped, "L").map(|a| a.shift_y),
+            Some(0)
+        );
+
+        let sizes = vec![("L".into(), 4u32, 10u32), ("R".into(), 4u32, 6u32)];
+        let down = vec![BlockAdjust {
+            region_id: "R".into(),
+            shift_y: 8,
+            ..Default::default()
+        }];
+        let clamped = clamp_spread_shift_y(&sizes, &down);
+        assert_eq!(
+            BlockAdjust::find(&clamped, "R").map(|a| a.shift_y),
+            Some(4)
+        );
+        let up = vec![BlockAdjust {
+            region_id: "R".into(),
+            shift_y: -3,
+            ..Default::default()
+        }];
+        let clamped = clamp_spread_shift_y(&sizes, &up);
+        assert_eq!(
+            BlockAdjust::find(&clamped, "R").map(|a| a.shift_y),
+            Some(0)
+        );
+    }
+
+    fn raw_origin(sizes: &[(String, u32, u32)], layout: &[BlockAdjust], id: &str) -> i64 {
+        spread_raw_boxes(sizes, layout)
+            .into_iter()
+            .find(|b| b.region_id == id)
+            .map(|b| b.origin_x)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn apply_spread_drag_moves_only_the_dragged_page() {
+        let sizes = vec![("L".into(), 4u32, 10u32), ("R".into(), 3u32, 10u32)];
+        let ident = |v: i32| v;
+        let right = apply_spread_drag(&sizes, &[], "L", 2, 0, None, ident);
+        assert_eq!(raw_origin(&sizes, &right, "L"), 2);
+        assert_eq!(raw_origin(&sizes, &right, "R"), 4);
+        assert_eq!(
+            BlockAdjust::find(&right, "R").map(|a| a.shift_x),
+            None
+        );
+
+        let left = apply_spread_drag(&sizes, &[], "L", -1, 0, None, ident);
+        assert_eq!(raw_origin(&sizes, &left, "L"), -1);
+        assert_eq!(raw_origin(&sizes, &left, "R"), 4);
+        assert!(BlockAdjust::find(&left, "R").is_none());
+        let past_left = apply_spread_drag(&sizes, &[], "L", -8, 0, None, ident);
+        assert_eq!(raw_origin(&sizes, &past_left, "L"), -3);
+        assert_eq!(raw_origin(&sizes, &past_left, "R"), 4);
+
+        let only_right = apply_spread_drag(&sizes, &[], "R", -2, 0, None, ident);
+        assert_eq!(raw_origin(&sizes, &only_right, "L"), 0);
+        assert_eq!(raw_origin(&sizes, &only_right, "R"), 2);
+        let out_right = apply_spread_drag(&sizes, &[], "R", 1, 0, None, ident);
+        assert_eq!(raw_origin(&sizes, &out_right, "L"), 0);
+        assert_eq!(raw_origin(&sizes, &out_right, "R"), 5);
+        let past_right = apply_spread_drag(&sizes, &[], "R", 6, 0, None, ident);
+        assert_eq!(raw_origin(&sizes, &past_right, "L"), 0);
+        assert_eq!(raw_origin(&sizes, &past_right, "R"), 6);
+    }
+
+    #[test]
+    fn apply_spread_drag_mirrors_and_stops_at_the_frame() {
+        let sizes = vec![("L".into(), 4u32, 10u32), ("R".into(), 3u32, 10u32)];
+        let ident = |v: i32| v;
+        let from_left = apply_spread_drag(&sizes, &[], "L", 2, 0, Some("R"), ident);
+        assert_eq!(raw_origin(&sizes, &from_left, "L"), 2);
+        assert_eq!(raw_origin(&sizes, &from_left, "R"), 2);
+
+        let outward = apply_spread_drag(&sizes, &[], "L", -1, 0, Some("R"), ident);
+        assert_eq!(raw_origin(&sizes, &outward, "L"), -1);
+        assert_eq!(raw_origin(&sizes, &outward, "R"), 5);
+        let past = apply_spread_drag(&sizes, &[], "L", -8, 0, Some("R"), ident);
+        assert_eq!(raw_origin(&sizes, &past, "L"), -2);
+        assert_eq!(raw_origin(&sizes, &past, "R"), 6);
+
+        let filled = apply_spread_drag(&sizes, &[], "L", 10, 0, None, ident);
+        assert_eq!(raw_origin(&sizes, &filled, "L"), 3);
+        assert_eq!(raw_origin(&sizes, &filled, "R"), 4);
+    }
+
+    #[test]
+    fn clamp_spread_shift_x_keeps_pixels_until_the_page_runs_out() {
+        let wide = vec![("L".into(), 10u32, 8u32), ("R".into(), 10u32, 8u32)];
+        let narrow = vec![("L".into(), 4u32, 8u32), ("R".into(), 6u32, 8u32)];
+        assert_eq!(clamp_spread_shift_x(&wide, &[], "L", 3), 3);
+        assert_eq!(clamp_spread_shift_x(&narrow, &[], "L", -20), -3);
+        assert_eq!(clamp_spread_shift_x(&narrow, &[], "R", 40), 5);
+        assert_eq!(clamp_spread_shift_x(&narrow, &[], "R", -2), -2);
+        let (layout, got) = write_spread_shift_x(&narrow, &[], "L", -20);
+        assert_eq!(got, -3);
+        assert_eq!(BlockAdjust::find(&layout, "L").map(|a| a.shift_x), Some(-3));
+        assert!(BlockAdjust::find(&layout, "R").is_none());
     }
 }

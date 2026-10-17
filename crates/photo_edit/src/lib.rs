@@ -6,7 +6,7 @@ pub mod gui;
 pub mod ids;
 pub mod process;
 
-pub use document::{EditDocument, Layer, SourceFingerprint};
+pub use document::{opening_preview, EditDocument, Layer, SourceFingerprint};
 pub use gui::{Commit, FitHint, HostCmd, ImportOption, PhotoEditApp};
 pub use ids::{is_image_path, new_id};
 pub use process::{apply_edge_adjust, sample_paper};

@@ -184,6 +184,7 @@ fn build_mask_preview(
     voff_shift: i64,
     compute_bg_tile: bool,
     display_max_side: u32,
+    spread: bool,
 ) -> Result<MaskPreviewBuilt, String> {
     let mut loaded_pages = Vec::new();
     let mut pieces: Vec<(String, image::RgbImage, Option<mask_tool::gui::PieceDisk>)> = Vec::new();
@@ -221,10 +222,9 @@ fn build_mask_preview(
                     let y_pt = y as f32 / lh * scene_zoom.canvas_h;
                     let w_pt = (w as f32 / lw * scene_zoom.canvas_w).max(0.5);
                     let h_pt = (h as f32 / lh * scene_zoom.canvas_h).max(0.5);
-                    let rgba = vector_edit::rasterize_rect(
-                        &scene_zoom, x_pt, y_pt, w_pt, h_pt, tw, th,
-                    )
-                    .ok()?;
+                    let rgba =
+                        vector_edit::rasterize_rect(&scene_zoom, x_pt, y_pt, w_pt, h_pt, tw, th)
+                            .ok()?;
                     if keep_alpha {
                         Some(rgba)
                     } else {
@@ -396,8 +396,19 @@ fn build_mask_preview(
         .zip(orig_sizes.iter())
         .map(|((rid, _, _), &(_, orig_h))| (rid.clone(), orig_h))
         .collect();
-    let sheet_w = orig_sizes.iter().map(|(w, _)| *w).max().unwrap_or(1);
-    let sheet_h = mask_tool::layout::sheet_height(&heights, &layout);
+    let (sheet_w, sheet_h) = if spread {
+        let sizes: Vec<(String, u32, u32)> = pieces
+            .iter()
+            .zip(orig_sizes.iter())
+            .map(|((rid, _, _), &(w, h))| (rid.clone(), w.max(1), h.max(1)))
+            .collect();
+        let (_, w, h) = mask_tool::layout::spread_layout(&sizes, &layout);
+        (w, h)
+    } else {
+        let sheet_w = orig_sizes.iter().map(|(w, _)| *w).max().unwrap_or(1);
+        let sheet_h = mask_tool::layout::sheet_height(&heights, &layout);
+        (sheet_w, sheet_h)
+    };
     let (canvas_w, canvas_h, hoff, voff) = if bg_enabled && bg_src_w > 0 && bg_src_h > 0 {
         let frame = apply_bg::process::preview_frame(
             sheet_w,
@@ -1536,6 +1547,14 @@ impl ScoreSyncApp {
         let voff_shift = self.doc.get_group_voff_shift(&gid);
         let doc_masks = self.doc.get_group_masks(&gid).to_vec();
         let display_max_side = self.doc.display_max_side();
+        let spread = self.doc.is_spread();
+        let spread_ui = spread;
+        let piece_widths: Vec<(String, u32)> = self
+            .doc
+            .group_member_sizes(&gid)
+            .into_iter()
+            .map(|(id, w, _)| (id, w))
+            .collect();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let result = build_mask_preview(
@@ -1552,6 +1571,7 @@ impl ScoreSyncApp {
                 voff_shift,
                 compute_bg_tile,
                 display_max_side,
+                spread,
             );
             let _ = tx.send_blocking((result, block_layout));
         });
@@ -1633,6 +1653,7 @@ impl ScoreSyncApp {
                         );
                     }
                     m.apply_color_prefs(mask_prefs);
+                    m.set_spread(spread_ui, piece_widths);
                     m.set_block_geometry(heights, block_layout, built.hoff, built.voff);
                     m.set_voff_target(intended);
                     m.set_piece_staff_ys(built.piece_ys);
@@ -1676,13 +1697,24 @@ impl ScoreSyncApp {
             .iter()
             .map(|(rid, _, h)| (rid.clone(), *h))
             .collect();
-        let sw = self
-            .block_piece_sizes
-            .iter()
-            .map(|(_, w, _)| *w)
-            .max()
-            .unwrap_or(1);
-        let sh = mask_tool::layout::sheet_height(&heights, layout);
+        let (sw, sh) = if self.doc.is_spread() {
+            let sizes: Vec<(String, u32, u32)> = self
+                .block_piece_sizes
+                .iter()
+                .map(|(id, w, h)| (id.clone(), *w, *h))
+                .collect();
+            let (_, w, h) = mask_tool::layout::spread_layout(&sizes, layout);
+            (w, h)
+        } else {
+            let sw = self
+                .block_piece_sizes
+                .iter()
+                .map(|(_, w, _)| *w)
+                .max()
+                .unwrap_or(1);
+            let sh = mask_tool::layout::sheet_height(&heights, layout);
+            (sw, sh)
+        };
         let natural = apply_bg::process::natural_voff(
             sw,
             sh,
@@ -1713,7 +1745,11 @@ impl ScoreSyncApp {
             return 0;
         }
         let sw = self.doc.group_sheet_width(gid);
-        let sh = mask_tool::layout::sheet_height(heights, layout);
+        let sh = if self.doc.is_spread() {
+            self.doc.spread_sheet_size(gid).1
+        } else {
+            mask_tool::layout::sheet_height(heights, layout)
+        };
         let natural = apply_bg::process::natural_voff(
             sw,
             sh,
@@ -1935,7 +1971,11 @@ impl ScoreSyncApp {
         if self.photo_open() {
             // 点当前这一栏只退出修图. 点别的栏, 退出后进入那一栏.
             // 蒙版里的修图当前就是蒙版; 底色修图当前是底色, 点蒙版也要切过去.
-            let next = if tool == self.side_tool { None } else { Some(tool) };
+            let next = if tool == self.side_tool {
+                None
+            } else {
+                Some(tool)
+            };
             self.request_leave_photo(next, window, cx);
             return;
         }
@@ -2010,7 +2050,8 @@ impl ScoreSyncApp {
                 self.scroll_mask_lists_to_active();
                 self.focus_handle.focus(window);
                 self.status = "底色".into();
-                self.hint = "左侧预览当前组合, 滚轮切换. 在右侧导入底色图或指定纯色, 然后应用.".into();
+                self.hint =
+                    "左侧预览当前组合, 滚轮切换. 在右侧导入底色图或指定纯色, 然后应用.".into();
             }
             SideTool::Video => {
                 self.score_video
@@ -2379,6 +2420,7 @@ mod layout_diff_tests {
             gap_before: 0,
             gap_after: 0,
             shift_x: 0,
+            shift_y: 0,
         }
     }
 
@@ -2576,7 +2618,8 @@ mod mask_preview_wait_probe {
 
         let t0 = Instant::now();
         let mut pieces = vec![(rid.to_string(), piece)];
-        let sheet = crate::model::compose_parts_impl(&pieces, &[], ink, None).expect("compose");
+        let sheet =
+            crate::model::compose_parts_impl(&pieces, &[], ink, false, None).expect("compose");
         step("compose_parts_impl (单块 clone)", t0);
 
         let frame = apply_bg::process::preview_frame(
@@ -2705,6 +2748,7 @@ mod mask_preview_wait_probe {
             voff_shift,
             true,
             crate::page_cache::DEFAULT_DISPLAY_MAX_SIDE,
+            false,
         )
         .expect("build_mask_preview");
         step("build_mask_preview 全流水线 (页已在内存, 三层缩略图)", t0);
@@ -2718,7 +2762,7 @@ mod mask_preview_wait_probe {
         let page2 = decode_rgb(&page_png);
         let piece2 = crate::model::crop_band_fast(&page2, y0, height);
         pieces[0].1 = piece2;
-        let sheet2 = crate::model::compose_parts_impl(&pieces, &[], ink, None).unwrap();
+        let sheet2 = crate::model::compose_parts_impl(&pieces, &[], ink, false, None).unwrap();
         let t0 = Instant::now();
         let (canvas2, _, _) = apply_bg::process::composite_preview(
             &sheet2,

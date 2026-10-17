@@ -147,7 +147,8 @@ impl DocState {
     }
 
     pub fn load_vector_document(&self, region_id: &str) -> Option<vector_edit::VecDocument> {
-        if self.region_edit_kind(region_id) != EditKind::Vector || !self.region_edit_applies(region_id)
+        if self.region_edit_kind(region_id) != EditKind::Vector
+            || !self.region_edit_applies(region_id)
         {
             return None;
         }

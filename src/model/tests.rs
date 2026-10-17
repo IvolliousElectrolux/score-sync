@@ -15,6 +15,7 @@ fn stub_page(h: u32) -> Page {
         img_h: h,
         regions: HashMap::new(),
         vector: None,
+        blank: false,
     }
 }
 
@@ -819,4 +820,181 @@ fn shared_footnote_edit_height_applies_to_all_groups() {
         Some(18)
     );
     assert_eq!(doc.group_member_heights("g2")[0].1, 18);
+}
+
+fn spread_pages(n: usize) -> DocState {
+    let mut doc = DocState::new();
+    for i in 0..n {
+        let mut page = stub_page(12);
+        let image =
+            image::RgbImage::from_pixel(page.img_w, page.img_h, image::Rgb([255, 255, 255]));
+        page.disk_path =
+            crate::page_cache::write_rgb_png(&image, &format!("spread-{i}.png")).unwrap();
+        doc.pages.push(page);
+    }
+    doc.enter_spread();
+    doc
+}
+
+fn paint_mask(doc: &mut DocState, group_index: usize) {
+    let gid = doc.groups[group_index].id.clone();
+    doc.group_masks.insert(
+        gid,
+        vec![MaskRect {
+            id: format!("m{group_index}"),
+            x0: 1,
+            y0: 2,
+            x1: 3,
+            y1: 4,
+            brush_points: vec![],
+            brush_radius: 0.0,
+            color: [255, 255, 255],
+            poly_points: vec![],
+            opacity: 1.0,
+            bound_block: None,
+        }],
+    );
+}
+
+#[test]
+fn spread_repair_keeps_mask_when_members_stay() {
+    let mut doc = spread_pages(4);
+    assert_eq!(doc.groups.len(), 2);
+    assert!(doc.groups.iter().all(|g| g.region_ids.len() == 2));
+    paint_mask(&mut doc, 0);
+    paint_mask(&mut doc, 1);
+    let g0 = doc.groups[0].id.clone();
+    let g1 = doc.groups[1].id.clone();
+    let pair0 = doc.groups[0].region_ids.clone();
+
+    doc.close_pages_at(&[3]);
+    assert_eq!(doc.groups.len(), 2);
+    assert_eq!(doc.groups[0].id, g0);
+    assert_eq!(doc.groups[0].region_ids, pair0);
+    assert!(doc.group_masks.contains_key(&g0));
+    assert_eq!(doc.groups[1].id, g1);
+    assert_eq!(doc.groups[1].region_ids.len(), 1);
+    assert!(!doc.group_masks.contains_key(&g1));
+
+    let mut doc = spread_pages(4);
+    paint_mask(&mut doc, 0);
+    paint_mask(&mut doc, 1);
+    let g0 = doc.groups[0].id.clone();
+    let pair0 = doc.groups[0].region_ids.clone();
+    let g1 = doc.groups[1].id.clone();
+    assert!(doc.copy_page_at(2).is_some());
+    assert_eq!(doc.pages.len(), 5);
+    assert_eq!(doc.groups.len(), 3);
+    assert_eq!(doc.groups[0].id, g0);
+    assert_eq!(doc.groups[0].region_ids, pair0);
+    assert!(doc.group_masks.contains_key(&g0));
+    assert_eq!(doc.groups[1].id, g1);
+    assert!(!doc.group_masks.contains_key(&g1));
+    assert_eq!(doc.groups[2].region_ids.len(), 1);
+
+    let mut doc = spread_pages(4);
+    paint_mask(&mut doc, 0);
+    paint_mask(&mut doc, 1);
+    let ids: Vec<String> = doc.groups.iter().map(|g| g.id.clone()).collect();
+    let members: Vec<Vec<String>> = doc.groups.iter().map(|g| g.region_ids.clone()).collect();
+    assert!(doc.insert_blank_page(4).unwrap().is_none());
+    assert!(doc.insert_blank_page(4).unwrap().is_none());
+    assert_eq!(doc.pages.len(), 4);
+    assert_eq!(doc.groups.len(), 2);
+    assert_eq!(doc.groups[0].id, ids[0]);
+    assert_eq!(doc.groups[1].id, ids[1]);
+    assert_eq!(doc.groups[0].region_ids, members[0]);
+    assert_eq!(doc.groups[1].region_ids, members[1]);
+    assert!(doc.group_masks.contains_key(&ids[0]));
+    assert!(doc.group_masks.contains_key(&ids[1]));
+}
+
+#[test]
+fn spread_drops_a_book_of_two_blanks() {
+    let mut doc = spread_pages(2);
+    assert!(doc.insert_blank_page(0).unwrap().is_some());
+    assert_eq!(doc.pages.len(), 3);
+    assert!(doc.pages[0].blank);
+    assert!(doc.insert_blank_page(0).unwrap().is_none());
+    assert_eq!(doc.pages.len(), 2);
+    assert!(doc.pages.iter().all(|p| !p.blank));
+    assert_eq!(doc.groups.len(), 1);
+    assert_eq!(doc.groups[0].region_ids.len(), 2);
+
+    let mut doc = spread_pages(1);
+    assert!(doc.insert_blank_page(1).unwrap().is_some());
+    assert_eq!(doc.pages.len(), 2);
+    assert!(doc.pages[1].blank);
+    assert_eq!(doc.groups[0].region_ids.len(), 1);
+
+    let mut doc = spread_pages(4);
+    assert!(doc.insert_blank_page(2).unwrap().is_some());
+    assert_eq!(doc.pages.len(), 5);
+    assert!(doc.pages[2].blank);
+    assert!(doc.insert_blank_page(3).unwrap().is_none());
+    assert_eq!(doc.pages.len(), 4);
+    assert!(doc.pages.iter().all(|p| !p.blank));
+    assert_eq!(doc.groups.len(), 2);
+}
+
+#[test]
+fn spread_caption_stays_with_the_file_not_the_slot() {
+    let mut page = stub_page(10);
+    page.path = PathBuf::from("sonata_p012.png");
+    assert_eq!(page.stable_mark(), "原页 12");
+    assert_eq!(page.spread_caption().0, "sonata_p012");
+    page.path = PathBuf::from("sonata_p012_copy.png");
+    assert_eq!(page.stable_mark(), "原页 12 · 复制");
+    page.path = PathBuf::from("photo.png");
+    page.img_w = 80;
+    page.img_h = 10;
+    let (title, meta) = page.spread_caption();
+    assert_eq!(title, "photo");
+    assert_eq!(meta, "80×10");
+    page.path = PathBuf::from("blank_ab12.png");
+    assert_eq!(page.spread_caption().0, "空白页");
+}
+
+#[test]
+fn copy_pages_after_packs_in_given_order() {
+    let mut doc = spread_pages(5);
+    for (i, page) in doc.pages.iter_mut().enumerate() {
+        page.path = PathBuf::from(format!("scan_p{i:03}.png"));
+    }
+    let new_ids = doc.copy_pages_beside(&[0, 3, 1], 1, true).unwrap();
+    assert_eq!(new_ids.len(), 3);
+    assert_eq!(
+        page_names(&doc),
+        vec![
+            "scan_p000.png",
+            "scan_p001.png",
+            "scan_p000_copy.png",
+            "scan_p003_copy.png",
+            "scan_p001_copy.png",
+            "scan_p002.png",
+            "scan_p003.png",
+            "scan_p004.png",
+        ]
+    );
+    assert_eq!(doc.groups.len(), 4);
+    assert!(doc.groups.iter().all(|g| g.region_ids.len() == 2));
+    assert_eq!(doc.pages[2].id, new_ids[0]);
+    assert_eq!(doc.current_page_index, 2);
+
+    let mut doc = spread_pages(4);
+    for (i, page) in doc.pages.iter_mut().enumerate() {
+        page.path = PathBuf::from(format!("scan_p{i:03}.png"));
+    }
+    doc.copy_pages_beside(&[2, 0], 1, false).unwrap();
+    assert_eq!(
+        page_names(&doc),
+        vec![
+            "scan_p000.png",
+            "scan_p002_copy.png",
+            "scan_p000_copy.png",
+            "scan_p001.png",
+            "scan_p002.png",
+            "scan_p003.png",
+        ]
+    );
 }

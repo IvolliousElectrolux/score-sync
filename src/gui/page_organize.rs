@@ -150,6 +150,9 @@ impl ScoreSyncApp {
 
     pub(super) fn clear_org_thumbs(&mut self) {
         self.org_thumb_gen = self.org_thumb_gen.wrapping_add(1);
+        self.org_thumb_busy = false;
+        self.org_thumb_miss.clear();
+        self.spread_thumb_queued = false;
         for (_, img) in std::mem::take(&mut self.org_thumbs) {
             self.gpu_drop.push(img);
         }
@@ -273,7 +276,11 @@ impl ScoreSyncApp {
             .doc
             .pages
             .iter()
-            .filter(|p| !self.org_thumbs.contains_key(&p.id))
+            .filter(|p| {
+                !p.blank
+                    && !self.org_thumbs.contains_key(&p.id)
+                    && !self.org_thumb_miss.contains(&p.id)
+            })
             .map(|p| {
                 let jpeg = crate::page_cache::org_thumb_path(&p.disk_path);
                 if jpeg.is_file() {
@@ -296,9 +303,19 @@ impl ScoreSyncApp {
             })
             .collect();
         if jobs.is_empty() {
+            self.org_thumb_busy = false;
             cx.notify();
             return;
         }
+        let wanted: Vec<String> = jobs
+            .iter()
+            .map(|job| match job {
+                OrgThumbJob::Jpeg { id, .. }
+                | OrgThumbJob::Mem { id, .. }
+                | OrgThumbJob::Png { id, .. } => id.clone(),
+            })
+            .collect();
+        self.org_thumb_busy = true;
         let gen = self.org_thumb_gen.wrapping_add(1);
         self.org_thumb_gen = gen;
         let peak = self
@@ -363,14 +380,23 @@ impl ScoreSyncApp {
                     if let Some(old) = view.org_thumbs.insert(id, img) {
                         view.gpu_drop.push(old);
                     }
-                    if flush && view.page_organize.is_some() {
+                    if flush && (view.page_organize.is_some() || view.doc.is_spread()) {
                         cx.notify();
                     }
                 })
                 .ok();
             }
             this.update(cx, |view, cx| {
-                if view.org_thumb_gen == gen && view.page_organize.is_some() {
+                if view.org_thumb_gen != gen {
+                    return;
+                }
+                for id in &wanted {
+                    if !view.org_thumbs.contains_key(id) {
+                        view.org_thumb_miss.insert(id.clone());
+                    }
+                }
+                view.org_thumb_busy = false;
+                if view.page_organize.is_some() || view.doc.is_spread() {
                     cx.notify();
                 }
             })

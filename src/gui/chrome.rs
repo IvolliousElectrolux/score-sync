@@ -315,7 +315,79 @@ impl ScoreSyncApp {
             )
     }
 
+    fn spread_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let staff = !self.doc.is_spread();
+        let spread = self.doc.is_spread();
+        div()
+            .id("crop_toolbar")
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .h(px(28.))
+            .w_full()
+            .min_w(px(0.))
+            .overflow_x_scroll()
+            .bg(rgb(0xe2e8f0))
+            .border_b_1()
+            .border_color(rgb(0xcbd5e1))
+            .child(self.menu_item(
+                "open",
+                apply_bg::with_mod("打开", "O"),
+                false,
+                Self::open_file,
+                cx,
+            ))
+            .child(self.menu_item(
+                "layout_staff",
+                "谱表分块",
+                staff,
+                |this, _, cx| this.request_sheet_layout(false, cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "layout_spread",
+                "双页对开",
+                spread,
+                |this, _, cx| this.request_sheet_layout(true, cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "spread_dup",
+                "复制",
+                false,
+                |this, _, cx| this.duplicate_spread_selected(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "spread_paste",
+                apply_bg::with_mod("粘贴", "V"),
+                false,
+                |this, _, cx| this.paste_spread_clipboard(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "spread_del",
+                "删除 (Del)",
+                false,
+                |this, _, cx| this.delete_spread_selected(cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "spread_blank",
+                "插入空白页",
+                false,
+                |this, _, cx| {
+                    let idx = this.doc.current_page_index.min(this.doc.pages.len());
+                    this.insert_spread_blank(idx, cx);
+                },
+                cx,
+            ))
+    }
+
     pub(super) fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.doc.is_spread() {
+            return self.spread_toolbar(cx).into_any_element();
+        }
         // 分块菜单: 放在左栏顶上一行, 内嵌菜单项对齐视频轨运输条.
         div()
             .id("crop_toolbar")
@@ -407,6 +479,21 @@ impl ScoreSyncApp {
                 |this, window, cx| this.toggle_page_organize(window, cx),
                 cx,
             ))
+            .child(self.menu_item(
+                "layout_staff",
+                "谱表分块",
+                true,
+                |this, _, cx| this.request_sheet_layout(false, cx),
+                cx,
+            ))
+            .child(self.menu_item(
+                "layout_spread",
+                "双页对开",
+                false,
+                |this, _, cx| this.request_sheet_layout(true, cx),
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn mask_photo_menu_btn(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -424,9 +511,10 @@ impl ScoreSyncApp {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(0xd8e0ea)))
             .child("修图 (T)")
-            .on_mouse_up(
+            .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
                     this.try_open_photo_edit(window, cx);
                 }),
             )
@@ -583,13 +671,18 @@ impl ScoreSyncApp {
                 .child(div().flex_1().min_h(px(0.)).min_w(px(0.)).child(canvas))
                 .into_any_element();
         }
-        let canvas = match self.side_tool {
-            SideTool::Crop => self.image_view(cx).into_any_element(),
-            SideTool::Mask => self
-                .mask_tool
-                .update(cx, |m, cx| m.image_view(cx))
-                .into_any_element(),
-            SideTool::Project | SideTool::Video => unreachable!(),
+        let spread = self.side_tool == SideTool::Crop && self.doc.is_spread();
+        let canvas = if spread {
+            self.spread_workspace(cx).into_any_element()
+        } else {
+            match self.side_tool {
+                SideTool::Crop => self.image_view(cx).into_any_element(),
+                SideTool::Mask => self
+                    .mask_tool
+                    .update(cx, |m, cx| m.image_view(cx))
+                    .into_any_element(),
+                SideTool::Project | SideTool::Video => unreachable!(),
+            }
         };
         div()
             .id("left_workspace")
@@ -621,16 +714,18 @@ impl ScoreSyncApp {
                         .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(tb)),
                 )
             })
-            .child(
-                div()
-                    .w_full()
-                    .min_w(px(0.))
-                    .flex_shrink_0()
-                    .border_b_1()
-                    .border_color(rgb(0xcbd5e1))
-                    .bg(rgb(0xf8fafc))
-                    .child(self.tab_bar(cx)),
-            )
+            .when(!spread, |d| {
+                d.child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(rgb(0xcbd5e1))
+                        .bg(rgb(0xf8fafc))
+                        .child(self.tab_bar(cx)),
+                )
+            })
             .child(div().flex_1().min_h(px(0.)).min_w(px(0.)).child(canvas))
             .into_any_element()
     }
@@ -658,7 +753,11 @@ impl ScoreSyncApp {
                     .py_1()
                     .text_xs()
                     .text_color(rgb(0x94a3b8))
-                    .child("当前组合内没有分块"),
+                    .child(if self.doc.is_spread() {
+                        "当前对开没有页面"
+                    } else {
+                        "当前组合内没有分块"
+                    }),
             );
         }
         for row in &rows {
@@ -718,7 +817,11 @@ impl ScoreSyncApp {
                             .text_color(rgb(0x334155))
                             .flex_1()
                             .min_w(px(0.))
-                            .child("组合分块 (自上而下)"),
+                            .child(if self.doc.is_spread() {
+                                "对开页面 (左页 / 右页)"
+                            } else {
+                                "组合分块 (自上而下)"
+                            }),
                     )
                     .child(self.mask_photo_menu_btn(cx)),
             )
@@ -837,6 +940,9 @@ impl ScoreSyncApp {
         if matches!(self.dialog, Some(DialogKind::UnsavedPhoto { .. })) {
             return self.unsaved_photo_dialog(cx).into_any_element();
         }
+        if matches!(self.dialog, Some(DialogKind::SwitchLayout { .. })) {
+            return self.switch_layout_dialog(cx).into_any_element();
+        }
         if self.bg.pick_open {
             return self.bg_pick_overlay(cx).into_any_element();
         }
@@ -876,6 +982,7 @@ impl ScoreSyncApp {
             DialogKind::UnsavedExit
             | DialogKind::UnsavedNew
             | DialogKind::UnsavedPhoto { .. }
+            | DialogKind::SwitchLayout { .. }
             | DialogKind::UpdateAvailable { .. } => unreachable!(),
         };
         let body_el = div()
@@ -1061,6 +1168,75 @@ impl ScoreSyncApp {
                                 |this, _, cx| {
                                     this.dismiss_dialog(cx);
                                 },
+                                cx,
+                            )),
+                    ),
+            )
+    }
+
+    fn switch_layout_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let to_spread = matches!(
+            self.dialog,
+            Some(DialogKind::SwitchLayout { to_spread: true })
+        );
+        let body = if to_spread {
+            "会按页序把每页收成一整页, 两两重配对开. 旧的蒙版, 分块微调和视频里对不上的片段会丢掉."
+        } else {
+            "会清掉对开组合, 页面上的分块留空, 需要重新识别. 旧的蒙版, 分块微调和视频里对不上的片段会丢掉."
+        };
+        div()
+            .id("dialog_backdrop_switch_layout")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000080))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .w(px(440.))
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x94a3b8))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(if to_spread {
+                                "切换为双页对开"
+                            } else {
+                                "切换为谱表分块"
+                            }),
+                    )
+                    .child(div().text_sm().text_color(rgb(0x334155)).child(body))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .justify_end()
+                            .child(self.btn(
+                                "layout_ok",
+                                "重建组合",
+                                true,
+                                move |this, _, cx| this.apply_sheet_layout(to_spread, cx),
+                                cx,
+                            ))
+                            .child(self.btn(
+                                "layout_cancel",
+                                "取消",
+                                false,
+                                |this, _, cx| this.dismiss_dialog(cx),
                                 cx,
                             )),
                     ),

@@ -31,7 +31,34 @@ impl MaskToolApp {
                 |this, _, cx| this.clear_masks(cx),
                 cx,
             ))
-            .when(self.has_block_pieces(), |d| {
+            .when(self.spread && self.has_block_pieces(), |d| {
+                d.child(self.menu_item(
+                    "spread_mirror",
+                    "左右对称",
+                    self.spread_mirror_x,
+                    |this, _, cx| {
+                        this.spread_mirror_x = !this.spread_mirror_x;
+                        this.status = if this.spread_mirror_x {
+                            "左右对称: 拖一页, 另一页反向跟着动.".into()
+                        } else {
+                            "左右独立: 只移动被拖的那一页.".into()
+                        };
+                        cx.notify();
+                    },
+                    cx,
+                ))
+                .child(self.menu_item(
+                    "spread_sync_x",
+                    "同步左右",
+                    false,
+                    |this, _, cx| {
+                        this.guide_host_cmd = Some(GuideHostCmd::SyncSpreadX);
+                        cx.notify();
+                    },
+                    cx,
+                ))
+            })
+            .when(self.has_block_pieces() && !self.spread, |d| {
                 d.child(self.menu_item_with_context(
                     "guides",
                     "辅助线",

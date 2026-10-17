@@ -13,6 +13,9 @@ impl DocState {
         let Some(page) = self.pages.get(page_idx) else {
             return Err("页不存在".into());
         };
+        if page.blank {
+            return Ok(());
+        }
         if page.image.is_some() {
             if let Some(src) = page.vector.as_ref() {
                 let (lw, lh) = src.logical_size();
@@ -130,13 +133,19 @@ impl DocState {
             img_h: h,
             regions: HashMap::new(),
             vector: None,
+            blank: false,
         };
         self.pages.push(page);
         let idx = self.pages.len() - 1;
         if switch_to {
             self.current_page_index = idx;
         }
-        self.detect_page(idx, true);
+        if self.is_spread() {
+            self.install_full_page_region(idx, true);
+            self.rebuild_spreads();
+        } else {
+            self.detect_page(idx, true);
+        }
         self.retain_memory_window();
         Ok(idx)
     }
@@ -160,18 +169,21 @@ impl DocState {
             img_h: h,
             regions: HashMap::new(),
             vector: None,
+            blank: false,
         };
         self.pages.push(page);
         let idx = self.pages.len() - 1;
         if switch_to {
             self.current_page_index = idx;
         }
-        if run_detect {
+        if self.is_spread() {
+            self.install_full_page_region(idx, true);
+            self.rebuild_spreads();
+            self.retain_memory_window();
+        } else if run_detect {
             crate::trace::log(&format!("doc: detect_page idx={idx} 开始"));
             self.detect_page(idx, true);
             crate::trace::log(&format!("doc: detect_page idx={idx} 结束"));
-        }
-        if run_detect {
             self.retain_memory_window();
         }
         Ok(idx)
@@ -196,13 +208,20 @@ impl DocState {
             img_h: h,
             regions: HashMap::new(),
             vector: Some(source),
+            blank: false,
         };
         self.pages.push(page);
         let idx = self.pages.len() - 1;
         if switch_to {
             self.current_page_index = idx;
         }
-        let found = self.detect_vector_page(idx, true);
+        let found = if self.is_spread() {
+            self.install_full_page_region(idx, true);
+            self.rebuild_spreads();
+            false
+        } else {
+            self.detect_vector_page(idx, true)
+        };
         self.retain_memory_window();
         Ok((idx, found))
     }
@@ -243,34 +262,38 @@ impl DocState {
             }
         }
         self.pages = kept;
-        self.groups = self
-            .groups
-            .iter()
-            .filter_map(|g| {
-                let remain: Vec<String> = g
-                    .region_ids
-                    .iter()
-                    .filter(|x| !dead_rids.contains(*x))
-                    .cloned()
-                    .collect();
-                if remain.is_empty() {
-                    None
-                } else {
-                    Some(Group {
-                        id: g.id.clone(),
-                        region_ids: remain,
-                        name: g.name.clone(),
-                    })
-                }
-            })
-            .collect();
+        // 对开要拿删除前的左右成员和重配结果比, 右页没了就清蒙版.
+        // 这里先留着原组合, 交给 rebuild_spreads.
+        if !self.is_spread() {
+            self.groups = self
+                .groups
+                .iter()
+                .filter_map(|g| {
+                    let remain: Vec<String> = g
+                        .region_ids
+                        .iter()
+                        .filter(|x| !dead_rids.contains(*x))
+                        .cloned()
+                        .collect();
+                    if remain.is_empty() {
+                        None
+                    } else {
+                        Some(Group {
+                            id: g.id.clone(),
+                            region_ids: remain,
+                            name: g.name.clone(),
+                        })
+                    }
+                })
+                .collect();
+            self.sort_groups();
+            self.ensure_active_group();
+        }
         self.selected_region_ids = self
             .selected_region_ids
             .difference(&dead_rids)
             .cloned()
             .collect();
-        self.sort_groups();
-        self.ensure_active_group();
         if self.pages.is_empty() {
             self.current_page_index = 0;
         } else if let Some(id) = keep_id {
@@ -283,6 +306,9 @@ impl DocState {
         }
         self.retain_memory_window();
         self.rebuild_rid_index();
+        if self.is_spread() {
+            self.rebuild_spreads();
+        }
         dead_pids
     }
 
@@ -302,6 +328,9 @@ impl DocState {
         self.sort_groups();
         self.retain_memory_window();
         self.rebuild_rid_index();
+        if self.is_spread() {
+            self.rebuild_spreads();
+        }
     }
 
     /// 将 `moving` 整块 (保持相对顺序) 插到 `anchor` 之前/之后.
@@ -349,13 +378,13 @@ impl DocState {
         self.sort_groups();
         self.retain_memory_window();
         self.rebuild_rid_index();
+        if self.is_spread() {
+            self.rebuild_spreads();
+        }
     }
 
-    pub fn copy_page_at(&mut self, index: usize) -> Option<usize> {
-        if index >= self.pages.len() {
-            return None;
-        }
-        let src = &self.pages[index];
+    /// 复制一页的文件与区域, 不插入. 位图会另写一份会话 PNG.
+    fn duplicate_page(src: &Page) -> Option<Page> {
         let new_page_id = new_id();
         let stem = src
             .path
@@ -376,19 +405,27 @@ impl DocState {
             format!("{stem}_copy{suf}")
         };
         let new_path = src.path.with_file_name(copy_name);
+        if src.blank {
+            return Some(Page {
+                id: new_page_id,
+                path: new_path,
+                disk_path: std::path::PathBuf::new(),
+                image: None,
+                img_w: src.img_w,
+                img_h: src.img_h,
+                regions: HashMap::new(),
+                vector: None,
+                blank: true,
+            });
+        }
         let disk_path = if src.vector.is_some() {
             src.disk_path.clone()
         } else {
-            match crate::page_cache::duplicate_disk_png(&src.disk_path) {
-                Ok(p) => p,
-                Err(_) => return None,
-            }
+            crate::page_cache::duplicate_disk_png(&src.disk_path).ok()?
         };
         let (img_w, img_h) = (src.width(), src.height());
-        // 复制页不克隆像素; 若在窗口内再按需加载
         let mut ordered: Vec<Region> = src.regions.values().cloned().collect();
         ordered.sort_by_key(|r| (r.y0, r.y1));
-
         let mut page = Page {
             id: new_page_id.clone(),
             path: new_path,
@@ -398,14 +435,14 @@ impl DocState {
             img_h,
             regions: HashMap::new(),
             vector: src.vector.clone(),
+            blank: false,
         };
-        let mut new_region_ids = Vec::new();
         for r in ordered {
             let rid = new_id();
             page.regions.insert(
                 rid.clone(),
                 Region {
-                    id: rid.clone(),
+                    id: rid,
                     page_id: new_page_id.clone(),
                     y0: r.y0,
                     y1: r.y1,
@@ -413,8 +450,18 @@ impl DocState {
                     color: r.color,
                 },
             );
-            new_region_ids.push(rid);
         }
+        Some(page)
+    }
+
+    pub fn copy_page_at(&mut self, index: usize) -> Option<usize> {
+        if index >= self.pages.len() {
+            return None;
+        }
+        let page = Self::duplicate_page(&self.pages[index])?;
+        let mut ordered: Vec<Region> = page.regions.values().cloned().collect();
+        ordered.sort_by_key(|r| (r.y0, r.y1));
+        let new_region_ids: Vec<String> = ordered.into_iter().map(|r| r.id).collect();
         let src_page_id = self.pages[index].id.clone();
         let insert_at = index + 1;
         self.pages.insert(insert_at, page);
@@ -454,6 +501,47 @@ impl DocState {
         self.current_page_index = insert_at;
         self.retain_memory_window();
         self.rebuild_rid_index();
+        if self.is_spread() {
+            self.rebuild_spreads();
+        }
         Some(insert_at)
+    }
+
+    /// 按 `order` 的顺序复制这些页, 紧贴插在 `anchor` 左侧 (`after == false`) 或右侧.
+    /// 返回新页 id, 顺序与 `order` 相同.
+    pub fn copy_pages_beside(
+        &mut self,
+        order: &[usize],
+        anchor: usize,
+        after: bool,
+    ) -> Option<Vec<String>> {
+        let n = self.pages.len();
+        if order.is_empty() || anchor >= n || order.iter().any(|&i| i >= n) {
+            return None;
+        }
+        let anchor_id = self.pages[anchor].id.clone();
+        let mut copies = Vec::with_capacity(order.len());
+        for &i in order {
+            copies.push(Self::duplicate_page(&self.pages[i])?);
+        }
+        let new_ids: Vec<String> = copies.iter().map(|p| p.id.clone()).collect();
+        let mut insert_at = self.pages.iter().position(|p| p.id == anchor_id)?;
+        if after {
+            insert_at += 1;
+        }
+        for (j, page) in copies.into_iter().enumerate() {
+            self.pages.insert(insert_at + j, page);
+        }
+        self.current_page_index = insert_at.min(self.pages.len().saturating_sub(1));
+        self.retain_memory_window();
+        self.rebuild_rid_index();
+        if self.is_spread() {
+            self.rebuild_spreads();
+            let pair = self.current_page_index / 2;
+            if let Some(g) = self.groups.get(pair) {
+                self.active_group_id = Some(g.id.clone());
+            }
+        }
+        Some(new_ids)
     }
 }

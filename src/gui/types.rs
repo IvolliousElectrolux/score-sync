@@ -27,6 +27,16 @@ pub(crate) const ORG_CELL_W: f32 = 128.0;
 pub(crate) const ORG_THUMB_W: f32 = 112.0;
 pub(crate) const ORG_THUMB_H: f32 = 158.0;
 pub(crate) const ORG_GRID_GAP: f32 = 12.0;
+/// 对开一册: 左右两页贴在书脊两侧, 多册按窗口宽度折行.
+pub(crate) const SPREAD_PAGE_W: f32 = 148.0;
+pub(crate) const SPREAD_THUMB_W: f32 = 136.0;
+pub(crate) const SPREAD_THUMB_H: f32 = 176.0;
+pub(crate) const SPREAD_SPINE_W: f32 = 10.0;
+pub(crate) const SPREAD_BOOK_PAD: f32 = 8.0;
+pub(crate) const SPREAD_BOOK_BORDER: f32 = 1.0;
+pub(crate) const SPREAD_BOOK_W: f32 =
+    SPREAD_BOOK_PAD * 2.0 + SPREAD_BOOK_BORDER * 2.0 + SPREAD_PAGE_W * 2.0 + SPREAD_SPINE_W;
+pub(crate) const SPREAD_BOOK_GAP: f32 = 20.0;
 pub(crate) const ORG_SCROLLBAR_W: f32 = 10.0;
 /// 组织页面 overlay 相对窗口的边距 (原先 p_4 = 1rem).
 pub(crate) const ORG_SLOT_PAD: f32 = 16.0;
@@ -46,6 +56,8 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 【分块】快捷键:\n\
   {m}O 打开图片/PDF (仅本面板) | {ms}N 新建工程 | {ms}O 打开工程 | {m}S 保存工程 | {ms}S 另存工程\n\
   D 识别本页 | A 识别全部页\n\
+  工具栏「谱表分块 | 双页对开」切换整份工程的版式. 对开不识别谱表, 按页序两页一册 (末页落单则右页留空, 要错开就在前面插入空白页). 空白页是和这格空页一样的占位, 不是白纸, 成片里不画它. 一对里左右都是空页时, 这一对自动去掉. 缩略图下是这一页自己的文件名, `_p` 页码始终留着, 太长时省略号放在页码前面. 拖动换位后仍然认得出来. 多册按窗口宽度折行. 拖动改页序, 拖到相邻页且不会换位时不亮指示线; 把一对的右页拖进下一对左页的左侧, 会在原位置补空白页, 让左页单独留下. {m}点击按点选顺序多选, Shift 连选, Delete 删除. 「复制」把选中页收成一串, 紧贴在最后点中的那一页右侧 (中间有空的也会靠拢). {m}C 只记入待贴内容, {m}V 贴到当时选中页的右侧. 右键可复制, 粘贴到这一页的左侧或右侧, 或在这一页前面或后面插入空白页. 点一册后切到蒙版即这一对开.\n\
+  对开的蒙版可直接拖页面 (不必按 Shift). 左右可以从初始位置向外滑出成片, 直到这一页只剩一条边还留在原来的成片里; 往对面拖则停在成片对侧. 上下和谱表分块一样, 到边就停: 两页一样高时已经顶住上下边, 不能再上下拖. 「左右对称」默认开着: 拖一页, 另一页反向移动. 关掉后只移动被拖的那一页, 另一页留在原地. 「同步左右」把当前这一对里各页相对自己槽位的左右偏移, 按像素套到其余每一对的同一侧 (左对左, 右对右). 页更窄、移不到那么远时停在成片边缘, 已画上的蒙版跟着页走. 只改左右, 不改上下和四边裁切. 当前只有左页时, 只同步各对的左页. 四边仍是裁切, 向外扩也留在成片里. 此模式没有辅助线和对齐. 谱表分块仍是 Shift+拖左右, 探出原块左右的部分只在蒙版里画出, 终稿会裁掉.\n\
   N 添加新块 | S 分割块 | M 合并组合 | {m}M 一键两两合并 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
   E 导出组合 | R 重置本页分组 | P 组织页面 | H / F1 操作说明\n\
   {m}A 全选本页原子块 | 输出组合 {m}点击多选 (拖拽时整块一起调序)\n\
@@ -249,6 +261,8 @@ pub(crate) struct GuideHistEntry {
     pub(crate) after: MaskGlobalSnap,
     /// 对齐等改了拼合几何, 回滚后要重拼当前页预览, 但不能 `invalidate_session`.
     pub(crate) refresh_preview: bool,
+    /// 撤重状态栏用, 例如「全局辅助线操作」「同步左右」.
+    pub(crate) note: &'static str,
 }
 
 #[derive(Clone, Default)]
@@ -384,6 +398,10 @@ pub(crate) enum DialogKind {
     /// 离开 P 图时有未应用改动
     UnsavedPhoto {
         next: Option<SideTool>,
+    },
+    /// 切换谱表分块 / 双页对开前确认
+    SwitchLayout {
+        to_spread: bool,
     },
     /// GitHub 上有更新的正式版
     UpdateAvailable {

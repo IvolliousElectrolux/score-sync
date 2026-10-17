@@ -50,6 +50,9 @@ impl DocState {
     /// 为指定组合写入默认辅助线. `guides_global` 时若该组还没有显示用的
     /// 线, 一并拷过去.
     pub fn seed_guide_defaults_for(&mut self, gids: &[String]) {
+        if self.is_spread() {
+            return;
+        }
         for gid in gids {
             let d = self.compute_default_guides(gid);
             if d.lines.is_empty() {
@@ -68,6 +71,11 @@ impl DocState {
 
     /// 刷新全部组合的默认辅助线 (建组/改底色后).
     pub fn seed_guide_defaults(&mut self) {
+        if self.is_spread() {
+            self.group_guide_defaults.clear();
+            self.group_guides.clear();
+            return;
+        }
         let valid: HashSet<String> = self.groups.iter().map(|g| g.id.clone()).collect();
         self.group_guide_defaults.retain(|k, _| valid.contains(k));
         let gids: Vec<String> = self.groups.iter().map(|g| g.id.clone()).collect();

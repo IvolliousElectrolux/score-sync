@@ -366,8 +366,11 @@ impl VectorEditApp {
         self.node_target = None;
         self.node_hit = None;
         self.user_zoomed = false;
-        self.rebuild_raster(cx);
         self.fit_to_view(cx);
+        // 视口还没量到时按整页 1:1 光栅会卡住. 等布局后由 consider_raster 再画.
+        if self.view_ready() {
+            self.rebuild_raster(cx);
+        }
         self.status = "矢量修图".into();
         cx.notify();
     }

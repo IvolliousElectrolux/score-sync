@@ -10,6 +10,13 @@ impl DocState {
         if self
             .pages
             .get(page_idx)
+            .is_some_and(|p| p.blank)
+        {
+            return;
+        }
+        if self
+            .pages
+            .get(page_idx)
             .map(|p| p.is_vector())
             .unwrap_or(false)
         {

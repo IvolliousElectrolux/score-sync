@@ -678,9 +678,7 @@ impl ScoreSyncApp {
             .as_ref()
             .map(|img| area(img.width(), img.height()))
             .unwrap_or(0);
-        let source_area = source_dims
-            .map(|(w, h)| area(w, h))
-            .unwrap_or(0);
+        let source_area = source_dims.map(|(w, h)| area(w, h)).unwrap_or(0);
         let session_area = session_dims.map(|(w, h)| area(w, h)).unwrap_or(0);
         let best = mem_area.max(source_area).max(session_area);
         if best == 0 {

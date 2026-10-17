@@ -16,6 +16,7 @@ mod edits;
 mod groups;
 mod guides;
 mod pages;
+mod spread;
 mod types;
 
 #[cfg(test)]
@@ -29,8 +30,8 @@ pub use mask_tool::guide::GuideState;
 pub use mask_tool::layout::BlockAdjust;
 pub(crate) use types::crop_band_fast;
 pub use types::{
-    is_image_path, is_open_path, is_pdf_path, new_id, parse_color_hex, Group, Page, Region, COLORS,
-    DEFAULT_INK_THRESHOLD, DEFAULT_MARGIN,
+    is_image_path, is_open_path, is_pdf_path, new_id, parse_color_hex, Group, Page, Region,
+    SheetLayout, COLORS, DEFAULT_INK_THRESHOLD, DEFAULT_MARGIN,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -106,6 +107,8 @@ pub struct DocState {
     pub display_max_side: u32,
     /// 分块 P 图覆盖 (像素在会话 `edits/{region_id}/`).
     pub region_edits: HashMap<String, RegionEditMeta>,
+    /// 谱表分块或总谱双页对开. 整份工程一份.
+    pub sheet_layout: SheetLayout,
 }
 
 impl DocState {
@@ -136,6 +139,7 @@ impl DocState {
                     img_h: p.img_h,
                     regions: p.regions.clone(),
                     vector: p.vector.clone(),
+                    blank: p.blank,
                 })
                 .collect(),
             groups: self.groups.clone(),
@@ -166,6 +170,7 @@ impl DocState {
             rid_page: HashMap::new(),
             display_max_side: self.display_max_side,
             region_edits: self.region_edits.clone(),
+            sheet_layout: self.sheet_layout,
         }
     }
 

@@ -216,8 +216,8 @@ pub fn save_rgb_preview_jpeg(rgb: &RgbImage, path: &Path, max_side: u32) -> Resu
 
 /// 按文件头识别格式再解码. `image::open` 会先信扩展名, `.png` 里的 JPEG 会失败.
 pub fn open_image(path: &Path) -> Result<image::DynamicImage, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("读取图片失败 ({}): {e}", path.display()))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("读取图片失败 ({}): {e}", path.display()))?;
     let sniffed = image::ImageReader::new(std::io::BufReader::new(file))
         .with_guessed_format()
         .map_err(|e| e.to_string())
@@ -225,7 +225,10 @@ pub fn open_image(path: &Path) -> Result<image::DynamicImage, String> {
     match sniffed {
         Ok(img) => Ok(img),
         Err(sniff_err) => image::open(path).map_err(|e| {
-            format!("读取图片失败 ({}): {e} (内容识别: {sniff_err})", path.display())
+            format!(
+                "读取图片失败 ({}): {e} (内容识别: {sniff_err})",
+                path.display()
+            )
         }),
     }
 }
@@ -238,8 +241,8 @@ pub fn load_rgb(path: &Path) -> Result<RgbImage, String> {
 /// 按文件头读宽高, 不看扩展名. `image::image_dimensions` 只信扩展名,
 /// `.png` 里的 JPEG 会失败或读错.
 pub fn image_file_dimensions(path: &Path) -> Result<(u32, u32), String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("读取图片失败 ({}): {e}", path.display()))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("读取图片失败 ({}): {e}", path.display()))?;
     image::ImageReader::new(std::io::BufReader::new(file))
         .with_guessed_format()
         .map_err(|e| e.to_string())?

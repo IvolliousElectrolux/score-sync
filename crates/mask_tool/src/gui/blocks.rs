@@ -464,6 +464,43 @@ impl MaskToolApp {
         }
     }
 
+    pub fn set_spread(&mut self, spread: bool, widths: Vec<(String, u32)>) {
+        self.spread = spread;
+        self.piece_widths = widths;
+    }
+
+    fn spread_partner(&self, region_id: &str) -> Option<String> {
+        let mut other = None;
+        for (id, _) in &self.block_heights {
+            if id != region_id {
+                other = Some(id.clone());
+            }
+        }
+        other
+    }
+
+    fn spread_sizes(&self) -> Vec<(String, u32, u32)> {
+        self.block_heights
+            .iter()
+            .map(|(id, h)| {
+                let w = self
+                    .block_tiles
+                    .iter()
+                    .find(|t| &t.region_id == id)
+                    .map(|t| t.width)
+                    .or_else(|| {
+                        self.piece_widths
+                            .iter()
+                            .find(|(i, _)| i == id)
+                            .map(|(_, w)| *w)
+                    })
+                    .unwrap_or(1)
+                    .max(1);
+                (id.clone(), w, (*h).max(1))
+            })
+            .collect()
+    }
+
     pub fn set_piece_staff_ys(&mut self, ys: std::collections::HashMap<String, Option<i32>>) {
         self.piece_staff_ys = ys;
     }
@@ -577,6 +614,56 @@ impl MaskToolApp {
         let canvas_x = |sx: f32| hoff + sx * cs;
         let canvas_y = |sy: f32| voff + sy * cs;
         let canvas_s = |s: f32| s * cs;
+        if self.spread {
+            let sizes: Vec<(String, u32, u32)> = self
+                .block_tiles
+                .iter()
+                .map(|t| (t.region_id.clone(), t.width, t.height))
+                .collect();
+            let boxes = crate::layout::spread_boxes(&sizes, &self.block_layout);
+            for b in boxes.iter().rev() {
+                let Some(tile) = self.block_tiles.iter().find(|t| t.region_id == b.region_id) else {
+                    continue;
+                };
+                let x0 = canvas_x(b.x as f32);
+                let y0 = canvas_y(b.y as f32);
+                let x1 = x0 + canvas_s(b.w as f32);
+                let y1 = y0 + canvas_s(b.h as f32);
+                if x < x0 || x >= x1 || y < y0 || y >= y1 {
+                    continue;
+                }
+                let adj = BlockAdjust::find(&self.block_layout, &tile.region_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let (trim_l, _, _, _, content_w) =
+                    crate::layout::effective_h_metrics(tile.width as i32, &adj);
+                let (_, _, content_h, _, trim_top) =
+                    crate::layout::effective_metrics(tile.height as i32, &adj);
+                let cx0 = canvas_x((b.origin_x + trim_l as i64) as f32);
+                let cy0 = canvas_y((b.origin_y + trim_top as i64) as f32);
+                let cx1 = cx0 + canvas_s(content_w as f32);
+                let cy1 = cy0 + canvas_s(content_h as f32);
+                if x >= cx0 && x < cx1 && y >= cy0 && y < cy1 && content_w > 0 && content_h > 0 {
+                    let local_x = (x - canvas_x(b.origin_x as f32)) / cs;
+                    let local_y = (y - canvas_y(b.origin_y as f32)) / cs;
+                    if let Some(rgb) =
+                        sample_thumb(&tile.thumb, tile.width, tile.height, local_x, local_y)
+                    {
+                        return Some(rgb);
+                    }
+                }
+                return Some(tile.top_fill);
+            }
+            if self.block_shows_bg {
+                if let Some(bg) = self.block_bg.as_ref() {
+                    if let Some(c) = bg.solid {
+                        return Some(c);
+                    }
+                    return sample_thumb(&bg.thumb, bg.width, bg.height, x, y);
+                }
+            }
+            return Some([255, 255, 255]);
+        }
         let sheet_w = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1) as f32;
         let hx = canvas_x(0.0);
         let dw = canvas_s(sheet_w);
@@ -752,8 +839,17 @@ impl MaskToolApp {
         if self.block_tiles.is_empty() {
             return None;
         }
-        let sheet_w = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1);
-        let sheet_h = layout::sheet_height(&self.block_heights, &self.block_layout);
+        let (sheet_w, sheet_h) = if self.spread {
+            // 缩放和画布锁在未平移的成片上. 某一页滑出或重叠时, 另一页
+            // 不会因为成片变宽/变窄而被重新装进页面.
+            let (_, w, h) =
+                layout::spread_layout(&self.spread_sizes(), &self.spread_unshifted_layout());
+            (w, h)
+        } else {
+            let sheet_w = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1);
+            let sheet_h = layout::sheet_height(&self.block_heights, &self.block_layout);
+            (sheet_w, sheet_h)
+        };
         Some(if let Some(bg) = self.block_bg.as_ref() {
             let natural = apply_bg::process::natural_voff(
                 sheet_w,
@@ -811,12 +907,76 @@ impl MaskToolApp {
     fn apply_preview_frame(&mut self, frame: apply_bg::process::PreviewFrame) {
         self.img_w = frame.canvas_w;
         self.img_h = frame.canvas_h;
-        self.block_hoff = frame.hoff;
-        self.block_voff = frame.voff;
         self.block_bg_left = frame.bg_left;
         self.block_bg_top = frame.bg_top;
         self.block_shows_bg = frame.shows_bg;
+        if self.spread {
+            let (pad_x, pad_y) = self.spread_shift_pad();
+            if self.is_block_dragging() {
+                if let Some(pin) = self.spread_drag_pin {
+                    let cs = if pin.content_scale > 0.0001 {
+                        pin.content_scale
+                    } else {
+                        1.0
+                    };
+                    let dx = ((pad_x - pin.pad_x) as f32 * cs).round() as i64;
+                    let dy = ((pad_y - pin.pad_y) as f32 * cs).round() as i64;
+                    // 负坐标被平移进画布时, 谱面原点反向退回同样的量, 另一页才不会跟着挪.
+                    // 缩放和底色居中锁在拖动起点, 避免整页被重新装进页面.
+                    self.block_hoff = pin.hoff - dx;
+                    self.block_voff = pin.voff - dy;
+                    self.content_scale = pin.content_scale;
+                    return;
+                }
+            }
+            let cs = if frame.content_scale > 0.0001 {
+                frame.content_scale
+            } else {
+                1.0
+            };
+            self.block_hoff = frame.hoff - (pad_x as f32 * cs).round() as i64;
+            self.block_voff = frame.voff - (pad_y as f32 * cs).round() as i64;
+            self.content_scale = frame.content_scale;
+            return;
+        }
+        self.block_hoff = frame.hoff;
+        self.block_voff = frame.voff;
         self.content_scale = frame.content_scale;
+    }
+
+    /// 相对「未平移成片」多出来的左/上补齐. 只把某一页拖出成片时为正.
+    /// 画布坐标要减掉它, 没被拖的那一页才不会跟着整张平移.
+    fn spread_shift_pad(&self) -> (i64, i64) {
+        let sizes = self.spread_sizes();
+        let (pad_x, pad_y) = layout::spread_canvas_pad(&sizes, &self.block_layout);
+        let (base_x, base_y) =
+            layout::spread_canvas_pad(&sizes, &self.spread_unshifted_layout());
+        (pad_x - base_x, pad_y - base_y)
+    }
+
+    fn spread_unshifted_layout(&self) -> Vec<BlockAdjust> {
+        let mut base = self.block_layout.clone();
+        for adj in &mut base {
+            adj.shift_x = 0;
+            adj.shift_y = 0;
+        }
+        base
+    }
+
+    /// 记下对开拖动起点的补齐和摆放. 非对开时清掉, 避免谱表拖动误用.
+    fn pin_spread_drag(&mut self) {
+        if !self.spread {
+            self.spread_drag_pin = None;
+            return;
+        }
+        let (pad_x, pad_y) = self.spread_shift_pad();
+        self.spread_drag_pin = Some(SpreadDragPin {
+            pad_x,
+            pad_y,
+            hoff: self.block_hoff,
+            voff: self.block_voff,
+            content_scale: self.content_scale,
+        });
     }
 
     pub(super) fn content_scale_or_1(&self) -> f32 {
@@ -950,9 +1110,53 @@ impl MaskToolApp {
 
     /// 组内各块在当前画布坐标系下 (已叠加 `block_voff` / `content_scale`)
     /// 的纵向范围.
+    fn sync_spread_masks(&mut self, old_layout: &[BlockAdjust]) {
+        let sizes = self.spread_sizes();
+        let deltas = layout::spread_content_shifts(&sizes, old_layout, &self.block_layout);
+        if deltas.is_empty() {
+            return;
+        }
+        let old_boxes = layout::spread_boxes(&sizes, old_layout);
+        for m in &mut self.masks {
+            let target = m
+                .bound_block
+                .as_ref()
+                .filter(|b| self.block_heights.iter().any(|(id, _)| id == *b))
+                .cloned()
+                .or_else(|| {
+                    let cx = (m.x0 + m.x1) as f32 / 2.0;
+                    let cy = (m.y0 + m.y1) as f32 / 2.0;
+                    old_boxes
+                        .iter()
+                        .find(|b| {
+                            cx >= b.x as f32
+                                && cx <= (b.x + b.w) as f32
+                                && cy >= b.y as f32
+                                && cy <= (b.y + b.h) as f32
+                        })
+                        .map(|b| b.region_id.clone())
+                });
+            if let Some(rid) = target {
+                if let Some(&(dx, dy)) = deltas.get(&rid) {
+                    m.translate(dx, dy);
+                }
+            }
+        }
+    }
+
     pub(super) fn block_spans(&self) -> Vec<(String, i64, i64)> {
         let cs = self.content_scale_or_1();
         let voff = self.block_voff as f32;
+        if self.spread {
+            return layout::spread_boxes(&self.spread_sizes(), &self.block_layout)
+                .into_iter()
+                .map(|b| {
+                    let cy0 = voff + (b.y as f32) * cs;
+                    let cy1 = voff + ((b.y + b.h) as f32) * cs - 1.0;
+                    (b.region_id, cy0.round() as i64, cy1.round() as i64)
+                })
+                .collect();
+        }
         layout::compute_spans(&self.block_heights, &self.block_layout)
             .into_iter()
             .map(|(rid, y0, y1)| {
@@ -997,6 +1201,10 @@ impl MaskToolApp {
             return;
         }
         self.ensure_sheet_masks();
+        if self.spread {
+            self.sync_spread_masks(old_layout);
+            return;
+        }
         let deltas =
             layout::block_content_shifts(&self.block_heights, old_layout, &self.block_layout);
         if deltas.is_empty() {
@@ -1059,6 +1267,15 @@ impl MaskToolApp {
     /// 左右裁扩 / `content_scale`). 可以超出页面, 供命中与叠加框使用.
     fn block_canvas_x_range(&self, region_id: &str) -> (f32, f32) {
         let cs = self.content_scale_or_1();
+        if self.spread {
+            if let Some(b) = layout::spread_boxes(&self.spread_sizes(), &self.block_layout)
+                .into_iter()
+                .find(|b| b.region_id == region_id)
+            {
+                let x0 = self.block_hoff as f32 + b.x as f32 * cs;
+                return (x0, x0 + b.w as f32 * cs - 1.0);
+            }
+        }
         let adj = BlockAdjust::find(&self.block_layout, region_id)
             .cloned()
             .unwrap_or_default();
@@ -1080,6 +1297,9 @@ impl MaskToolApp {
     /// 有 `shift_x` 或左右向外扩展的块: 原左右边界 + 块纵向范围, 供蒙版
     /// 界面画裁切示意线 (导出仍按这里截).
     pub(super) fn block_shift_crop_marks(&self) -> Vec<(f32, f32, f32, f32)> {
+        if self.spread {
+            return Vec::new();
+        }
         self.block_spans()
             .into_iter()
             .filter_map(|(rid, y0, y1)| {
@@ -1168,6 +1388,7 @@ impl MaskToolApp {
         }
         self.block_selected = Some(region_id.clone());
         self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+        self.pin_spread_drag();
         self.drag = Some(DragKind::BlockMove {
             region_id,
             start_ix: ix,
@@ -1186,6 +1407,7 @@ impl MaskToolApp {
         self.ensure_layout_entry(&region_id);
         self.block_selected = Some(region_id.clone());
         self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+        self.pin_spread_drag();
         self.drag = Some(DragKind::BlockResizeTop {
             region_id,
             start_iy: iy,
@@ -1203,6 +1425,7 @@ impl MaskToolApp {
         self.ensure_layout_entry(&region_id);
         self.block_selected = Some(region_id.clone());
         self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+        self.pin_spread_drag();
         self.drag = Some(DragKind::BlockResizeBottom {
             region_id,
             start_iy: iy,
@@ -1221,6 +1444,7 @@ impl MaskToolApp {
         self.ensure_layout_entry(&region_id);
         self.block_selected = Some(region_id.clone());
         self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+        self.pin_spread_drag();
         self.drag = Some(DragKind::BlockResizeLeft {
             region_id,
             start_ix: ix,
@@ -1238,6 +1462,7 @@ impl MaskToolApp {
         self.ensure_layout_entry(&region_id);
         self.block_selected = Some(region_id.clone());
         self.block_drag_freeze = Some((self.img_w as f32, self.img_h as f32));
+        self.pin_spread_drag();
         self.drag = Some(DragKind::BlockResizeRight {
             region_id,
             start_ix: ix,
@@ -1265,6 +1490,9 @@ impl MaskToolApp {
         ix: f32,
         iy: f32,
     ) -> (bool, bool) {
+        if self.spread {
+            return self.apply_spread_move(region_id, start_ix, start_iy, start_layout, undid, ix, iy);
+        }
         if horizontal {
             return self.apply_block_shift_x_drag(region_id, start_ix, start_layout, undid, ix);
         }
@@ -1296,6 +1524,105 @@ impl MaskToolApp {
         let old_layout = self.block_layout.clone();
         self.block_layout = r.layout;
         self.voff_target = new_voff_target;
+        self.sync_masks_to_block_shift(&old_layout);
+        self.refresh_preview_geom();
+        (undid, true)
+    }
+
+    fn apply_spread_move(
+        &mut self,
+        region_id: &str,
+        start_ix: f32,
+        start_iy: f32,
+        start_layout: &[BlockAdjust],
+        undid: bool,
+        ix: f32,
+        iy: f32,
+    ) -> (bool, bool) {
+        let cs = self.content_scale_or_1();
+        let dx = ((ix - start_ix) / cs).round() as i32;
+        let dy = ((iy - start_iy) / cs).round() as i32;
+        if dx == 0 && dy == 0 {
+            return (undid, false);
+        }
+        // 每页只相对自己的槽位平移. 对称时另一页走相反的量; 关掉时
+        // 不动另一页. 向外可滑出成片, 直到只剩一条边; 往对面拖则停在对侧.
+        let partner = if self.spread_mirror_x {
+            self.spread_partner(region_id)
+        } else {
+            None
+        };
+        let mut layout = layout::apply_spread_drag(
+            &self.spread_sizes(),
+            start_layout,
+            region_id,
+            dx,
+            dy,
+            partner.as_deref(),
+            snap_zero,
+        );
+        layout = layout::clamp_spread_shift_y(&self.spread_sizes(), &layout);
+        if layout == self.block_layout {
+            return (undid, false);
+        }
+        let mut undid = undid;
+        if !undid {
+            self.push_undo();
+            undid = true;
+        }
+        let old_layout = self.block_layout.clone();
+        self.block_layout = layout;
+        self.sync_masks_to_block_shift(&old_layout);
+        self.refresh_preview_geom();
+        (undid, true)
+    }
+
+    /// 对开上下边: 只改 `extra_top` / `extra_bottom`, 不吃块间空白.
+    fn apply_spread_resize_y(
+        &mut self,
+        region_id: &str,
+        start_iy: f32,
+        start_layout: &[BlockAdjust],
+        top: bool,
+        max_trim: i32,
+        undid: bool,
+        iy: f32,
+    ) -> (bool, bool) {
+        let cs = self.content_scale_or_1();
+        let mouse = ((iy - start_iy) / cs).round() as i32;
+        if mouse == 0 {
+            return (undid, false);
+        }
+        let delta = if top { -mouse } else { mouse };
+        let mut layout = start_layout.to_vec();
+        let start = BlockAdjust::find(&layout, region_id)
+            .map(|a| if top { a.extra_top } else { a.extra_bottom })
+            .unwrap_or(0);
+        let new_v = snap_zero(start + delta).max(-max_trim.max(0));
+        if let Some(a) = layout.iter_mut().find(|a| a.region_id == region_id) {
+            if top {
+                a.extra_top = new_v;
+            } else {
+                a.extra_bottom = new_v;
+            }
+        } else {
+            layout.push(BlockAdjust {
+                region_id: region_id.to_string(),
+                extra_top: if top { new_v } else { 0 },
+                extra_bottom: if top { 0 } else { new_v },
+                ..Default::default()
+            });
+        }
+        if layout == self.block_layout {
+            return (undid, false);
+        }
+        let mut undid = undid;
+        if !undid {
+            self.push_undo();
+            undid = true;
+        }
+        let old_layout = self.block_layout.clone();
+        self.block_layout = layout;
         self.sync_masks_to_block_shift(&old_layout);
         self.refresh_preview_geom();
         (undid, true)
@@ -1348,6 +1675,17 @@ impl MaskToolApp {
         undid: bool,
         iy: f32,
     ) -> (bool, bool) {
+        if self.spread {
+            return self.apply_spread_resize_y(
+                region_id,
+                start_iy,
+                start_layout,
+                true,
+                max_trim,
+                undid,
+                iy,
+            );
+        }
         let cs = self.content_scale_or_1();
         let raw_delta = ((start_iy - iy) / cs).round() as i32;
         if raw_delta == 0 {
@@ -1406,6 +1744,17 @@ impl MaskToolApp {
         undid: bool,
         iy: f32,
     ) -> (bool, bool) {
+        if self.spread {
+            return self.apply_spread_resize_y(
+                region_id,
+                start_iy,
+                start_layout,
+                false,
+                max_trim,
+                undid,
+                iy,
+            );
+        }
         let cs = self.content_scale_or_1();
         let delta = ((iy - start_iy) / cs).round() as i32;
         if delta == 0 {

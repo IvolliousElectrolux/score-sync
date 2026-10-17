@@ -217,12 +217,23 @@ impl ScoreSyncApp {
                 } else {
                     ""
                 };
-                let label = format!(
-                    "{}. P{} {}  h={h}{edited}  拼合 y={comp_y0}-{comp_y1}",
-                    i + 1,
-                    pi + 1,
-                    r.kind,
-                );
+                let label = if self.doc.is_spread() {
+                    let side = if i == 0 { "左页" } else { "右页" };
+                    let ident = self
+                        .doc
+                        .pages
+                        .get(pi)
+                        .map(|p| p.spread_caption().0)
+                        .unwrap_or_else(|| format!("P{}", pi + 1));
+                    format!("{side}  {ident}{edited}")
+                } else {
+                    format!(
+                        "{}. P{} {}  h={h}{edited}  拼合 y={comp_y0}-{comp_y1}",
+                        i + 1,
+                        pi + 1,
+                        r.kind,
+                    )
+                };
                 Some(ListRow {
                     id: rid.clone(),
                     label: label.into(),
@@ -780,6 +791,18 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn side_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.doc.is_spread() {
+            return div()
+                .id("side")
+                .w_full()
+                .h_full()
+                .p_3()
+                .bg(rgb(0xf1f5f9))
+                .text_sm()
+                .text_color(rgb(0x64748b))
+                .child("点一册对开后, 到「蒙版」编辑这一对. 缩略图下是这一页自己的文件名, 拖动换位后仍然认得出来.")
+                .into_any_element();
+        }
         let region_rows = self.region_list_rows();
         let (g_start, g_end) = self.visible_group_range();
         let group_n = self.doc.groups.len();
@@ -1420,6 +1443,6 @@ impl ScoreSyncApp {
                     ),
             ),
         );
-        panel
+        panel.into_any_element()
     }
 }

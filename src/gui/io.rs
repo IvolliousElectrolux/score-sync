@@ -80,7 +80,10 @@ impl ScoreSyncApp {
                 cx.notify();
             }
             Some(
-                DialogKind::Info { .. } | DialogKind::Help | DialogKind::UpdateAvailable { .. },
+                DialogKind::Info { .. }
+                | DialogKind::Help
+                | DialogKind::SwitchLayout { .. }
+                | DialogKind::UpdateAvailable { .. },
             ) => {
                 self.dismiss_dialog(cx);
             }
@@ -588,9 +591,17 @@ impl ScoreSyncApp {
                             m.set_guide_prefs(g_global, g_sync);
                             m.set_preview_only(false);
                         });
+                        view.spread_selected.clear();
+                        view.spread_anchor = None;
+                        view.spread_clip.clear();
+                        view.spread_drag = None;
+                        view.spread_menu = None;
                         view.refresh_render(cx);
                         view.sync_bg_ui_from_doc(cx);
                         view.start_hydrate_all(false, cx);
+                        if view.doc.is_spread() {
+                            view.request_organize_thumbs(cx);
+                        }
                         view.status = format!(
                             "已打开工程: {} ({} 页, {} 组)",
                             path.file_name()
@@ -680,6 +691,11 @@ impl ScoreSyncApp {
         self.video_pool_dirty.clear();
         self.drag = None;
         self.dialog = None;
+        self.spread_selected.clear();
+        self.spread_anchor = None;
+        self.spread_clip.clear();
+        self.spread_drag = None;
+        self.spread_menu = None;
         self.tab_menu = None;
         self.param_edit = None;
         self.region_y_edit = None;
