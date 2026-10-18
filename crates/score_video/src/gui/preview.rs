@@ -11,7 +11,7 @@ impl ScoreVideoApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if primary { rgb(0x93c5fd) } else { rgb(0xcbd5e1) };
+        let fg = if primary { rgb(0x93c5fd) } else { ui_kit::chrome(0xcbd5e1) };
         div()
             .id(id)
             .px_2()
@@ -19,14 +19,14 @@ impl ScoreVideoApp {
             .flex()
             .items_center()
             .when(primary, |d| {
-                d.bg(rgb(0x334155))
+                d.bg(ui_kit::chrome(0x334155))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| s.bg(rgb(0x334155)))
+            .hover(move |s| s.bg(ui_kit::chrome(0x334155)))
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -49,54 +49,61 @@ impl ScoreVideoApp {
             .h(px(28.))
             .min_w(px(0.))
             .overflow_x_scroll()
-            .bg(rgb(0x1e293b))
+            .bg(ui_kit::chrome(0x1e293b))
             .border_b_1()
-            .border_color(rgb(0x0f172a))
+            .border_color(ui_kit::chrome(0x0f172a))
             .child(self.btn(
                 "sv_play",
-                if playing { "暂停 (空格)" } else { "播放 (空格)" },
+                ui_kit::menu_label(
+                    if playing {
+                        ui_kit::t_src("暂停")
+                    } else {
+                        ui_kit::t_src("播放")
+                    },
+                    "video.play",
+                ),
                 true,
                 |this, _, cx| this.play_pause(cx),
                 cx,
             ))
             .child(self.btn(
                 "sv_insert_next",
-                "插入下一张 (N)",
+                ui_kit::menu_label(ui_kit::t("video.insert"), "video.insert"),
                 false,
                 |this, _, cx| this.insert_next(cx),
                 cx,
             ))
             .child(self.btn(
                 "sv_insert_wipe",
-                "刷入下一张 (W)",
+                ui_kit::menu_label(ui_kit::t("video.wipe"), "video.wipe"),
                 false,
                 |this, _, cx| this.insert_next_wipe(cx),
                 cx,
             ))
             .child(self.btn(
                 "sv_fade_in",
-                "标记淡入 (I)",
+                ui_kit::menu_label(ui_kit::t("video.fade_in"), "video.fade_in"),
                 false,
                 |this, _, cx| this.mark_fade_in(cx),
                 cx,
             ))
             .child(self.btn(
                 "sv_fade_out",
-                "标记淡出 (O)",
+                ui_kit::menu_label(ui_kit::t("video.fade_out"), "video.fade_out"),
                 false,
                 |this, _, cx| this.mark_fade_out(cx),
                 cx,
             ))
             .child(self.btn(
                 "sv_delete",
-                "删除选中 (Del)",
+                ui_kit::menu_label(ui_kit::t("video.delete"), "video.delete"),
                 false,
                 |this, _, cx| this.delete_selected(cx),
                 cx,
             ))
             .child(self.btn(
                 "sv_import_audio",
-                "导入音频",
+                ui_kit::t_src("导入音频"),
                 false,
                 |this, _, cx| this.import_audio(cx),
                 cx,
@@ -111,7 +118,7 @@ impl ScoreVideoApp {
                 } else {
                     "分割音频".into()
                 };
-                let fg = if armed { rgb(0x93c5fd) } else { rgb(0xcbd5e1) };
+                let fg = if armed { rgb(0x93c5fd) } else { ui_kit::chrome(0xcbd5e1) };
                 div()
                     .id("sv_split_audio")
                     .px_2()
@@ -119,14 +126,14 @@ impl ScoreVideoApp {
                     .flex()
                     .items_center()
                     .when(armed, |d| {
-                        d.bg(rgb(0x334155))
+                        d.bg(ui_kit::chrome(0x334155))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                     })
                     .text_color(fg)
                     .text_xs()
                     .whitespace_nowrap()
                     .cursor_pointer()
-                    .hover(move |s| s.bg(rgb(0x334155)))
+                    .hover(move |s| s.bg(ui_kit::chrome(0x334155)))
                     .child(label)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -145,7 +152,7 @@ impl ScoreVideoApp {
                     .items_center()
                     .px_2()
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(ui_kit::chrome(0x94a3b8))
                     .whitespace_nowrap()
                     .child(time_label),
             )
@@ -154,7 +161,7 @@ impl ScoreVideoApp {
     fn speed_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let label: SharedString = fmt_speed(self.audio.speed()).into();
         let open = self.speed_menu_open;
-        let fg = if open { rgb(0x93c5fd) } else { rgb(0xcbd5e1) };
+        let fg = if open { rgb(0x93c5fd) } else { ui_kit::chrome(0xcbd5e1) };
         let entity = cx.entity().clone();
         // padding 放内层, 避免测量 canvas 与可视按钮差出左右内边距 (蒙版色块同款).
         div()
@@ -165,13 +172,13 @@ impl ScoreVideoApp {
             .flex()
             .items_center()
             .when(open, |d| {
-                d.bg(rgb(0x334155))
+                d.bg(ui_kit::chrome(0x334155))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .cursor_pointer()
-            .hover(move |s| s.bg(rgb(0x334155)))
+            .hover(move |s| s.bg(ui_kit::chrome(0x334155)))
             .child(div().px_2().child(label))
             .child(
                 canvas(
@@ -283,7 +290,7 @@ impl ScoreVideoApp {
                         }
                         builder.close();
                         if let Ok(path) = builder.build() {
-                            window.paint_path(path, rgb(0x1e293b));
+                            window.paint_path(path, ui_kit::chrome(0x1e293b));
                         }
                     }
                 })
@@ -306,9 +313,9 @@ impl ScoreVideoApp {
             .w_full()
             .py_1()
             .rounded_md()
-            .bg(rgb(0x1e293b))
+            .bg(ui_kit::chrome(0x1e293b))
             .border_1()
-            .border_color(rgb(0x334155));
+            .border_color(ui_kit::chrome(0x334155));
         for &speed in PLAYBACK_SPEEDS {
             let selected = (speed - current).abs() < 1e-3;
             let label: SharedString = if selected {
@@ -323,8 +330,8 @@ impl ScoreVideoApp {
                     .py_1()
                     .cursor_pointer()
                     .text_xs()
-                    .text_color(rgb(0xf1f5f9))
-                    .hover(|s| s.bg(rgb(0x334155)))
+                    .text_color(ui_kit::chrome(0xf1f5f9))
+                    .hover(|s| s.bg(ui_kit::chrome(0x334155)))
                     .child(label)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -527,7 +534,7 @@ impl ScoreVideoApp {
                     .left_0()
                     .w_full()
                     .h(px(BAR_H))
-                    .bg(rgb(0x1e293b))
+                    .bg(ui_kit::chrome(0x1e293b))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -540,7 +547,7 @@ impl ScoreVideoApp {
                     .child(
                         div()
                             .h_full()
-                            .bg(rgb(0x3b82f6))
+                            .bg(ui_kit::chrome(0x3b82f6))
                             .w(gpui::relative(progress.clamp(0.0, 1.0))),
                     ),
             )
@@ -558,7 +565,7 @@ impl ScoreVideoApp {
             .size_full()
             .min_h(px(0.))
             .bg(rgb(0x0b1220))
-            .text_color(rgb(0xe2e8f0))
+            .text_color(ui_kit::chrome(0xe2e8f0))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 let x = f32::from(ev.position.x);
                 let y = f32::from(ev.position.y);

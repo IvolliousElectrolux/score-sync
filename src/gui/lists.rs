@@ -466,11 +466,11 @@ impl ScoreSyncApp {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0xffffff))
+            .bg(ui_kit::card())
             .text_color(rgb(color))
             .text_sm()
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .whitespace_nowrap()
             .child(label)
             .into_any_element()
@@ -507,11 +507,11 @@ impl ScoreSyncApp {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::card())
+            .text_color(ui_kit::chrome(0x0f172a))
             .text_xs()
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .whitespace_nowrap()
             .child(label)
             .into_any_element()
@@ -620,7 +620,7 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .relative()
                     .rounded_sm()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -656,8 +656,8 @@ impl ScoreSyncApp {
                             .w_full()
                             .h(px(thumb_h))
                             .rounded_sm()
-                            .bg(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x64748b)))
+                            .bg(ui_kit::chrome(0x94a3b8))
+                            .hover(|s| s.bg(ui_kit::chrome(0x64748b)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -715,7 +715,7 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .relative()
                     .rounded_sm()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -751,8 +751,8 @@ impl ScoreSyncApp {
                             .h_full()
                             .w(px(thumb_w))
                             .rounded_sm()
-                            .bg(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x64748b)))
+                            .bg(ui_kit::chrome(0x94a3b8))
+                            .hover(|s| s.bg(ui_kit::chrome(0x64748b)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -797,9 +797,9 @@ impl ScoreSyncApp {
                 .w_full()
                 .h_full()
                 .p_3()
-                .bg(rgb(0xf1f5f9))
+                .bg(ui_kit::chrome(0xf1f5f9))
                 .text_sm()
-                .text_color(rgb(0x64748b))
+                .text_color(ui_kit::chrome(0x64748b))
                 .child("点一册对开后, 到「蒙版」编辑这一对. 缩略图下是这一页自己的文件名, 拖动换位后仍然认得出来.")
                 .into_any_element();
         }
@@ -820,7 +820,7 @@ impl ScoreSyncApp {
             .flex_col()
             .gap_2()
             .p_3()
-            .bg(rgb(0xf1f5f9))
+            .bg(ui_kit::chrome(0xf1f5f9))
             .child(
                 div()
                     .id("region_fold")
@@ -860,17 +860,17 @@ impl ScoreSyncApp {
                 .flex_col()
                 .gap_1()
                 .border_1()
-                .border_color(rgb(0xcbd5e1))
+                .border_color(ui_kit::chrome(0xcbd5e1))
                 .rounded_md()
                 .p_1()
-                .bg(rgb(0xffffff));
+                .bg(ui_kit::card());
             for row in region_rows {
                 let rid = row.id.clone();
                 let rid_sel = row.id.clone();
                 let rid_edit = row.id.clone();
                 let editing = editing_rid.as_ref() == Some(&row.id);
                 let bg = if row.selected {
-                    rgb(0xdbeafe)
+                    ui_kit::chrome(0xdbeafe)
                 } else {
                     rgb(0xffffff)
                 };
@@ -942,7 +942,7 @@ impl ScoreSyncApp {
                                 .whitespace_nowrap()
                                 .px_1()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                                .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)).rounded_sm())
                                 .child(y_label)
                                 .on_mouse_up(
                                     MouseButton::Left,
@@ -998,10 +998,10 @@ impl ScoreSyncApp {
             .flex_col()
             .gap_1()
             .border_1()
-            .border_color(rgb(0xcbd5e1))
+            .border_color(ui_kit::chrome(0xcbd5e1))
             .rounded_md()
             .p_1()
-            .bg(rgb(0xffffff))
+            .bg(ui_kit::card())
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
         let group_moving: HashSet<usize> = match &self.drag {
             Some(DragKind::GroupReorder {
@@ -1032,7 +1032,7 @@ impl ScoreSyncApp {
             let dragging = group_moving.contains(&idx);
             let show_line = group_line_at == Some(idx);
             let bg = if row.selected {
-                rgb(0xdbeafe)
+                ui_kit::chrome(0xdbeafe)
             } else {
                 rgb(0xffffff)
             };
@@ -1045,16 +1045,16 @@ impl ScoreSyncApp {
                     .rounded_sm()
                     .bg(bg)
                     .text_xs()
-                    .text_color(rgb(0x0f172a))
+                    .text_color(ui_kit::chrome(0x0f172a))
                     .cursor_pointer()
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .when(dragging, |d| d.opacity(0.35))
                     .when(show_line && !group_line_after, |d| {
-                        d.border_t_2().border_color(rgb(0xf59e0b))
+                        d.border_t_2().border_color(ui_kit::chrome(0xf59e0b))
                     })
                     .when(show_line && group_line_after, |d| {
-                        d.border_b_2().border_color(rgb(0xf59e0b))
+                        d.border_b_2().border_color(ui_kit::chrome(0xf59e0b))
                     })
                     .child(Self::measure_item_bounds(cx.entity(), idx, "group"))
                     .child(row.label.clone())
@@ -1162,10 +1162,10 @@ impl ScoreSyncApp {
             .flex_col()
             .gap_1()
             .border_1()
-            .border_color(rgb(0xcbd5e1))
+            .border_color(ui_kit::chrome(0xcbd5e1))
             .rounded_md()
             .p_1()
-            .bg(rgb(0xffffff));
+            .bg(ui_kit::card());
         let drag_from = match &self.drag {
             Some(DragKind::MemberReorder {
                 from, armed: true, ..
@@ -1193,7 +1193,7 @@ impl ScoreSyncApp {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .text_sm()
                     .text_color(rgb(row.color))
                     .cursor_pointer()
@@ -1201,10 +1201,10 @@ impl ScoreSyncApp {
                     .whitespace_nowrap()
                     .when(dragging, |d| d.opacity(0.35))
                     .when(show_line && !line_after, |d| {
-                        d.border_t_2().border_color(rgb(0xf59e0b))
+                        d.border_t_2().border_color(ui_kit::chrome(0xf59e0b))
                     })
                     .when(show_line && line_after, |d| {
-                        d.border_b_2().border_color(rgb(0xf59e0b))
+                        d.border_b_2().border_color(ui_kit::chrome(0xf59e0b))
                     })
                     .child(Self::measure_item_bounds(cx.entity(), idx, "member"))
                     .child(row.label.clone())
@@ -1306,7 +1306,7 @@ impl ScoreSyncApp {
                         div()
                             .id("margin_dec")
                             .px_2()
-                            .bg(rgb(0xe2e8f0))
+                            .bg(ui_kit::chrome(0xe2e8f0))
                             .rounded_sm()
                             .cursor_pointer()
                             .child("-")
@@ -1342,7 +1342,7 @@ impl ScoreSyncApp {
                             .whitespace_nowrap()
                             .px_1()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                            .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)).rounded_sm())
                             .child(format!("{margin}"))
                             .on_mouse_up(
                                 MouseButton::Left,
@@ -1356,7 +1356,7 @@ impl ScoreSyncApp {
                         div()
                             .id("margin_inc")
                             .px_2()
-                            .bg(rgb(0xe2e8f0))
+                            .bg(ui_kit::chrome(0xe2e8f0))
                             .rounded_sm()
                             .cursor_pointer()
                             .child("+")
@@ -1376,7 +1376,7 @@ impl ScoreSyncApp {
                         div()
                             .id("thr_dec")
                             .px_2()
-                            .bg(rgb(0xe2e8f0))
+                            .bg(ui_kit::chrome(0xe2e8f0))
                             .rounded_sm()
                             .cursor_pointer()
                             .child("-")
@@ -1412,7 +1412,7 @@ impl ScoreSyncApp {
                             .whitespace_nowrap()
                             .px_1()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xe2e8f0)).rounded_sm())
+                            .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)).rounded_sm())
                             .child(format!("{thr}"))
                             .on_mouse_up(
                                 MouseButton::Left,
@@ -1426,7 +1426,7 @@ impl ScoreSyncApp {
                         div()
                             .id("thr_inc")
                             .px_2()
-                            .bg(rgb(0xe2e8f0))
+                            .bg(ui_kit::chrome(0xe2e8f0))
                             .rounded_sm()
                             .cursor_pointer()
                             .child("+")

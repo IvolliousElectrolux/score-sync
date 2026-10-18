@@ -678,15 +678,15 @@ impl Render for MaskToolApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0xf8fafc))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::chrome(0xf8fafc))
+            .text_color(ui_kit::chrome(0x0f172a))
             .font_family(apply_bg::ui_font())
             .child(
                 div()
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(0xcbd5e1))
+                    .border_color(ui_kit::chrome(0xcbd5e1))
                     .child(
                         div()
                             .text_lg()
@@ -709,6 +709,7 @@ impl Render for MaskToolApp {
 
 pub fn run_gui(initial: Option<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
+        ui_kit::load_prefs_from_disk();
         cx.bind_keys([
             KeyBinding::new("e", ExportImage, Some("MaskTool")),
             KeyBinding::new("f", FitView, Some("MaskTool")),

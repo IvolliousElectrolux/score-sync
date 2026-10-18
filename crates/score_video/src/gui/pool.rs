@@ -32,12 +32,12 @@ impl ScoreVideoApp {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .when(expanded, |s| s.bg(rgb(0x334155)))
-                        .when(!expanded, |s| s.bg(rgb(0x1e293b)))
-                        .text_color(rgb(0xe2e8f0))
+                        .when(expanded, |s| s.bg(ui_kit::chrome(0x334155)))
+                        .when(!expanded, |s| s.bg(ui_kit::chrome(0x1e293b)))
+                        .text_color(ui_kit::chrome(0xe2e8f0))
                         .text_xs()
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0x334155)))
+                        .hover(|s| s.bg(ui_kit::chrome(0x334155)))
                         .child(item.label.clone())
                         .on_mouse_down(
                             MouseButton::Left,
@@ -130,7 +130,7 @@ impl ScoreVideoApp {
                     .flex_shrink_0()
                     .relative()
                     .rounded_sm()
-                    .bg(rgb(0x1e293b))
+                    .bg(ui_kit::chrome(0x1e293b))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -161,8 +161,8 @@ impl ScoreVideoApp {
                             .w_full()
                             .h(px(thumb_h))
                             .rounded_sm()
-                            .bg(rgb(0x475569))
-                            .hover(|s| s.bg(rgb(0x64748b)))
+                            .bg(ui_kit::chrome(0x475569))
+                            .hover(|s| s.bg(ui_kit::chrome(0x64748b)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -201,8 +201,8 @@ impl ScoreVideoApp {
             .flex_col()
             .size_full()
             .min_h(px(0.))
-            .bg(rgb(0x0f172a))
-            .text_color(rgb(0xe2e8f0))
+            .bg(ui_kit::chrome(0x0f172a))
+            .text_color(ui_kit::chrome(0xe2e8f0))
             .child(
                 div()
                     .flex_shrink_0()
@@ -210,7 +210,7 @@ impl ScoreVideoApp {
                     .py_1()
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xcbd5e1))
+                    .text_color(ui_kit::chrome(0xcbd5e1))
                     .child(if self.pool_status.is_empty() {
                         format!("素材池 ({} 个输出组合, 可拖入视频轨道)", self.pool.len())
                     } else {
@@ -227,7 +227,7 @@ impl ScoreVideoApp {
                     .flex_shrink_0()
                     .p_2()
                     .border_t_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(ui_kit::chrome(0x1e293b))
                     .child(self.btn(
                         "sv_export",
                         "导出视频...",

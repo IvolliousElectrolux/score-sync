@@ -140,7 +140,7 @@ impl VectorEditApp {
                                 bounds,
                                 &xform,
                                 Rect::new(sx, sy, sx + nw, sy + nh),
-                                rgb(0x2563eb),
+                                ui_kit::chrome(0x2563eb),
                             );
                         }
                         if let Some((tex, x, y, w, h)) = &sel {
@@ -162,7 +162,7 @@ impl VectorEditApp {
                                 bounds,
                                 &xform,
                                 Rect::new(0.0, 0.0, cw, ch),
-                                rgb(0x64748b),
+                                ui_kit::chrome(0x64748b),
                             );
                             if let Some(edge) = hover_edge {
                                 paint_edge(window, bounds, &xform, edge, cw, ch);
@@ -193,9 +193,9 @@ impl VectorEditApp {
                                 frame.y0 = oy + (frame.y0 - oy) * sy;
                                 frame.y1 = oy + (frame.y1 - oy) * sy;
                             }
-                            paint_rect_outline(window, bounds, &xform, frame, rgb(0x2563eb));
+                            paint_rect_outline(window, bounds, &xform, frame, ui_kit::chrome(0x2563eb));
                             for (hx, hy) in tools::handle_points(frame) {
-                                paint_handle(window, bounds, &xform, hx, hy, rgb(0x2563eb));
+                                paint_handle(window, bounds, &xform, hx, hy, ui_kit::chrome(0x2563eb));
                             }
                             let rot = (frame.cx(), frame.y0 - 14.0 / xform.scale.max(0.2));
                             paint_handle(window, bounds, &xform, rot.0, rot.1, rgb(0x16a34a));
@@ -213,9 +213,9 @@ impl VectorEditApp {
                                     b.y0 += sel_off.1;
                                     b.y1 += sel_off.1;
                                 }
-                                paint_rect_outline(window, bounds, &xform, b, rgb(0x2563eb));
+                                paint_rect_outline(window, bounds, &xform, b, ui_kit::chrome(0x2563eb));
                                 for (hx, hy) in tools::handle_points(b) {
-                                    paint_handle(window, bounds, &xform, hx, hy, rgb(0x2563eb));
+                                    paint_handle(window, bounds, &xform, hx, hy, ui_kit::chrome(0x2563eb));
                                 }
                                 let rot = (b.cx(), b.y0 - 14.0 / xform.scale.max(0.2));
                                 paint_handle(window, bounds, &xform, rot.0, rot.1, rgb(0x16a34a));
@@ -1406,7 +1406,7 @@ fn paint_selection_edges(
         match &obj.kind {
             crate::document::ObjKind::Path(path) => {
                 paint_mapped_subs(window, view, xform, &path.subpaths, &map, px(3.0), rgb(0xffffff));
-                paint_mapped_subs(window, view, xform, &path.subpaths, &map, px(1.25), rgb(0x2563eb));
+                paint_mapped_subs(window, view, xform, &path.subpaths, &map, px(1.25), ui_kit::chrome(0x2563eb));
             }
             _ => {
                 if let Some(b) = obj.bounds() {
@@ -1414,7 +1414,7 @@ fn paint_selection_edges(
                     let (x1, y1) = map(b.x1, b.y1);
                     let r = Rect::new(x0, y0, x1, y1);
                     paint_rect_outline_w(window, view, xform, r, px(3.0), rgb(0xffffff));
-                    paint_rect_outline_w(window, view, xform, r, px(1.25), rgb(0x2563eb));
+                    paint_rect_outline_w(window, view, xform, r, px(1.25), ui_kit::chrome(0x2563eb));
                 }
             }
         }
@@ -1604,12 +1604,12 @@ fn paint_nodes(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, o
                     (e.0 - st.0).hypot(e.1 - st.1) < 0.5
                 });
             if !skip {
-                paint_handle(window, view, xform, st.0, st.1, rgb(0x2563eb));
+                paint_handle(window, view, xform, st.0, st.1, ui_kit::chrome(0x2563eb));
             }
         }
         for seg in &sub.segs {
             let end = seg.end();
-            paint_handle(window, view, xform, end.0, end.1, rgb(0x2563eb));
+            paint_handle(window, view, xform, end.0, end.1, ui_kit::chrome(0x2563eb));
             if let crate::document::Seg::Cubic { p0, p1, p2, p3 } = seg {
                 if (p1.0 - p0.0).hypot(p1.1 - p0.1) > 0.6 {
                     paint_seg(window, view, xform, *p0, *p1);
@@ -1653,7 +1653,7 @@ fn paint_pen(
         if closing && i == 0 {
             paint_handle_sized(window, view, xform, n.p.0, n.p.1, 5.0, rgb(0x16a34a));
         } else {
-            paint_handle(window, view, xform, n.p.0, n.p.1, rgb(0x2563eb));
+            paint_handle(window, view, xform, n.p.0, n.p.1, ui_kit::chrome(0x2563eb));
         }
         if let Some(h) = n.hin {
             paint_seg(window, view, xform, n.p, h);
@@ -1714,7 +1714,7 @@ fn paint_edge(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, ed
     let (x, y) = xform.doc_to_screen(b.0, b.1);
     path.line_to(point(view.origin.x + px(x), view.origin.y + px(y)));
     if let Ok(path) = path.build() {
-        window.paint_path(path, rgb(0x2563eb));
+        window.paint_path(path, ui_kit::chrome(0x2563eb));
     }
 }
 

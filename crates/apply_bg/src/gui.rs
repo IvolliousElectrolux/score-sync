@@ -195,7 +195,7 @@ impl ApplyBgApp {
                     .w(px(480.))
                     .max_h(px(420.))
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .p_4()
                     .flex()
                     .flex_col()
@@ -213,7 +213,7 @@ impl ApplyBgApp {
                             .flex_shrink_0()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x0f172a))
+                            .text_color(ui_kit::chrome(0x0f172a))
                             .child(title),
                     )
                     .child(
@@ -224,7 +224,7 @@ impl ApplyBgApp {
                             .max_h(px(280.))
                             .overflow_scroll()
                             .text_sm()
-                            .text_color(rgb(0x334155))
+                            .text_color(ui_kit::chrome(0x334155))
                             .whitespace_normal()
                             .child(body),
                     )
@@ -235,11 +235,11 @@ impl ApplyBgApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(0x2563eb))
+                            .bg(ui_kit::chrome(0x2563eb))
                             .text_color(rgb(0xffffff))
                             .text_sm()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x1d4ed8)))
+                            .hover(|s| s.bg(ui_kit::chrome(0x1d4ed8)))
                             .child("确定")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -278,7 +278,7 @@ impl ApplyBgApp {
                 div()
                     .w(px(48.))
                     .flex_shrink_0()
-                    .text_color(rgb(0x334155))
+                    .text_color(ui_kit::chrome(0x334155))
                     .child(label),
             )
             .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(input))
@@ -297,11 +297,11 @@ impl ApplyBgApp {
             .items_center()
             .gap_2()
             .w_full()
-            .child(div().w(px(48.)).text_color(rgb(0x334155)).child("比例"))
+            .child(div().w(px(48.)).text_color(ui_kit::chrome(0x334155)).child("比例"))
             .child(div().w(px(96.)).child(self.aspect_w_input.clone()))
-            .child(div().text_color(rgb(0x64748b)).child(":"))
+            .child(div().text_color(ui_kit::chrome(0x64748b)).child(":"))
             .child(div().w(px(96.)).child(self.aspect_h_input.clone()))
-            .child(div().text_sm().text_color(rgb(0x94a3b8)).child("(宽:高)"))
+            .child(div().text_sm().text_color(ui_kit::chrome(0x94a3b8)).child("(宽:高)"))
             .child(div().flex_1())
             .child(self.btn("aspect_reset", "恢复默认", Self::reset_aspect, cx))
     }
@@ -318,13 +318,13 @@ impl ApplyBgApp {
             .px_3()
             .py_1()
             .rounded_md()
-            .bg(rgb(0xe2e8f0))
+            .bg(ui_kit::chrome(0xe2e8f0))
             .border_1()
-            .border_color(rgb(0x94a3b8))
-            .text_color(rgb(0x0f172a))
+            .border_color(ui_kit::chrome(0x94a3b8))
+            .text_color(ui_kit::chrome(0x0f172a))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xcbd5e1)))
-            .active(|s| s.bg(rgb(0x94a3b8)))
+            .hover(|s| s.bg(ui_kit::chrome(0xcbd5e1)))
+            .active(|s| s.bg(ui_kit::chrome(0x94a3b8)))
             .child(label)
             .on_mouse_down(
                 MouseButton::Left,
@@ -361,14 +361,14 @@ impl ApplyBgApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let bg = if enabled {
-            rgb(0x2563eb)
+            ui_kit::chrome(0x2563eb)
         } else {
-            rgb(0x94a3b8)
+            ui_kit::chrome(0x94a3b8)
         };
         let hover = if enabled {
-            rgb(0x1d4ed8)
+            ui_kit::chrome(0x1d4ed8)
         } else {
-            rgb(0x94a3b8)
+            ui_kit::chrome(0x94a3b8)
         };
         div()
             .id("run")
@@ -755,20 +755,20 @@ impl ApplyBgApp {
                     .w_full()
                     .h(px(10.))
                     .rounded_full()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .overflow_hidden()
                     .child(
                         div()
                             .h_full()
                             .w(relative(fraction))
-                            .bg(rgb(0x2563eb))
+                            .bg(ui_kit::chrome(0x2563eb))
                             .rounded_full(),
                     ),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x334155))
+                    .text_color(ui_kit::chrome(0x334155))
                     .child(self.status.clone()),
             )
             .child(div().flex().justify_end().child(self.primary_btn(
@@ -792,8 +792,8 @@ impl Render for ApplyBgApp {
             .flex_col()
             .size_full()
             .relative()
-            .bg(rgb(0xf8fafc))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::chrome(0xf8fafc))
+            .text_color(ui_kit::chrome(0x0f172a))
             .font_family(crate::ui_font())
             .child(self.panel(cx))
             .child(overlay)
@@ -802,6 +802,7 @@ impl Render for ApplyBgApp {
 
 pub fn run_gui() {
     Application::new().run(|cx: &mut App| {
+        ui_kit::load_prefs_from_disk();
         text_input::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(820.), px(430.)), cx);
         cx.open_window(

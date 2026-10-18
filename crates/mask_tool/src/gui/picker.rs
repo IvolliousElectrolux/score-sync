@@ -149,7 +149,7 @@ impl MaskToolApp {
                     }
                     builder.close();
                     if let Ok(path) = builder.build() {
-                        window.paint_path(path, rgb(0x1e293b));
+                        window.paint_path(path, ui_kit::chrome(0x1e293b));
                     }
                 }
             })

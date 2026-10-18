@@ -12,7 +12,7 @@ use smallvec::smallvec;
 use super::*;
 
 pub(crate) fn eyedropper_icon(active: bool) -> impl IntoElement {
-    let stroke = if active { rgb(0xf8fafc) } else { rgb(0xe2e8f0) };
+    let stroke = if active { ui_kit::chrome(0xf8fafc) } else { ui_kit::chrome(0xe2e8f0) };
     div().size(px(14.)).flex_shrink_0().child(
         canvas(|_, _, _| {}, {
             move |bounds, _, window, _| {
@@ -178,7 +178,7 @@ impl PhotoEditApp {
                     }
                     builder.close();
                     if let Ok(path) = builder.build() {
-                        window.paint_path(path, rgb(0x1e293b));
+                        window.paint_path(path, ui_kit::chrome(0x1e293b));
                     }
                 }
             })
@@ -289,9 +289,9 @@ impl PhotoEditApp {
             .w_full()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x1e293b))
+            .bg(ui_kit::chrome(0x1e293b))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(ui_kit::chrome(0x334155))
             .flex()
             .flex_col()
             .gap_2()
@@ -335,9 +335,9 @@ impl PhotoEditApp {
                         .rounded_sm()
                         .bg(rgb(color_u32))
                         .border_1()
-                        .border_color(rgb(0x64748b))
+                        .border_color(ui_kit::chrome(0x64748b))
                         .cursor_pointer()
-                        .hover(|s| s.border_color(rgb(0x94a3b8)))
+                        .hover(|s| s.border_color(ui_kit::chrome(0x94a3b8)))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
@@ -364,7 +364,7 @@ impl PhotoEditApp {
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
-                            .border_color(rgb(0x475569))
+                            .border_color(ui_kit::chrome(0x475569))
                             .cursor_pointer()
                             .child(
                                 canvas(
@@ -398,7 +398,7 @@ impl PhotoEditApp {
                                             px(5.),
                                             rgb(0xffffff),
                                             px(1.5),
-                                            rgb(0x0f172a),
+                                            ui_kit::chrome(0x0f172a),
                                             Default::default(),
                                         ));
                                     },
@@ -428,7 +428,7 @@ impl PhotoEditApp {
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
-                            .border_color(rgb(0x475569))
+                            .border_color(ui_kit::chrome(0x475569))
                             .cursor_pointer()
                             .child(
                                 canvas(
@@ -461,7 +461,7 @@ impl PhotoEditApp {
                                             px(0.),
                                             rgb(0xffffff),
                                             px(1.),
-                                            rgb(0x0f172a),
+                                            ui_kit::chrome(0x0f172a),
                                             Default::default(),
                                         ));
                                     },
@@ -493,7 +493,7 @@ impl PhotoEditApp {
                             .items_center()
                             .gap_1()
                             .flex_shrink_0()
-                            .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("RGB"))
+                            .child(div().text_xs().text_color(ui_kit::chrome(0xcbd5e1)).child("RGB"))
                             .child(
                                 div()
                                     .id("photo_eyedropper_btn")
@@ -508,12 +508,12 @@ impl PhotoEditApp {
                                     .border_color(if drop_on {
                                         rgb(0x38bdf8)
                                     } else {
-                                        rgb(0x475569)
+                                        ui_kit::chrome(0x475569)
                                     })
                                     .bg(if drop_on {
                                         rgb(0x0ea5e9)
                                     } else {
-                                        rgb(0x334155)
+                                        ui_kit::chrome(0x334155)
                                     })
                                     .child(eyedropper_icon(drop_on))
                                     .on_mouse_down(
@@ -537,7 +537,7 @@ impl PhotoEditApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(ui_kit::chrome(0x94a3b8))
                                     .flex_shrink_0()
                                     .child("R"),
                             )
@@ -552,7 +552,7 @@ impl PhotoEditApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(ui_kit::chrome(0x94a3b8))
                                     .flex_shrink_0()
                                     .child("G"),
                             )
@@ -567,7 +567,7 @@ impl PhotoEditApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(ui_kit::chrome(0x94a3b8))
                                     .flex_shrink_0()
                                     .child("B"),
                             )
@@ -597,7 +597,7 @@ impl PhotoEditApp {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(div().text_xs().text_color(rgb(0x94a3b8)).child("A"))
+            .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("A"))
             .child(
                 div()
                     .id("photo_alpha_track")
@@ -607,7 +607,7 @@ impl PhotoEditApp {
                     .rounded_sm()
                     .overflow_hidden()
                     .border_1()
-                    .border_color(rgb(0x475569))
+                    .border_color(ui_kit::chrome(0x475569))
                     .cursor_pointer()
                     .child(
                         canvas(
@@ -618,7 +618,7 @@ impl PhotoEditApp {
                                 window.paint_quad(quad(
                                     bounds,
                                     px(0.),
-                                    rgb(0x0f172a),
+                                    ui_kit::chrome(0x0f172a),
                                     px(0.),
                                     rgb(0x000000),
                                     Default::default(),

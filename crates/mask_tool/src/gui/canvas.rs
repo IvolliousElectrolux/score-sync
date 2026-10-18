@@ -1352,7 +1352,7 @@ impl MaskToolApp {
                             let is_sel = guide_selected.contains(&i);
                             let is_hover = guide_hover == Some(i);
                             let color = if is_sel {
-                                rgb(0xf59e0b)
+                                ui_kit::chrome(0xf59e0b)
                             } else if is_hover {
                                 rgb(0xfbbf24)
                             } else {
@@ -1487,13 +1487,13 @@ impl MaskToolApp {
                             b.origin.x = bounds.origin.x + b.origin.x;
                             b.origin.y = bounds.origin.y + b.origin.y;
                             let mut fill_c = if is_marquee {
-                                rgb(0x3b82f6)
+                                ui_kit::chrome(0x3b82f6)
                             } else {
                                 rgb(color_rgb_u32(mask_color))
                             };
                             fill_c.a = if is_marquee { 0.18 } else { 0.24 };
                             let border = if is_marquee {
-                                rgb(0x2563eb)
+                                ui_kit::chrome(0x2563eb)
                             } else {
                                 rgb(0x508cdc)
                             };
@@ -1604,7 +1604,7 @@ impl MaskToolApp {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(rgb(0xe2e8f0))
+                        .text_color(ui_kit::chrome(0xe2e8f0))
                         .text_sm()
                         .child("加载中…"),
                 )

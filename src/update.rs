@@ -30,22 +30,28 @@ struct GhRelease {
     prerelease: bool,
 }
 
-/// 阻塞调用, 须在后台线程跑. 无更新、离线或解析失败都返回 `None`.
-pub fn check_latest() -> Option<UpdateInfo> {
+pub enum UpdateCheck {
+    UpToDate,
+    Available(UpdateInfo),
+    Failed(String),
+}
+
+/// 阻塞调用, 须在后台线程跑.
+pub fn check_latest() -> UpdateCheck {
     let current = env!("CARGO_PKG_VERSION").to_string();
     crate::trace::log(&format!("update: 检查 GitHub, 当前 {current}"));
     let body = match fetch_json(RELEASES_URL) {
         Ok(s) => s,
         Err(e) => {
             crate::trace::log(&format!("update: 跳过 ({e})"));
-            return None;
+            return UpdateCheck::Failed(e);
         }
     };
     let rels: Vec<GhRelease> = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(e) => {
             crate::trace::log(&format!("update: 解析失败 ({e})"));
-            return None;
+            return UpdateCheck::Failed(e.to_string());
         }
     };
 
@@ -67,7 +73,7 @@ pub fn check_latest() -> Option<UpdateInfo> {
     }
     if newer.is_empty() {
         crate::trace::log("update: 已是最新");
-        return None;
+        return UpdateCheck::UpToDate;
     }
     newer.sort_by(|a, b| cmp_semver(&b.0, &a.0));
     let latest = newer[0].0.clone();
@@ -77,7 +83,7 @@ pub fn check_latest() -> Option<UpdateInfo> {
         newer.len()
     ));
     let changes = newer.into_iter().map(|(v, _, b)| (v, b)).collect();
-    Some(UpdateInfo {
+    UpdateCheck::Available(UpdateInfo {
         current,
         latest,
         url,

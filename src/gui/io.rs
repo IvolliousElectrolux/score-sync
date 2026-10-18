@@ -5,9 +5,12 @@ use super::*;
 
 impl ScoreSyncApp {
     pub(super) fn start_update_check(&mut self, cx: &mut Context<Self>) {
+        if !ui_kit::check_updates() {
+            return;
+        }
         let (tx, rx) = async_channel::bounded::<crate::update::UpdateInfo>(1);
         std::thread::spawn(move || {
-            if let Some(info) = crate::update::check_latest() {
+            if let crate::update::UpdateCheck::Available(info) = crate::update::check_latest() {
                 let _ = tx.send_blocking(info);
             }
         });
@@ -53,6 +56,24 @@ impl ScoreSyncApp {
 
     /// Esc: 关掉普通提示/子面板错误, 确认关窗/新建的对话框也取消.
     pub(super) fn dismiss_blocking_overlays(&mut self, cx: &mut Context<Self>) {
+        if self.settings_capture.is_some() {
+            self.end_shortcut_capture(cx);
+            return;
+        }
+        let confirm = matches!(
+            self.dialog,
+            Some(
+                DialogKind::UnsavedExit
+                    | DialogKind::UnsavedNew
+                    | DialogKind::UnsavedPhoto { .. }
+                    | DialogKind::SwitchLayout { .. }
+                    | DialogKind::UpdateAvailable { .. }
+            )
+        );
+        if self.settings_open && !confirm {
+            self.close_settings(cx);
+            return;
+        }
         if self.pdf_import.is_some() {
             self.close_import_dialog(cx);
             return;

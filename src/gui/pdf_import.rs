@@ -1100,23 +1100,23 @@ impl ScoreSyncApp {
                     .py_1()
                     .rounded_sm()
                     .bg(if is_active {
-                        rgb(0xeff6ff)
+                        ui_kit::chrome(0xeff6ff)
                     } else {
                         rgb(0xffffff)
                     })
                     .border_1()
                     .border_color(if is_active {
-                        rgb(0x3b82f6)
+                        ui_kit::chrome(0x3b82f6)
                     } else {
-                        rgb(0xe2e8f0)
+                        ui_kit::chrome(0xe2e8f0)
                     })
                     .cursor_move()
                     .when(dragging, |d| d.opacity(0.35))
                     .when(show_line && !line_after, |d| {
-                        d.border_t_2().border_color(rgb(0xf59e0b))
+                        d.border_t_2().border_color(ui_kit::chrome(0xf59e0b))
                     })
                     .when(show_line && line_after, |d| {
-                        d.border_b_2().border_color(rgb(0xf59e0b))
+                        d.border_b_2().border_color(ui_kit::chrome(0xf59e0b))
                     })
                     .child(Self::measure_import_row(entity.clone(), idx))
                     .child(
@@ -1128,7 +1128,7 @@ impl ScoreSyncApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x0f172a))
+                                    .text_color(ui_kit::chrome(0x0f172a))
                                     .whitespace_nowrap()
                                     .overflow_hidden()
                                     .child(name),
@@ -1147,7 +1147,7 @@ impl ScoreSyncApp {
                                             .text_color(if pending {
                                                 rgb(0xb45309)
                                             } else {
-                                                rgb(0x64748b)
+                                                ui_kit::chrome(0x64748b)
                                             })
                                             .child(sub),
                                     )
@@ -1182,8 +1182,8 @@ impl ScoreSyncApp {
                             .id(SharedString::from(format!("pdf_import_item_x-{idx}")))
                             .px_1()
                             .rounded_sm()
-                            .text_color(rgb(0x64748b))
-                            .hover(|s| s.bg(rgb(0xe2e8f0)).text_color(rgb(0x0f172a)))
+                            .text_color(ui_kit::chrome(0x64748b))
+                            .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)).text_color(ui_kit::chrome(0x0f172a)))
                             .cursor_pointer()
                             .child("×")
                             .on_mouse_down(
@@ -1237,8 +1237,8 @@ impl ScoreSyncApp {
             .rounded_lg()
             .border_2()
             .border_dashed()
-            .border_color(rgb(0x94a3b8))
-            .bg(rgb(0xf8fafc))
+            .border_color(ui_kit::chrome(0x94a3b8))
+            .bg(ui_kit::chrome(0xf8fafc))
             .flex()
             .flex_col()
             .items_center()
@@ -1259,13 +1259,13 @@ impl ScoreSyncApp {
             drop = drop
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0xf1f5f9)).border_color(rgb(0x64748b)))
+                .hover(|s| s.bg(ui_kit::chrome(0xf1f5f9)).border_color(ui_kit::chrome(0x64748b)))
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| this.import_dialog_pick_files(cx)),
                 )
-                .child(div().text_3xl().text_color(rgb(0x64748b)).child("📎"))
-                .child(div().text_sm().text_color(rgb(0x475569)).child(drop_hint));
+                .child(div().text_3xl().text_color(ui_kit::chrome(0x64748b)).child("📎"))
+                .child(div().text_sm().text_color(ui_kit::chrome(0x475569)).child(drop_hint));
         } else {
             drop = drop
                 .overflow_hidden()
@@ -1282,8 +1282,8 @@ impl ScoreSyncApp {
                         .gap_1()
                         .cursor_pointer()
                         .text_xs()
-                        .text_color(rgb(0x475569))
-                        .hover(|s| s.text_color(rgb(0x0f172a)))
+                        .text_color(ui_kit::chrome(0x475569))
+                        .hover(|s| s.text_color(ui_kit::chrome(0x0f172a)))
                         .on_mouse_up(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| this.import_dialog_pick_files(cx)),
@@ -1307,7 +1307,7 @@ impl ScoreSyncApp {
                 div()
                     .flex_shrink_0()
                     .text_xs()
-                    .text_color(rgb(0xb91c1c))
+                    .text_color(ui_kit::chrome(0xb91c1c))
                     .child(err),
             );
         }
@@ -1317,7 +1317,7 @@ impl ScoreSyncApp {
                 div()
                     .flex_shrink_0()
                     .text_xs()
-                    .text_color(rgb(0x334155))
+                    .text_color(ui_kit::chrome(0x334155))
                     .child(header),
             );
             body = body.child(
@@ -1328,7 +1328,7 @@ impl ScoreSyncApp {
                     .items_center()
                     .gap_2()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child("源尺寸 (只读)")
                     .child(
                         div()
@@ -1337,11 +1337,11 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .border_1()
-                            .border_color(rgb(0xe2e8f0))
-                            .bg(rgb(0xf1f5f9))
+                            .border_color(ui_kit::chrome(0xe2e8f0))
+                            .bg(ui_kit::chrome(0xf1f5f9))
                             .flex()
                             .items_center()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(ui_kit::chrome(0x94a3b8))
                             .child(fmt_pt(mode.w_pt)),
                     )
                     .child("×")
@@ -1352,11 +1352,11 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .border_1()
-                            .border_color(rgb(0xe2e8f0))
-                            .bg(rgb(0xf1f5f9))
+                            .border_color(ui_kit::chrome(0xe2e8f0))
+                            .bg(ui_kit::chrome(0xf1f5f9))
                             .flex()
                             .items_center()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(ui_kit::chrome(0x94a3b8))
                             .child(fmt_pt(mode.h_pt)),
                     )
                     .child("pt"),
@@ -1369,7 +1369,7 @@ impl ScoreSyncApp {
                     .items_center()
                     .gap_2()
                     .text_xs()
-                    .text_color(rgb(0x334155))
+                    .text_color(ui_kit::chrome(0x334155))
                     .child("目标")
                     .child(
                         div()
@@ -1378,8 +1378,8 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .border_1()
-                            .border_color(rgb(0xcbd5e1))
-                            .bg(rgb(0xffffff))
+                            .border_color(ui_kit::chrome(0xcbd5e1))
+                            .bg(ui_kit::card())
                             .child(w_input),
                     )
                     .child("×")
@@ -1390,8 +1390,8 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .border_1()
-                            .border_color(rgb(0xcbd5e1))
-                            .bg(rgb(0xffffff))
+                            .border_color(ui_kit::chrome(0xcbd5e1))
+                            .bg(ui_kit::card())
                             .child(h_input),
                     )
                     .child("px")
@@ -1419,7 +1419,7 @@ impl ScoreSyncApp {
                     .items_center()
                     .gap_2()
                     .text_xs()
-                    .text_color(rgb(0x334155))
+                    .text_color(ui_kit::chrome(0x334155))
                     .child("倍率")
                     .child(
                         div()
@@ -1428,8 +1428,8 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .border_1()
-                            .border_color(rgb(0xcbd5e1))
-                            .bg(rgb(0xffffff))
+                            .border_color(ui_kit::chrome(0xcbd5e1))
+                            .bg(ui_kit::card())
                             .child(scale_input),
                     )
                     .child("相对参考页的 PDF 标记尺寸 (72 pt = 1 inch)"),
@@ -1489,9 +1489,9 @@ impl ScoreSyncApp {
                     .w_full()
                     .h(px(320.))
                     .flex_shrink_0()
-                    .bg(rgb(0xf1f5f9))
+                    .bg(ui_kit::chrome(0xf1f5f9))
                     .border_1()
-                    .border_color(rgb(0xe2e8f0))
+                    .border_color(ui_kit::chrome(0xe2e8f0))
                     .overflow_hidden()
                     .relative()
                     .child(preview_canvas.absolute().inset_0().size_full())
@@ -1504,7 +1504,7 @@ impl ScoreSyncApp {
                                 .items_center()
                                 .justify_center()
                                 .text_xs()
-                                .text_color(rgb(0x64748b))
+                                .text_color(ui_kit::chrome(0x64748b))
                                 .child(preview_hint),
                         )
                     }),
@@ -1517,7 +1517,7 @@ impl ScoreSyncApp {
                     .justify_center()
                     .gap_1()
                     .text_xs()
-                    .text_color(rgb(0x334155))
+                    .text_color(ui_kit::chrome(0x334155))
                     .child("页")
                     .child(
                         div()
@@ -1526,8 +1526,8 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .border_1()
-                            .border_color(rgb(0xcbd5e1))
-                            .bg(rgb(0xffffff))
+                            .border_color(ui_kit::chrome(0xcbd5e1))
+                            .bg(ui_kit::card())
                             .child(preview_page_input),
                     )
                     .child(format!("/ {preview_count}")),
@@ -1540,7 +1540,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 this.import_list_drag_move(f32::from(ev.position.x), f32::from(ev.position.y), cx);
@@ -1576,9 +1576,9 @@ impl ScoreSyncApp {
                     .h(px(480.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()

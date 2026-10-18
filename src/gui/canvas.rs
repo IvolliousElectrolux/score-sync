@@ -844,14 +844,14 @@ impl ScoreSyncApp {
                             );
                             b.origin.x = bounds.origin.x + b.origin.x;
                             b.origin.y = bounds.origin.y + b.origin.y;
-                            let mut fill = rgb(0xf59e0b);
+                            let mut fill = ui_kit::chrome(0xf59e0b);
                             fill.a = 0.28;
                             window.paint_quad(quad(
                                 b,
                                 px(0.),
                                 fill,
                                 px(2.),
-                                rgb(0xf59e0b),
+                                ui_kit::chrome(0xf59e0b),
                                 Default::default(),
                             ));
                             // 锚定/活动边细线
@@ -888,7 +888,7 @@ impl ScoreSyncApp {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(rgb(0xe2e8f0))
+                        .text_color(ui_kit::chrome(0xe2e8f0))
                         .text_sm()
                         .child("加载中…"),
                 )

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, point, prelude::*, px, rgb, size, App, Application, Bounds, Context, CursorStyle,
+    actions, div, point, prelude::*, px, size, App, Application, Bounds, Context, CursorStyle,
     Div, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding, ModifiersChangedEvent, Pixels,
     Point, Render, RenderImage, SharedString, Window, WindowBounds, WindowOptions,
 };
@@ -1366,8 +1366,8 @@ impl Render for PhotoEditApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0xf8fafc))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::chrome(0xf8fafc))
+            .text_color(ui_kit::chrome(0x0f172a))
             .font_family(apply_bg::ui_font())
             .when(self.standalone, |d| {
                 d.child(
@@ -1375,7 +1375,7 @@ impl Render for PhotoEditApp {
                         .px_3()
                         .py_2()
                         .border_b_1()
-                        .border_color(rgb(0xcbd5e1))
+                        .border_color(ui_kit::chrome(0xcbd5e1))
                         .child(
                             div()
                                 .text_lg()
@@ -1437,6 +1437,7 @@ pub fn bind_embedded_keys(cx: &mut App) {
 
 pub fn run_gui(initial: Option<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
+        ui_kit::load_prefs_from_disk();
         apply_bg::text_input::bind_keys(cx);
         bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);

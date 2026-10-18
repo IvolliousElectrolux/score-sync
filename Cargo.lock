@@ -142,7 +142,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apply_bg"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "async-channel 2.5.0",
  "clap",
@@ -153,6 +153,7 @@ dependencies = [
  "rfd",
  "smallvec",
  "thiserror 2.0.19",
+ "ui_kit",
  "unicode-segmentation",
 ]
 
@@ -3070,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "mask_tool"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -3082,6 +3083,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "ui_kit",
 ]
 
 [[package]]
@@ -3725,7 +3727,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "photo_edit"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -3736,6 +3738,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "ui_kit",
  "uuid",
 ]
 
@@ -4656,7 +4659,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "score_sync"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -4673,6 +4676,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.19",
+ "ui_kit",
  "ureq",
  "uuid",
  "vector_edit",
@@ -4682,7 +4686,7 @@ dependencies = [
 
 [[package]]
 name = "score_video"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "apply_bg",
  "async-channel 2.5.0",
@@ -4694,6 +4698,7 @@ dependencies = [
  "rodio",
  "smallvec",
  "thiserror 2.0.19",
+ "ui_kit",
  "uuid",
 ]
 
@@ -5801,6 +5806,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui_kit"
+version = "1.8.0"
+dependencies = [
+ "gpui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6026,7 +6040,7 @@ dependencies = [
 
 [[package]]
 name = "vector_edit"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "apply_bg",
  "clap",
@@ -6039,6 +6053,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tiny-skia",
+ "ui_kit",
  "uuid",
 ]
 

@@ -272,7 +272,7 @@ impl ScoreSyncApp {
             books = books.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child("还没有页面. 用「打开」导入 PDF 或图片, 将按顺序两两对开."),
             );
         }
@@ -292,7 +292,7 @@ impl ScoreSyncApp {
             .min_w(px(0.))
             .flex()
             .flex_col()
-            .bg(rgb(0xf1f5f9))
+            .bg(ui_kit::chrome(0xf1f5f9))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 this.spread_drag_move(f32::from(ev.position.x), f32::from(ev.position.y), cx);
             }))
@@ -307,7 +307,7 @@ impl ScoreSyncApp {
                     .px_4()
                     .py_2()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child(hint),
             )
             .child(
@@ -333,7 +333,7 @@ impl ScoreSyncApp {
         let left = row * 2;
         let right = left + 1;
         let active = self.doc.current_page_index / 2 == row;
-        let border = if active { rgb(0x2563eb) } else { rgb(0xe7e5e4) };
+        let border = if active { ui_kit::chrome(0x2563eb) } else { rgb(0xe7e5e4) };
         div()
             .id(SharedString::from(format!("spread_book_{row}")))
             .flex_shrink_0()
@@ -352,7 +352,7 @@ impl ScoreSyncApp {
                     .px_1()
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(if active { rgb(0x1d4ed8) } else { rgb(0x78716c) })
+                    .text_color(if active { ui_kit::chrome(0x1d4ed8) } else { rgb(0x78716c) })
                     .child(format!("第 {} 对", row + 1)),
             )
             .child(
@@ -428,7 +428,7 @@ impl ScoreSyncApp {
         let waiting = !blank && thumb.is_none();
         let side = if idx % 2 == 0 { "左" } else { "右" };
         let thumb_border = if selected {
-            rgb(0x2563eb)
+            ui_kit::chrome(0x2563eb)
         } else if current {
             rgb(0x93c5fd)
         } else {
@@ -454,7 +454,7 @@ impl ScoreSyncApp {
             .gap_1()
             .rounded_sm()
             .cursor_pointer()
-            .when(selected, |d| d.bg(rgb(0xeff6ff)))
+            .when(selected, |d| d.bg(ui_kit::chrome(0xeff6ff)))
             .when(dragging, |d| d.opacity(0.4))
             .child(Self::measure_spread_cell(entity, idx))
             .child(
@@ -547,7 +547,7 @@ impl ScoreSyncApp {
                                 .right(px(4.))
                                 .px_1()
                                 .rounded_sm()
-                                .bg(rgb(0x2563eb))
+                                .bg(ui_kit::chrome(0x2563eb))
                                 .text_color(rgb(0xffffff))
                                 .text_xs()
                                 .child("当前"),
@@ -564,7 +564,7 @@ impl ScoreSyncApp {
                         .bottom_0()
                         .w(px(3.))
                         .rounded_sm()
-                        .bg(rgb(0xf59e0b)),
+                        .bg(ui_kit::chrome(0xf59e0b)),
                 )
             })
             .when(line_after, |d| {
@@ -576,7 +576,7 @@ impl ScoreSyncApp {
                         .bottom_0()
                         .w(px(3.))
                         .rounded_sm()
-                        .bg(rgb(0xf59e0b)),
+                        .bg(ui_kit::chrome(0xf59e0b)),
                 )
             })
             .on_mouse_down(
@@ -825,7 +825,7 @@ impl ScoreSyncApp {
                     .rounded_sm()
                     .bg(if blank { rgb(0xf5f5f4) } else { rgb(0xffffff) })
                     .border_1()
-                    .border_color(rgb(0x2563eb))
+                    .border_color(ui_kit::chrome(0x2563eb))
                     .shadow_md()
                     .overflow_hidden()
                     .relative()
@@ -885,7 +885,7 @@ impl ScoreSyncApp {
                                 .right(px(4.))
                                 .px_1()
                                 .rounded_sm()
-                                .bg(rgb(0x2563eb))
+                                .bg(ui_kit::chrome(0x2563eb))
                                 .text_color(rgb(0xffffff))
                                 .text_xs()
                                 .child(format!("{count}")),
@@ -1289,7 +1289,7 @@ impl ScoreSyncApp {
                     .flex_col()
                     .p_1()
                     .rounded_md()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
                     .border_color(rgb(0xe7e5e4))
                     .shadow_md()
@@ -1539,7 +1539,7 @@ impl ScoreSyncApp {
             .flex_col()
             .p_1()
             .rounded_md()
-            .bg(rgb(0xffffff))
+            .bg(ui_kit::card())
             .border_1()
             .border_color(rgb(0xe7e5e4))
             .shadow_md()

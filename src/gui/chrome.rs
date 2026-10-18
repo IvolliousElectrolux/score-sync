@@ -8,6 +8,9 @@ impl ScoreSyncApp {
         if self.page_organize.is_some() {
             self.close_page_organize(cx);
         }
+        if self.settings_open {
+            self.close_settings(cx);
+        }
         self.drag = None;
         self.dialog = Some(DialogKind::Help);
         cx.notify();
@@ -29,7 +32,8 @@ impl ScoreSyncApp {
     pub(super) fn has_modal_overlay(&self, cx: &App) -> bool {
         self.pdf_import.is_some()
             || self.page_organize.is_some()
-            || self.dialog.is_some()
+            ||         self.dialog.is_some()
+            || self.settings_open
             || self.bg.pick_open
             || self.bg.batch_open
             || self.apply_bg.read(cx).is_error_open()
@@ -38,7 +42,6 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn header_file_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let ms = apply_bg::primary_shift();
         div()
             .id("header_file_bar")
             .flex_shrink_0()
@@ -48,32 +51,39 @@ impl ScoreSyncApp {
             .child(self.header_icon_btn(
                 "hdr-new",
                 HeaderGlyph::NewDoc,
-                format!("新建工程 ({ms}N)").into(),
+                ui_kit::always_hint(ui_kit::t("chrome.new"), "app.new").into(),
                 |this, window, cx| this.request_new_project(window, cx),
                 cx,
             ))
             .child(self.header_icon_btn(
                 "hdr-open",
                 HeaderGlyph::OpenFolder,
-                format!("打开工程 ({ms}O)").into(),
+                ui_kit::always_hint(ui_kit::t("chrome.open_project"), "app.open_project").into(),
                 |this, window, cx| this.open_project(window, cx),
                 cx,
             ))
             .child(self.header_icon_btn(
                 "hdr-save",
                 HeaderGlyph::SaveDisk,
-                apply_bg::with_mod("保存工程", "S").into(),
+                ui_kit::always_hint(ui_kit::t("chrome.save"), "app.save").into(),
                 |this, window, cx| this.save_project(window, cx),
                 cx,
             ))
             .child(self.header_icon_btn(
                 "hdr-saveas",
                 HeaderGlyph::SaveAsDisk,
-                format!("另存工程 ({ms}S)").into(),
+                ui_kit::always_hint(ui_kit::t("chrome.save_as"), "app.save_as").into(),
                 |this, window, cx| this.save_project_as(window, cx),
                 cx,
             ))
             .child(self.header_help_btn(cx))
+            .child(self.header_icon_btn(
+                "hdr-settings",
+                HeaderGlyph::Gear,
+                ui_kit::always_hint(ui_kit::t("chrome.settings"), "app.settings").into(),
+                |this, _, cx| this.open_settings(cx),
+                cx,
+            ))
     }
 
     fn header_icon_btn(
@@ -96,7 +106,7 @@ impl ScoreSyncApp {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xd8e0ea)))
+            .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -113,7 +123,7 @@ impl ScoreSyncApp {
             .child(
                 canvas(|_, _, _| {}, {
                     move |bounds, _, window, _| {
-                        paint_header_glyph(window, bounds, glyph, rgb(0x334155));
+                        paint_header_glyph(window, bounds, glyph, ui_kit::chrome(0x334155));
                     }
                 })
                 .w(px(13.))
@@ -137,7 +147,7 @@ impl ScoreSyncApp {
 
     fn header_help_btn(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
-        let tip: SharedString = "操作说明 (H / F1)".into();
+        let tip: SharedString = ui_kit::always_hint(ui_kit::t("chrome.help"), "app.help").into();
         let tip_hover = tip.clone();
         div()
             .id("hdr-help")
@@ -149,9 +159,9 @@ impl ScoreSyncApp {
             .items_center()
             .justify_center()
             .text_xs()
-            .text_color(rgb(0x334155))
+            .text_color(ui_kit::chrome(0x334155))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xd8e0ea)))
+            .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -237,9 +247,9 @@ impl ScoreSyncApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
-        let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
-        let hover = if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) };
+        let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
+        let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
+        let hover = if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) };
         let id: SharedString = id.into();
         let id_down = id.clone();
         let id_up = id.clone();
@@ -251,7 +261,7 @@ impl ScoreSyncApp {
             .rounded_md()
             .bg(bg)
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .text_color(fg)
             .text_sm()
             .cursor_pointer()
@@ -292,7 +302,7 @@ impl ScoreSyncApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { rgb(0x0f172a) } else { rgb(0x334155) };
+        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x334155) };
         div()
             .id(id.into())
             .flex_shrink_0()
@@ -301,13 +311,13 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(rgb(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
+            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -316,8 +326,6 @@ impl ScoreSyncApp {
     }
 
     fn spread_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let staff = !self.doc.is_spread();
-        let spread = self.doc.is_spread();
         div()
             .id("crop_toolbar")
             .flex_shrink_0()
@@ -327,54 +335,40 @@ impl ScoreSyncApp {
             .w_full()
             .min_w(px(0.))
             .overflow_x_scroll()
-            .bg(rgb(0xe2e8f0))
+            .bg(ui_kit::chrome(0xe2e8f0))
             .border_b_1()
-            .border_color(rgb(0xcbd5e1))
+            .border_color(ui_kit::chrome(0xcbd5e1))
             .child(self.menu_item(
                 "open",
-                apply_bg::with_mod("打开", "O"),
+                ui_kit::menu_label(ui_kit::t("crop.open_file"), "crop.open_file"),
                 false,
                 Self::open_file,
                 cx,
             ))
             .child(self.menu_item(
-                "layout_staff",
-                "谱表分块",
-                staff,
-                |this, _, cx| this.request_sheet_layout(false, cx),
-                cx,
-            ))
-            .child(self.menu_item(
-                "layout_spread",
-                "双页对开",
-                spread,
-                |this, _, cx| this.request_sheet_layout(true, cx),
-                cx,
-            ))
-            .child(self.menu_item(
                 "spread_dup",
-                "复制",
+                ui_kit::t("spread.dup"),
                 false,
                 |this, _, cx| this.duplicate_spread_selected(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "spread_paste",
-                apply_bg::with_mod("粘贴", "V"),
+                ui_kit::menu_label(ui_kit::t("spread.paste"), "spread.paste"),
                 false,
                 |this, _, cx| this.paste_spread_clipboard(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "spread_del",
-                "删除 (Del)",
+                ui_kit::menu_label(ui_kit::t("spread.delete"), "crop.delete"),
                 false,
                 |this, _, cx| this.delete_spread_selected(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "spread_blank",
-                "插入空白页",
+                ui_kit::t("spread.blank"),
                 false,
                 |this, _, cx| {
                     let idx = this.doc.current_page_index.min(this.doc.pages.len());
@@ -398,99 +392,91 @@ impl ScoreSyncApp {
             .w_full()
             .min_w(px(0.))
             .overflow_x_scroll()
-            .bg(rgb(0xe2e8f0))
+            .bg(ui_kit::chrome(0xe2e8f0))
             .border_b_1()
-            .border_color(rgb(0xcbd5e1))
+            .border_color(ui_kit::chrome(0xcbd5e1))
             .child(self.menu_item(
                 "open",
-                apply_bg::with_mod("打开", "O"),
+                ui_kit::menu_label(ui_kit::t("crop.open_file"), "crop.open_file"),
                 false,
                 Self::open_file,
                 cx,
             ))
             .child(self.menu_item(
                 "detect",
-                "识别本页 (D)",
+                ui_kit::menu_label(ui_kit::t("crop.detect"), "crop.detect"),
                 false,
                 |this, _, cx| this.run_detect(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "detect_all",
-                "识别全部页 (A)",
+                ui_kit::menu_label(ui_kit::t("crop.detect_all"), "crop.detect_all"),
                 false,
                 |this, _, cx| this.run_detect_all(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "add_block",
-                "添加新块 (N)",
+                ui_kit::menu_label(ui_kit::t("crop.add"), "crop.add"),
                 self.canvas_tool == CanvasTool::AddBlock,
                 |this, _, cx| this.toggle_add_block(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "split_block",
-                "分割块 (S)",
+                ui_kit::menu_label(ui_kit::t("crop.split"), "crop.split"),
                 self.canvas_tool == CanvasTool::SplitBlock,
                 |this, _, cx| this.toggle_split_block(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "merge",
-                "合并组合 (M)",
+                ui_kit::menu_label(ui_kit::t("crop.merge"), "crop.merge"),
                 false,
                 |this, _, cx| this.merge_selected(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "ungroup",
-                "拆开组合 (U)",
+                ui_kit::menu_label(ui_kit::t("crop.ungroup"), "crop.ungroup"),
                 false,
                 |this, _, cx| this.ungroup_active(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "share",
-                "共享脚注 (G)",
+                ui_kit::menu_label(ui_kit::t("crop.share"), "crop.share"),
                 false,
                 |this, _, cx| this.share_into_group(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "del",
-                "删除 (Del)",
+                ui_kit::menu_label(ui_kit::t("crop.delete"), "crop.delete"),
                 false,
                 |this, _, cx| this.delete_selected(cx),
                 cx,
             ))
-            .child(self.menu_item("export", "导出组合 (E)", false, Self::export_groups_ui, cx))
+            .child(self.menu_item(
+                "export",
+                ui_kit::menu_label(ui_kit::t("crop.export"), "crop.export"),
+                false,
+                Self::export_groups_ui,
+                cx,
+            ))
             .child(self.menu_item(
                 "reset",
-                "重置本页分组 (R)",
+                ui_kit::menu_label(ui_kit::t("crop.reset"), "crop.reset"),
                 false,
                 |this, _, cx| this.reset_groups(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "organize_pages",
-                "组织页面 (P)",
+                ui_kit::menu_label(ui_kit::t("organize.toggle"), "organize.toggle"),
                 false,
                 |this, window, cx| this.toggle_page_organize(window, cx),
-                cx,
-            ))
-            .child(self.menu_item(
-                "layout_staff",
-                "谱表分块",
-                true,
-                |this, _, cx| this.request_sheet_layout(false, cx),
-                cx,
-            ))
-            .child(self.menu_item(
-                "layout_spread",
-                "双页对开",
-                false,
-                |this, _, cx| this.request_sheet_layout(true, cx),
                 cx,
             ))
             .into_any_element()
@@ -505,12 +491,12 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .rounded_sm()
-            .text_color(rgb(0x334155))
+            .text_color(ui_kit::chrome(0x334155))
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xd8e0ea)))
-            .child("修图 (T)")
+            .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
+            .child(ui_kit::menu_label(ui_kit::t("mask.photo"), "mask.photo"))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -531,24 +517,31 @@ impl ScoreSyncApp {
             .flex_row()
             .h(px(28.))
             .w_full()
-            .bg(rgb(0xe2e8f0))
+            .bg(ui_kit::chrome(0xe2e8f0))
             .border_b_1()
-            .border_color(rgb(0xcbd5e1))
-            .child(self.tool_tab("tool_crop", "分块", crop_on, SideTool::Crop, cx))
-            .child(self.tool_tab("tool_proj", "底色", proj_on, SideTool::Project, cx))
-            .child(self.tool_tab("tool_mask", "蒙版", mask_on, SideTool::Mask, cx))
-            .child(self.tool_tab("tool_video", "视频", video_on, SideTool::Video, cx))
+            .border_color(ui_kit::chrome(0xcbd5e1))
+            .child(self.tool_tab("tool_crop", ui_kit::t_src("分块"), crop_on, SideTool::Crop, cx))
+            .child(self.tool_tab("tool_proj", ui_kit::t_src("底色"), proj_on, SideTool::Project, cx))
+            .child(self.tool_tab("tool_mask", ui_kit::t_src("蒙版"), mask_on, SideTool::Mask, cx))
+            .child(self.tool_tab(
+                "tool_video",
+                ui_kit::t_src("视频"),
+                video_on,
+                SideTool::Video,
+                cx,
+            ))
     }
 
     pub(super) fn tool_tab(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         active: bool,
         tool: SideTool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { rgb(0x0f172a) } else { rgb(0x475569) };
+        let label = label.into();
+        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x475569) };
         div()
             .id(id)
             .flex_1()
@@ -558,14 +551,14 @@ impl ScoreSyncApp {
             .items_center()
             .justify_center()
             .when(active, |d| {
-                d.bg(rgb(0xf8fafc)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xf8fafc)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_sm()
             .whitespace_nowrap()
             .overflow_hidden()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
+            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
             .child(label)
             .on_mouse_up(
                 MouseButton::Left,
@@ -613,8 +606,8 @@ impl ScoreSyncApp {
                         .flex_shrink_0()
                         .overflow_hidden()
                         .border_b_1()
-                        .border_color(rgb(0xcbd5e1))
-                        .bg(rgb(0xe2e8f0))
+                        .border_color(ui_kit::chrome(0xcbd5e1))
+                        .bg(ui_kit::chrome(0xe2e8f0))
                         .child(tb),
                 )
                 .child(
@@ -664,8 +657,8 @@ impl ScoreSyncApp {
                         .min_w(px(0.))
                         .flex_shrink_0()
                         .border_b_1()
-                        .border_color(rgb(0xcbd5e1))
-                        .bg(rgb(0xf8fafc))
+                        .border_color(ui_kit::chrome(0xcbd5e1))
+                        .bg(ui_kit::chrome(0xf8fafc))
                         .child(self.tab_bar(cx)),
                 )
                 .child(div().flex_1().min_h(px(0.)).min_w(px(0.)).child(canvas))
@@ -709,8 +702,8 @@ impl ScoreSyncApp {
                         .flex()
                         .flex_row()
                         .border_b_1()
-                        .border_color(rgb(0xcbd5e1))
-                        .bg(rgb(0xe2e8f0))
+                        .border_color(ui_kit::chrome(0xcbd5e1))
+                        .bg(ui_kit::chrome(0xe2e8f0))
                         .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(tb)),
                 )
             })
@@ -721,8 +714,8 @@ impl ScoreSyncApp {
                         .min_w(px(0.))
                         .flex_shrink_0()
                         .border_b_1()
-                        .border_color(rgb(0xcbd5e1))
-                        .bg(rgb(0xf8fafc))
+                        .border_color(ui_kit::chrome(0xcbd5e1))
+                        .bg(ui_kit::chrome(0xf8fafc))
                         .child(self.tab_bar(cx)),
                 )
             })
@@ -741,9 +734,9 @@ impl ScoreSyncApp {
             .flex_col()
             .gap_1()
             .p_1()
-            .bg(rgb(0xffffff))
+            .bg(ui_kit::card())
             .border_1()
-            .border_color(rgb(0xcbd5e1))
+            .border_color(ui_kit::chrome(0xcbd5e1))
             .rounded_md()
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()));
         if rows.is_empty() {
@@ -752,19 +745,19 @@ impl ScoreSyncApp {
                     .px_2()
                     .py_1()
                     .text_xs()
-                    .text_color(rgb(0x94a3b8))
+                    .text_color(ui_kit::chrome(0x94a3b8))
                     .child(if self.doc.is_spread() {
-                        "当前对开没有页面"
+                        ui_kit::t_src("当前对开没有页面")
                     } else {
-                        "当前组合内没有分块"
+                        ui_kit::t_src("当前组合内没有分块")
                     }),
             );
         }
         for row in &rows {
             let rid = row.id.clone();
             let active = row.selected;
-            let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
-            let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
+            let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
+            let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
             list = list.child(
                 div()
                     .id(SharedString::from(format!("mask-blk-{rid}")))
@@ -798,8 +791,8 @@ impl ScoreSyncApp {
             .pt_2()
             .pb_1()
             .border_b_1()
-            .border_color(rgb(0xcbd5e1))
-            .bg(rgb(0xf8fafc))
+            .border_color(ui_kit::chrome(0xcbd5e1))
+            .bg(ui_kit::chrome(0xf8fafc))
             .flex()
             .flex_col()
             .min_h(px(0.))
@@ -814,13 +807,13 @@ impl ScoreSyncApp {
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x334155))
+                            .text_color(ui_kit::chrome(0x334155))
                             .flex_1()
                             .min_w(px(0.))
                             .child(if self.doc.is_spread() {
-                                "对开页面 (左页 / 右页)"
+                                ui_kit::t_src("对开页面 (左页 / 右页)")
                             } else {
-                                "组合分块 (自上而下)"
+                                ui_kit::t_src("组合分块 (自上而下)")
                             }),
                     )
                     .child(self.mask_photo_menu_btn(cx)),
@@ -892,14 +885,14 @@ impl ScoreSyncApp {
             .flex()
             .flex_col()
             .min_h(px(0.))
-            .bg(rgb(0xf1f5f9))
+            .bg(ui_kit::chrome(0xf1f5f9))
             .child(div().flex_shrink_0().child(self.tool_switcher(cx)))
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(body))
     }
 
     pub(super) fn clear_project_bg(&mut self, cx: &mut Context<Self>) {
         if !self.doc.bg_enabled && self.doc.bg_image.is_none() && self.doc.bg_solid.is_none() {
-            self.status = "当前未启用工程底色层.".into();
+            self.status = ui_kit::t_src("当前未启用工程底色层.");
             self.hint = self.status.clone();
             cx.notify();
             return;
@@ -908,7 +901,7 @@ impl ScoreSyncApp {
         self.bg.applied_is_solid = false;
         self.mark_dirty();
         self.mark_video_pool_dirty_all();
-        self.status = "已取消工程底色层.".into();
+        self.status = ui_kit::t_src("已取消工程底色层.");
         self.hint = self.status.clone();
         self.refresh_bg_preview_layer(cx);
         self.sync_video_pool(cx);
@@ -943,6 +936,12 @@ impl ScoreSyncApp {
         if matches!(self.dialog, Some(DialogKind::SwitchLayout { .. })) {
             return self.switch_layout_dialog(cx).into_any_element();
         }
+        if matches!(self.dialog, Some(DialogKind::UpdateAvailable { .. })) {
+            return self.update_available_dialog(cx).into_any_element();
+        }
+        if self.settings_open {
+            return self.settings_overlay(cx).into_any_element();
+        }
         if self.bg.pick_open {
             return self.bg_pick_overlay(cx).into_any_element();
         }
@@ -973,11 +972,8 @@ impl ScoreSyncApp {
         let Some(ref dlg) = self.dialog else {
             return div().into_any_element();
         };
-        if matches!(dlg, DialogKind::UpdateAvailable { .. }) {
-            return self.update_available_dialog(cx).into_any_element();
-        }
         let (title, body) = match dlg {
-            DialogKind::Help => ("操作说明".to_string(), help_text()),
+            DialogKind::Help => (ui_kit::t("dialog.help_title").to_string(), help_text()),
             DialogKind::Info { title, body } => (title.clone(), body.clone()),
             DialogKind::UnsavedExit
             | DialogKind::UnsavedNew
@@ -988,7 +984,7 @@ impl ScoreSyncApp {
         let body_el = div()
             .id("dlg_body")
             .text_sm()
-            .text_color(rgb(0x334155))
+            .text_color(ui_kit::chrome(0x334155))
             .whitespace_normal()
             .child(body);
 
@@ -999,7 +995,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             // 阻断背后命中; move/up 留给本层处理 Help 滚动条拖动
             .occlude()
             .on_scroll_wheel(cx.listener(|_, _, _, cx| {
@@ -1050,9 +1046,9 @@ impl ScoreSyncApp {
                     .max_h(px(520.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1080,7 +1076,7 @@ impl ScoreSyncApp {
                     )
                     .child(div().flex_shrink_0().child(self.btn(
                         "dlg_ok",
-                        "确定",
+                        ui_kit::t("dialog.ok"),
                         true,
                         |this, _, cx| {
                             this.dismiss_dialog(cx);
@@ -1099,7 +1095,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1111,9 +1107,9 @@ impl ScoreSyncApp {
                     .w(px(420.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1121,13 +1117,13 @@ impl ScoreSyncApp {
                         div()
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("未保存的改动"),
+                            .child(ui_kit::t_src("未保存的改动")),
                     )
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x334155))
-                            .child("当前工程有未保存改动. 要在退出前保存吗?"),
+                            .text_color(ui_kit::chrome(0x334155))
+                            .child(ui_kit::t_src("当前工程有未保存改动. 要在退出前保存吗?")),
                     )
                     .child(
                         div()
@@ -1137,7 +1133,7 @@ impl ScoreSyncApp {
                             .justify_end()
                             .child(self.btn(
                                 "exit_save",
-                                "保存并退出",
+                                ui_kit::t_src("保存并退出"),
                                 true,
                                 |this, window, cx| {
                                     // 保持 UnsavedExit 标记, 供保存成功后 quit
@@ -1151,7 +1147,7 @@ impl ScoreSyncApp {
                             ))
                             .child(self.btn(
                                 "exit_discard",
-                                "不保存退出",
+                                ui_kit::t_src("不保存退出"),
                                 false,
                                 |this, _, cx| {
                                     this.dialog = None;
@@ -1163,7 +1159,7 @@ impl ScoreSyncApp {
                             ))
                             .child(self.btn(
                                 "exit_cancel",
-                                "取消",
+                                ui_kit::t("dialog.cancel"),
                                 false,
                                 |this, _, cx| {
                                     this.dismiss_dialog(cx);
@@ -1180,9 +1176,9 @@ impl ScoreSyncApp {
             Some(DialogKind::SwitchLayout { to_spread: true })
         );
         let body = if to_spread {
-            "会按页序把每页收成一整页, 两两重配对开. 旧的蒙版, 分块微调和视频里对不上的片段会丢掉."
+            ui_kit::t_src("会按页序把每页收成一整页, 两两重配对开. 旧的蒙版, 分块微调和视频里对不上的片段会丢掉.")
         } else {
-            "会清掉对开组合, 页面上的分块留空, 需要重新识别. 旧的蒙版, 分块微调和视频里对不上的片段会丢掉."
+            ui_kit::t_src("会清掉对开组合, 页面上的分块留空, 需要重新识别. 旧的蒙版, 分块微调和视频里对不上的片段会丢掉.")
         };
         div()
             .id("dialog_backdrop_switch_layout")
@@ -1191,7 +1187,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1202,9 +1198,9 @@ impl ScoreSyncApp {
                     .w(px(440.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1213,12 +1209,12 @@ impl ScoreSyncApp {
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(if to_spread {
-                                "切换为双页对开"
+                                ui_kit::t_src("切换为双页对开")
                             } else {
-                                "切换为谱表分块"
+                                ui_kit::t_src("切换为谱表分块")
                             }),
                     )
-                    .child(div().text_sm().text_color(rgb(0x334155)).child(body))
+                    .child(div().text_sm().text_color(ui_kit::chrome(0x334155)).child(body))
                     .child(
                         div()
                             .flex()
@@ -1227,14 +1223,14 @@ impl ScoreSyncApp {
                             .justify_end()
                             .child(self.btn(
                                 "layout_ok",
-                                "重建组合",
+                                ui_kit::t_src("重建组合"),
                                 true,
                                 move |this, _, cx| this.apply_sheet_layout(to_spread, cx),
                                 cx,
                             ))
                             .child(self.btn(
                                 "layout_cancel",
-                                "取消",
+                                ui_kit::t("dialog.cancel"),
                                 false,
                                 |this, _, cx| this.dismiss_dialog(cx),
                                 cx,
@@ -1251,7 +1247,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1263,9 +1259,9 @@ impl ScoreSyncApp {
                     .w(px(420.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1273,13 +1269,13 @@ impl ScoreSyncApp {
                         div()
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("未保存的改动"),
+                            .child(ui_kit::t_src("未保存的改动")),
                     )
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x334155))
-                            .child("当前工程有未保存改动. 新建前要先保存吗?"),
+                            .text_color(ui_kit::chrome(0x334155))
+                            .child(ui_kit::t_src("当前工程有未保存改动. 新建前要先保存吗?")),
                     )
                     .child(
                         div()
@@ -1289,7 +1285,7 @@ impl ScoreSyncApp {
                             .justify_end()
                             .child(self.btn(
                                 "new_save",
-                                "保存后新建",
+                                ui_kit::t_src("保存后新建"),
                                 true,
                                 |this, window, cx| {
                                     // 保持 UnsavedNew, 供保存成功后清空
@@ -1303,7 +1299,7 @@ impl ScoreSyncApp {
                             ))
                             .child(self.btn(
                                 "new_discard",
-                                "不保存新建",
+                                ui_kit::t_src("不保存新建"),
                                 false,
                                 |this, _, cx| {
                                     this.dirty = false;
@@ -1313,7 +1309,7 @@ impl ScoreSyncApp {
                             ))
                             .child(self.btn(
                                 "new_cancel",
-                                "取消",
+                                ui_kit::t("dialog.cancel"),
                                 false,
                                 |this, _, cx| {
                                     this.dismiss_dialog(cx);
@@ -1332,7 +1328,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1344,9 +1340,9 @@ impl ScoreSyncApp {
                     .w(px(420.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1354,13 +1350,13 @@ impl ScoreSyncApp {
                         div()
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("未应用的修图"),
+                            .child(ui_kit::t_src("未应用的修图")),
                     )
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x334155))
-                            .child("离开前要应用这次修图吗?"),
+                            .text_color(ui_kit::chrome(0x334155))
+                            .child(ui_kit::t_src("离开前要应用这次修图吗?")),
                     )
                     .child(
                         div()
@@ -1370,21 +1366,21 @@ impl ScoreSyncApp {
                             .justify_end()
                             .child(self.btn(
                                 "photo_apply",
-                                "应用并离开",
+                                ui_kit::t_src("应用并离开"),
                                 true,
                                 |this, window, cx| this.apply_photo_and_leave(window, cx),
                                 cx,
                             ))
                             .child(self.btn(
                                 "photo_discard",
-                                "放弃",
+                                ui_kit::t_src("放弃"),
                                 false,
                                 |this, window, cx| this.discard_photo_and_leave(window, cx),
                                 cx,
                             ))
                             .child(self.btn(
                                 "photo_stay",
-                                "取消",
+                                ui_kit::t("dialog.cancel"),
                                 false,
                                 |this, _, cx| this.dismiss_dialog(cx),
                                 cx,
@@ -1415,19 +1411,19 @@ impl ScoreSyncApp {
             .flex_col()
             .gap_3()
             .text_sm()
-            .text_color(rgb(0x334155));
+            .text_color(ui_kit::chrome(0x334155));
         if changes.is_empty() {
-            notes = notes.child("可前往发布页查看版本说明.");
+            notes = notes.child(ui_kit::t_src("可前往发布页查看版本说明."));
         } else {
             for (ver, bullets) in &changes {
                 let mut block = div().flex().flex_col().gap_1().child(
                     div()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgb(0x0f172a))
+                        .text_color(ui_kit::chrome(0x0f172a))
                         .child(ver.clone()),
                 );
                 if bullets.is_empty() {
-                    block = block.child(div().text_color(rgb(0x64748b)).child("见发布页说明."));
+                    block = block.child(div().text_color(ui_kit::chrome(0x64748b)).child(ui_kit::t_src("见发布页说明.")));
                 } else {
                     for b in bullets {
                         block = block.child(div().whitespace_normal().child(format!("· {b}")));
@@ -1443,7 +1439,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_scroll_wheel(cx.listener(|_, _, _, cx| {
                 cx.stop_propagation();
@@ -1494,9 +1490,9 @@ impl ScoreSyncApp {
                     .max_h(px(440.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1509,14 +1505,19 @@ impl ScoreSyncApp {
                             .flex_shrink_0()
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("发现新版本"),
+                            .child(ui_kit::t_src("发现新版本")),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_sm()
-                            .text_color(rgb(0x334155))
-                            .child(format!("当前 {current}, GitHub 最新 {latest}.")),
+                            .text_color(ui_kit::chrome(0x334155))
+                            .child(match ui_kit::language() {
+                                ui_kit::Language::En => {
+                                    format!("Installed {current}, latest on GitHub {latest}.")
+                                }
+                                ui_kit::Language::Zh => format!("当前 {current}, GitHub 最新 {latest}."),
+                            }),
                     )
                     .child(
                         self.attach_scrollbars(
@@ -1538,7 +1539,7 @@ impl ScoreSyncApp {
                             .justify_end()
                             .child(self.btn(
                                 "update_open",
-                                "打开下载页",
+                                ui_kit::t_src("打开下载页"),
                                 true,
                                 move |this, _, cx| {
                                     crate::update::open_in_browser(&url_open);
@@ -1548,7 +1549,7 @@ impl ScoreSyncApp {
                             ))
                             .child(self.btn(
                                 "update_later",
-                                "以后再说",
+                                ui_kit::t_src("以后再说"),
                                 false,
                                 |this, _, cx| {
                                     this.dialog = None;
@@ -1568,6 +1569,7 @@ enum HeaderGlyph {
     OpenFolder,
     SaveDisk,
     SaveAsDisk,
+    Gear,
 }
 
 fn paint_header_glyph(
@@ -1633,6 +1635,31 @@ fn paint_header_glyph(
         }
         HeaderGlyph::SaveDisk => paint_floppy(&mut stroke, false),
         HeaderGlyph::SaveAsDisk => paint_floppy(&mut stroke, true),
+        HeaderGlyph::Gear => {
+            let cx = 8.0;
+            let cy = 8.0;
+            let mut circle = |r: f32| {
+                let n = 12;
+                let mut pts = Vec::with_capacity(n);
+                for i in 0..n {
+                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                    pts.push((cx + r * a.cos(), cy + r * a.sin()));
+                }
+                stroke(&pts, true);
+            };
+            circle(3.1);
+            circle(1.5);
+            for i in 0..8 {
+                let a = i as f32 / 8.0 * std::f32::consts::TAU;
+                stroke(
+                    &[
+                        (cx + 3.3 * a.cos(), cy + 3.3 * a.sin()),
+                        (cx + 5.3 * a.cos(), cy + 5.3 * a.sin()),
+                    ],
+                    false,
+                );
+            }
+        }
     }
 }
 

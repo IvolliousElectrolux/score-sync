@@ -152,13 +152,13 @@ impl ScoreVideoApp {
             .child(
                 div()
                     .w(px(440.))
-                    .bg(rgb(0x1e293b))
+                    .bg(ui_kit::chrome(0x1e293b))
                     .rounded_lg()
                     .p_4()
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(ui_kit::chrome(0xe2e8f0))
                     .child(
                         div()
                             .text_lg()
@@ -196,7 +196,7 @@ impl ScoreVideoApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(ui_kit::chrome(0x94a3b8))
                             .child(SharedString::from(self.export_container.audio_hint())),
                     )
                     .child(
@@ -214,7 +214,7 @@ impl ScoreVideoApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x64748b))
+                                    .text_color(ui_kit::chrome(0x64748b))
                                     .child("(与素材图片一致, 不可更改)"),
                             ),
                     )
@@ -254,7 +254,7 @@ impl ScoreVideoApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x64748b))
+                                    .text_color(ui_kit::chrome(0x64748b))
                                     .child("(可直接点击输入框改数字)"),
                             ),
                     )
@@ -283,13 +283,13 @@ impl ScoreVideoApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x64748b))
+                            .text_color(ui_kit::chrome(0x64748b))
                             .child("CRF (Constant Rate Factor) 是 x264 编码的质量参数: 数值越小画质越好、文件越大, 越大则画质越差、文件越小; 0 近乎无损, 18~23 常见于\"肉眼无差\"的高质量, 28 起画质明显下降. 与分辨率/码率无关, 是恒定质量而非恒定码率的编码方式."),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(ui_kit::chrome(0x94a3b8))
                             .child(out_label),
                     )
                     .child(if self.exporting {
@@ -317,14 +317,14 @@ impl ScoreVideoApp {
                             .rounded_md()
                             .bg(rgb(0x0b1220))
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(ui_kit::chrome(0x1e293b))
                             .p_2()
                             .flex()
                             .flex_col()
                             .gap_0p5()
                             .font_family("monospace")
                             .text_xs()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(ui_kit::chrome(0x94a3b8))
                             .children(
                                 self.export_log[start..]
                                     .iter()

@@ -2,6 +2,7 @@
 //!
 //! `config.json` 为新格式; 若仅有旧版 `config.txt` 则读取 `last_project=` 并迁移.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -22,6 +23,32 @@ pub struct Config {
     /// 上次 PDF 导入是否锁定宽高比.
     #[serde(default = "default_true")]
     pub pdf_import_lock_aspect: bool,
+    /// 界面配色方案 id. 空或未知时用「默认」.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// `zh` 或 `en`.
+    #[serde(default = "default_language")]
+    pub language: String,
+    /// 启动时是否重新打开上次工程.
+    #[serde(default = "default_true")]
+    pub reopen_last_project: bool,
+    /// 启动时是否检查 GitHub 更新.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+    /// 菜单文字后面是否带快捷键.
+    #[serde(default = "default_true")]
+    pub show_menu_shortcuts: bool,
+    /// 和默认方案不同的键位. 键是命令 id, 值与默认槽位一一对应, 空串表示解开.
+    #[serde(default)]
+    pub shortcuts: HashMap<String, Vec<String>>,
+}
+
+fn default_theme() -> String {
+    "default".into()
+}
+
+fn default_language() -> String {
+    "zh".into()
 }
 
 fn default_pdf_import_scale() -> f32 {
@@ -39,6 +66,12 @@ impl Default for Config {
             mask_prefs: MaskColorPrefs::default(),
             pdf_import_scale: default_pdf_import_scale(),
             pdf_import_lock_aspect: true,
+            theme: default_theme(),
+            language: default_language(),
+            reopen_last_project: true,
+            check_updates: true,
+            show_menu_shortcuts: true,
+            shortcuts: HashMap::new(),
         }
     }
 }
@@ -118,6 +151,14 @@ pub fn save(cfg: &Config) {
     if let Ok(body) = serde_json::to_string_pretty(&cfg) {
         let _ = fs::write(config_json_path(), body);
     }
+    ui_kit::apply_prefs(
+        &cfg.theme,
+        &cfg.language,
+        cfg.show_menu_shortcuts,
+        cfg.reopen_last_project,
+        cfg.check_updates,
+        cfg.shortcuts,
+    );
 }
 
 /// 打开/保存工程成功后调用: 把这次的路径记为"上次打开的工程" (保留选色偏好).

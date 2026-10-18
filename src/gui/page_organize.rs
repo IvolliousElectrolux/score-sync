@@ -650,7 +650,7 @@ impl ScoreSyncApp {
                     .flex()
                     .justify_center()
                     .text_sm()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child("还没有页面. 先打开图片或 PDF."),
             );
         }
@@ -658,14 +658,14 @@ impl ScoreSyncApp {
             let dragging = moving.contains(&idx);
             let show_line = line_at == Some(idx);
             let border = if selected {
-                rgb(0x2563eb)
+                ui_kit::chrome(0x2563eb)
             } else if is_current {
-                rgb(0x0f172a)
+                ui_kit::chrome(0x0f172a)
             } else {
-                rgb(0xcbd5e1)
+                ui_kit::chrome(0xcbd5e1)
             };
             let bg = if selected {
-                rgb(0xeff6ff)
+                ui_kit::chrome(0xeff6ff)
             } else {
                 rgb(0xffffff)
             };
@@ -688,12 +688,12 @@ impl ScoreSyncApp {
                     .cursor_pointer()
                     .when(dragging, |d| d.opacity(0.35))
                     .when(show_line && !line_after, |d| {
-                        d.border_l_4().border_color(rgb(0xf59e0b))
+                        d.border_l_4().border_color(ui_kit::chrome(0xf59e0b))
                     })
                     .when(show_line && line_after, |d| {
-                        d.border_r_4().border_color(rgb(0xf59e0b))
+                        d.border_r_4().border_color(ui_kit::chrome(0xf59e0b))
                     })
-                    .hover(|s| if selected { s } else { s.bg(rgb(0xf8fafc)) })
+                    .hover(|s| if selected { s } else { s.bg(ui_kit::chrome(0xf8fafc)) })
                     .child(Self::measure_org_cell(entity.clone(), idx))
                     .child(
                         div()
@@ -701,9 +701,9 @@ impl ScoreSyncApp {
                             .w(px(ORG_THUMB_W))
                             .h(px(ORG_THUMB_H))
                             .flex_shrink_0()
-                            .bg(rgb(0xf1f5f9))
+                            .bg(ui_kit::chrome(0xf1f5f9))
                             .border_1()
-                            .border_color(rgb(0xe2e8f0))
+                            .border_color(ui_kit::chrome(0xe2e8f0))
                             .overflow_hidden()
                             .relative()
                             .child(
@@ -747,7 +747,7 @@ impl ScoreSyncApp {
                                         .items_center()
                                         .justify_center()
                                         .text_xs()
-                                        .text_color(rgb(0x94a3b8))
+                                        .text_color(ui_kit::chrome(0x94a3b8))
                                         .child("…"),
                                 )
                             }),
@@ -763,9 +763,9 @@ impl ScoreSyncApp {
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(if selected {
-                                        rgb(0x1d4ed8)
+                                        ui_kit::chrome(0x1d4ed8)
                                     } else {
-                                        rgb(0x0f172a)
+                                        ui_kit::chrome(0x0f172a)
                                     })
                                     .child(format!("{}", idx + 1)),
                             )
@@ -775,7 +775,7 @@ impl ScoreSyncApp {
                                         .text_xs()
                                         .px_1()
                                         .rounded_sm()
-                                        .bg(rgb(0x2563eb))
+                                        .bg(ui_kit::chrome(0x2563eb))
                                         .text_color(rgb(0xffffff))
                                         .child("当前"),
                                 )
@@ -784,7 +784,7 @@ impl ScoreSyncApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x64748b))
+                            .text_color(ui_kit::chrome(0x64748b))
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .child(caption),
@@ -855,7 +855,7 @@ impl ScoreSyncApp {
             .id("org_pages_backdrop")
             .absolute()
             .inset_0()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_scroll_wheel(cx.listener(|_, _, _, cx| {
                 cx.stop_propagation();
@@ -917,9 +917,9 @@ impl ScoreSyncApp {
                                         .px(px(ORG_CARD_PAD_X))
                                         .py(px(ORG_CARD_PAD_X))
                                         .rounded_lg()
-                                        .bg(rgb(0xffffff))
+                                        .bg(ui_kit::card())
                                         .border_1()
-                                        .border_color(rgb(0x94a3b8))
+                                        .border_color(ui_kit::chrome(0x94a3b8))
                                         .flex()
                                         .flex_col()
                                         .gap_3()
@@ -959,7 +959,7 @@ impl ScoreSyncApp {
                                                 .flex()
                                                 .flex_col()
                                                 .overflow_hidden()
-                                                .bg(rgb(0xf8fafc))
+                                                .bg(ui_kit::chrome(0xf8fafc))
                                                 .rounded_md()
                                                 .child(
                                                     self.attach_scrollbars(
@@ -987,7 +987,7 @@ impl ScoreSyncApp {
                                                         .flex_1()
                                                         .min_w(px(0.))
                                                         .text_xs()
-                                                        .text_color(rgb(0x64748b))
+                                                        .text_color(ui_kit::chrome(0x64748b))
                                                         .child(hint),
                                                 )
                                                 .child(self.btn(
@@ -1048,9 +1048,9 @@ impl ScoreSyncApp {
             .gap_1()
             .p_1()
             .rounded_md()
-            .bg(rgb(0xffffff))
+            .bg(ui_kit::card())
             .border_2()
-            .border_color(rgb(0x2563eb))
+            .border_color(ui_kit::chrome(0x2563eb))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 this.organize_drag_move(f32::from(ev.position.x), f32::from(ev.position.y), cx);
             }))
@@ -1064,7 +1064,7 @@ impl ScoreSyncApp {
                 div()
                     .w(px(ORG_THUMB_W))
                     .h(px(ORG_THUMB_H))
-                    .bg(rgb(0xf1f5f9))
+                    .bg(ui_kit::chrome(0xf1f5f9))
                     .overflow_hidden()
                     .relative()
                     .child({
@@ -1108,7 +1108,7 @@ impl ScoreSyncApp {
                                 .right(px(4.))
                                 .px_1()
                                 .rounded_sm()
-                                .bg(rgb(0x2563eb))
+                                .bg(ui_kit::chrome(0x2563eb))
                                 .text_color(rgb(0xffffff))
                                 .text_xs()
                                 .child(format!("{count}")),

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = [".", "crates/apply_bg", "crates/mask_tool", "crates/score_video", "crates/photo_edit", "crates/vector_edit"]
+members = [".", "crates/apply_bg", "crates/mask_tool", "crates/score_video", "crates/photo_edit", "crates/vector_edit", "crates/ui_kit"]
 
 [workspace.package]
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 license = "MIT"
 
@@ -33,6 +33,7 @@ uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ureq = "2"
 thiserror = "2"
+ui_kit = { path = "crates/ui_kit" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

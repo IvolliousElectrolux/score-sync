@@ -143,9 +143,9 @@ pub fn palette_panel<T: 'static>(
         .w_full()
         .p_2()
         .rounded_md()
-        .bg(rgb(0x1e293b))
+        .bg(ui_kit::chrome(0x1e293b))
         .border_1()
-        .border_color(rgb(0x334155))
+        .border_color(ui_kit::chrome(0x334155))
         .flex()
         .flex_col()
         .gap_2()
@@ -181,7 +181,7 @@ pub fn palette_panel<T: 'static>(
                         .rounded_sm()
                         .bg(rgb(color_u32))
                         .border_1()
-                        .border_color(rgb(0x64748b))
+                        .border_color(ui_kit::chrome(0x64748b))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -339,7 +339,7 @@ fn preset_chip<T: 'static>(
         .rounded_sm()
         .bg(rgb(packed))
         .border_1()
-        .border_color(rgb(0x64748b))
+        .border_color(ui_kit::chrome(0x64748b))
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
@@ -366,7 +366,7 @@ fn sb_square<T: 'static>(
         .rounded_sm()
         .overflow_hidden()
         .border_1()
-        .border_color(rgb(0x475569))
+        .border_color(ui_kit::chrome(0x475569))
         .cursor_pointer()
         .child(
             canvas(
@@ -390,7 +390,7 @@ fn sb_square<T: 'static>(
                         px(5.),
                         rgb(0xffffff),
                         px(1.5),
-                        rgb(0x0f172a),
+                        ui_kit::chrome(0x0f172a),
                         Default::default(),
                     ));
                 },
@@ -421,7 +421,7 @@ fn hue_bar<T: 'static>(
         .rounded_sm()
         .overflow_hidden()
         .border_1()
-        .border_color(rgb(0x475569))
+        .border_color(ui_kit::chrome(0x475569))
         .cursor_pointer()
         .child(
             canvas(
@@ -442,7 +442,7 @@ fn hue_bar<T: 'static>(
                         px(0.),
                         rgb(0xffffff),
                         px(1.),
-                        rgb(0x0f172a),
+                        ui_kit::chrome(0x0f172a),
                         Default::default(),
                     ));
                 },
@@ -495,7 +495,7 @@ fn alpha_row<T: 'static>(
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(0x94a3b8))
+                .text_color(ui_kit::chrome(0x94a3b8))
                 .child("A"),
         )
         .child(
@@ -507,7 +507,7 @@ fn alpha_row<T: 'static>(
                 .rounded_sm()
                 .overflow_hidden()
                 .border_1()
-                .border_color(rgb(0x475569))
+                .border_color(ui_kit::chrome(0x475569))
                 .cursor_pointer()
                 .child(
                     canvas(
@@ -518,7 +518,7 @@ fn alpha_row<T: 'static>(
                             window.paint_quad(quad(
                                 bounds,
                                 px(0.),
-                                rgb(0x0f172a),
+                                ui_kit::chrome(0x0f172a),
                                 px(0.),
                                 rgb(0x000000),
                                 Default::default(),
@@ -564,7 +564,7 @@ fn channel(id_prefix: &'static str, label: &'static str, input: Entity<TextInput
         .gap_1()
         .flex_1()
         .min_w(px(0.))
-        .child(div().text_xs().text_color(rgb(0x94a3b8)).child(label))
+        .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child(label))
         .child(
             div()
                 .id(SharedString::from(format!("{id_prefix}-rgb-{label}")))

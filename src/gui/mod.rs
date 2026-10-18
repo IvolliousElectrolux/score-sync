@@ -21,6 +21,8 @@ mod guides;
 mod history;
 mod host;
 mod io;
+mod keymap;
+mod settings;
 mod lists;
 mod mem;
 mod page_organize;
@@ -74,6 +76,7 @@ actions!(
         NextPage,
         CopySpreadPages,
         PasteSpreadPages,
+        OpenSettings,
     ]
 );
 
@@ -90,7 +93,7 @@ pub(crate) use gpui::prelude::*;
 pub(crate) use gpui::{
     canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
     DispatchPhase, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
     Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
@@ -166,6 +169,12 @@ pub(crate) struct ScoreSyncApp {
     /// 靠这个边沿把布局写回文档 (画面已是三层贴图, 不必再合成整图).
     block_drag_was_active: bool,
     dialog: Option<DialogKind>,
+    settings_open: bool,
+    settings_page: settings::SettingsPage,
+    settings_capture: Option<(String, usize)>,
+    settings_conflict: SharedString,
+    capture_sub: Option<gpui::Subscription>,
+    update_probe: settings::UpdateProbe,
     /// 标签右键菜单
     tab_menu: Option<TabContextMenu>,
     /// 页签悬停 1s 后的完整文件名提示
@@ -434,6 +443,12 @@ impl ScoreSyncApp {
             last_synced_voff_target: 0,
             block_drag_was_active: false,
             dialog: None,
+            settings_open: false,
+            settings_page: settings::SettingsPage::Project,
+            settings_capture: None,
+            settings_conflict: SharedString::default(),
+            capture_sub: None,
+            update_probe: settings::UpdateProbe::Idle,
             tab_menu: None,
             tab_hover_idx: None,
             header_hover_id: None,
@@ -526,9 +541,8 @@ impl ScoreSyncApp {
             if !others.is_empty() {
                 app.load_paths(others, cx);
             }
-        } else {
-            // 命令行没带任何文件时, 尝试自动恢复上次打开的工程 (与 apply_bg
-            // 记忆底色路径同一套逻辑, 存于 %APPDATA%\score_sync).
+        } else if ui_kit::reopen_last_project() {
+            // 命令行没带任何文件时, 按偏好恢复上次打开的工程.
             let last = config::load().last_project;
             if !last.is_empty() {
                 let path = PathBuf::from(last);
@@ -544,7 +558,7 @@ impl ScoreSyncApp {
 
     /// 分块面板专属快捷键 (识别/开图/加块等). 蒙版、底色、视频和组织页面 overlay 都不走这套.
     fn crop_keys_live(&self) -> bool {
-        self.side_tool == SideTool::Crop && self.page_organize.is_none()
+        self.side_tool == SideTool::Crop && self.page_organize.is_none() && !self.settings_open
     }
 
     fn staff_keys_live(&self) -> bool {
@@ -614,7 +628,9 @@ impl Render for ScoreSyncApp {
         } else {
             self.focus_handle.clone()
         };
-        let key_ctx = if organize_open {
+        let key_ctx = if self.settings_open {
+            "Settings"
+        } else if organize_open {
             "PageOrganize"
         } else if photo_open {
             if self.vector_session() {
@@ -846,6 +862,7 @@ impl Render for ScoreSyncApp {
                 this.try_open_photo_edit(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ShowHelp, _, cx| this.show_help(cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings(cx)))
             .on_action(cx.listener(|this, _: &DumpMemory, _, cx| this.dump_memory_now(cx)))
             .on_action(cx.listener(|this, _: &ShareIntoGroup, _, cx| {
                 if !this.staff_keys_live() {
@@ -1185,16 +1202,16 @@ impl Render for ScoreSyncApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0xf8fafc))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::chrome(0xf8fafc))
+            .text_color(ui_kit::chrome(0x0f172a))
             .font_family(apply_bg::ui_font())
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .border_b_1()
-                    .border_color(rgb(0xcbd5e1))
-                    .bg(rgb(0xf1f5f9))
+                    .border_color(ui_kit::chrome(0xcbd5e1))
+                    .bg(ui_kit::chrome(0xf1f5f9))
                     .child(
                         div()
                             .px_3()
@@ -1208,7 +1225,7 @@ impl Render for ScoreSyncApp {
                                 div()
                                     .text_lg()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0x0f172a))
+                                    .text_color(ui_kit::chrome(0x0f172a))
                                     .min_w(px(0.))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
@@ -1233,7 +1250,7 @@ impl Render for ScoreSyncApp {
                                         .flex_shrink_0()
                                         .text_lg()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgb(0xdc2626))
+                                        .text_color(ui_kit::chrome(0xdc2626))
                                         .child("*"),
                                 )
                             })
@@ -1255,8 +1272,8 @@ impl Render for ScoreSyncApp {
                             .h_full()
                             .flex_shrink_0()
                             .cursor(CursorStyle::ResizeColumn)
-                            .bg(rgb(0xcbd5e1))
-                            .hover(|s| s.bg(rgb(0x94a3b8)))
+                            .bg(ui_kit::chrome(0xcbd5e1))
+                            .hover(|s| s.bg(ui_kit::chrome(0x94a3b8)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
@@ -1292,227 +1309,8 @@ impl Render for ScoreSyncApp {
 
 pub fn run_gui(initial: Vec<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
-        apply_bg::text_input::bind_keys(cx);
-        score_video::gui::bind_keys(cx);
-        let mut keys = vec![
-            KeyBinding::new("d", DetectPage, Some("ScoreSync")),
-            KeyBinding::new("a", DetectAll, Some("ScoreSync")),
-            KeyBinding::new("n", ToggleAddBlock, Some("ScoreSync")),
-            KeyBinding::new("s", ToggleSplitBlock, Some("ScoreSync")),
-            KeyBinding::new("m", MergeSelected, Some("ScoreSync")),
-            KeyBinding::new("u", UngroupActive, Some("ScoreSync")),
-            KeyBinding::new("g", ShareIntoGroup, Some("ScoreSync")),
-            KeyBinding::new("e", ExportGroups, Some("ScoreSync")),
-            KeyBinding::new("r", ResetGroups, Some("ScoreSync")),
-            KeyBinding::new("f", FitView, Some("ScoreSync")),
-            KeyBinding::new("p", OrganizePages, Some("ScoreSync")),
-            KeyBinding::new("p", OrganizePages, Some("PageOrganize")),
-            KeyBinding::new("h", ShowHelp, Some("ScoreSync")),
-            KeyBinding::new("f1", ShowHelp, Some("ScoreSync")),
-            KeyBinding::new("h", ShowHelp, None),
-            KeyBinding::new("f1", ShowHelp, None),
-            KeyBinding::new("delete", DeleteSelected, Some("ScoreSync")),
-            KeyBinding::new("backspace", DeleteSelected, Some("ScoreSync")),
-            KeyBinding::new("delete", DeleteSelected, Some("PageOrganize")),
-            KeyBinding::new("backspace", DeleteSelected, Some("PageOrganize")),
-            KeyBinding::new("enter", ConfirmParamEdit, Some("ScoreSync")),
-            KeyBinding::new("escape", CancelParamEdit, Some("ScoreSync")),
-            KeyBinding::new("enter", ConfirmParamEdit, None),
-            KeyBinding::new("escape", CancelParamEdit, None),
-            KeyBinding::new("e", mask_tool::gui::ExportImage, Some("MaskTool")),
-            KeyBinding::new("f", mask_tool::gui::FitView, Some("MaskTool")),
-            KeyBinding::new("delete", mask_tool::gui::DeleteSelected, Some("MaskTool")),
-            KeyBinding::new(
-                "backspace",
-                mask_tool::gui::DeleteSelected,
-                Some("MaskTool"),
-            ),
-            KeyBinding::new("b", mask_tool::gui::ToggleDrawMode, Some("MaskTool")),
-            KeyBinding::new("l", mask_tool::gui::TogglePolyMode, Some("MaskTool")),
-            KeyBinding::new("p", mask_tool::gui::TogglePanMode, Some("MaskTool")),
-            KeyBinding::new("escape", mask_tool::gui::CancelPolyDraft, Some("MaskTool")),
-            KeyBinding::new("t", OpenPhotoEdit, Some("MaskTool")),
-        ];
-        // 分块面板: Ctrl+O 打开图片/PDF. 蒙版/底色/视频不绑, 避免误开文件.
-        keys.extend(apply_bg::bind_primary("o", OpenFile, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary(
-            "shift-n",
-            NewProject,
-            Some("ScoreSync"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-o",
-            OpenProject,
-            Some("ScoreSync"),
-        ));
-        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary(
-            "shift-s",
-            SaveProjectAs,
-            Some("ScoreSync"),
-        ));
-        // 各面板通用: 保存 / 另存 / 打开工程 / 新建工程.
-        keys.extend(apply_bg::bind_primary("s", SaveProject, None));
-        keys.extend(apply_bg::bind_primary("shift-s", SaveProjectAs, None));
-        keys.extend(apply_bg::bind_primary("shift-o", OpenProject, None));
-        keys.extend(apply_bg::bind_primary("shift-n", NewProject, None));
-        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("ScoreVideo")));
-        keys.extend(apply_bg::bind_primary(
-            "shift-s",
-            SaveProjectAs,
-            Some("ScoreVideo"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-o",
-            OpenProject,
-            Some("ScoreVideo"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-n",
-            NewProject,
-            Some("ScoreVideo"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "s",
-            SaveProject,
-            Some("ScoreProject"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-s",
-            SaveProjectAs,
-            Some("ScoreProject"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-o",
-            OpenProject,
-            Some("ScoreProject"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-n",
-            NewProject,
-            Some("ScoreProject"),
-        ));
-        keys.extend(apply_bg::bind_primary("z", Undo, Some("ScoreProject")));
-        keys.extend(apply_bg::bind_primary("y", Redo, Some("ScoreProject")));
-        keys.extend(apply_bg::bind_primary(
-            "shift-z",
-            Redo,
-            Some("ScoreProject"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "m",
-            PairUngrouped,
-            Some("ScoreSync"),
-        ));
-        keys.extend(apply_bg::bind_primary("z", Undo, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary("y", Redo, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary("shift-z", Redo, Some("ScoreSync")));
-        keys.extend(apply_bg::bind_primary(
-            "a",
-            SelectAllPageRegions,
-            Some("ScoreSync"),
-        ));
-        // 分块 / 蒙版: Ctrl+方向键换页 (蒙版换的是组合页签). 裸方向键不绑, 避免误触.
-        for ctx in ["ScoreSync", "MaskTool"] {
-            keys.extend(apply_bg::bind_primary("left", PrevPage, Some(ctx)));
-            keys.extend(apply_bg::bind_primary("right", NextPage, Some(ctx)));
-            keys.extend(apply_bg::bind_primary("up", PrevPage, Some(ctx)));
-            keys.extend(apply_bg::bind_primary("down", NextPage, Some(ctx)));
-        }
-        keys.extend(apply_bg::bind_primary("z", Undo, Some("PageOrganize")));
-        keys.extend(apply_bg::bind_primary("y", Redo, Some("PageOrganize")));
-        keys.extend(apply_bg::bind_primary(
-            "shift-z",
-            Redo,
-            Some("PageOrganize"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "a",
-            SelectAllPageRegions,
-            Some("PageOrganize"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-o",
-            OpenProject,
-            Some("MaskTool"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-n",
-            NewProject,
-            Some("MaskTool"),
-        ));
-        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("MaskTool")));
-        keys.extend(apply_bg::bind_primary(
-            "shift-s",
-            SaveProjectAs,
-            Some("MaskTool"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "a",
-            mask_tool::gui::SelectAll,
-            Some("MaskTool"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "z",
-            mask_tool::gui::Undo,
-            Some("MaskTool"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "y",
-            mask_tool::gui::Redo,
-            Some("MaskTool"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-z",
-            mask_tool::gui::Redo,
-            Some("MaskTool"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "c",
-            CopySpreadPages,
-            Some("ScoreSync"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "v",
-            PasteSpreadPages,
-            Some("ScoreSync"),
-        ));
-        keys.extend(apply_bg::bind_primary("shift-m", DumpMemory, None));
-        photo_edit::gui::bind_embedded_keys(cx);
-        vector_edit::bind_embedded_keys(cx);
-        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("PhotoEdit")));
-        keys.extend(apply_bg::bind_primary("s", SaveProject, Some("VectorEdit")));
-        keys.extend(apply_bg::bind_primary(
-            "shift-s",
-            SaveProjectAs,
-            Some("PhotoEdit"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-o",
-            OpenProject,
-            Some("PhotoEdit"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-n",
-            NewProject,
-            Some("PhotoEdit"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-s",
-            SaveProjectAs,
-            Some("VectorEdit"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-o",
-            OpenProject,
-            Some("VectorEdit"),
-        ));
-        keys.extend(apply_bg::bind_primary(
-            "shift-n",
-            NewProject,
-            Some("VectorEdit"),
-        ));
-        cx.bind_keys(keys);
+        ui_kit::load_prefs_from_disk();
+        keymap::install(cx);
         let bounds = default_window_bounds(cx);
         let initial = initial.clone();
         cx.open_window(
@@ -1571,7 +1369,7 @@ fn paint_save_spinner(window: &mut Window, bounds: Bounds<Pixels>, phase: f32) {
         let dot = 1.6 + (1.0 - t) * 2.8;
         let x = cx + ang.cos() * radius;
         let y = cy + ang.sin() * radius;
-        let mut fill = rgb(0x2563eb);
+        let mut fill = ui_kit::chrome(0x2563eb);
         fill.a = alpha;
         window.paint_quad(quad(
             Bounds {

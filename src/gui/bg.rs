@@ -1129,14 +1129,14 @@ impl ScoreSyncApp {
                 .map(|p| p.is_file())
                 .unwrap_or(false);
         let image_label: SharedString = if image_on {
-            "取消底色".into()
+            ui_kit::t_src("取消底色")
         } else {
-            "应用底色".into()
+            ui_kit::t_src("应用底色")
         };
         let solid_label: SharedString = if solid_on {
-            "取消纯色底色".into()
+            ui_kit::t_src("取消纯色底色")
         } else {
-            "使用纯色底色".into()
+            ui_kit::t_src("使用纯色底色")
         };
         let aw = self.bg.aspect_w.clone();
         let ah = self.bg.aspect_h.clone();
@@ -1148,7 +1148,7 @@ impl ScoreSyncApp {
             .flex()
             .flex_col()
             .min_h(px(0.))
-            .bg(rgb(0xf8fafc))
+            .bg(ui_kit::chrome(0xf8fafc))
             .child(
                 div()
                     .id("bg_side_scroll")
@@ -1172,7 +1172,7 @@ impl ScoreSyncApp {
                                     .w_full()
                                     .child(self.bg_flex_btn(
                                         "bg_pick_open",
-                                        "选择底色".into(),
+                                        ui_kit::t_src("选择底色"),
                                         false,
                                         true,
                                         |this, _, cx| this.open_bg_pick(cx),
@@ -1191,7 +1191,7 @@ impl ScoreSyncApp {
                                     ))
                                     .child(self.bg_flex_btn(
                                         "bg_batch_open",
-                                        "批量加底色".into(),
+                                        ui_kit::t_src("批量加底色"),
                                         false,
                                         true,
                                         |this, _, cx| {
@@ -1209,7 +1209,7 @@ impl ScoreSyncApp {
                                     .w_full()
                                     .child(self.bg_flex_btn(
                                         "bg_photo",
-                                        "底色修图".into(),
+                                        ui_kit::t_src("底色修图"),
                                         false,
                                         can_image,
                                         |this, window, cx| this.try_open_bg_photo(window, cx),
@@ -1217,7 +1217,7 @@ impl ScoreSyncApp {
                                     ))
                                     .child(self.bg_flex_btn(
                                         "bg_use_size",
-                                        "设为分辨率".into(),
+                                        ui_kit::t_src("设为分辨率"),
                                         false,
                                         can_image,
                                         |this, window, cx| {
@@ -1228,7 +1228,7 @@ impl ScoreSyncApp {
                                     ))
                                     .child(self.bg_flex_btn(
                                         "bg_cover",
-                                        "等比填充".into(),
+                                        ui_kit::t_src("等比填充"),
                                         false,
                                         can_image,
                                         |this, window, cx| {
@@ -1248,7 +1248,7 @@ impl ScoreSyncApp {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x334155))
+                                            .text_color(ui_kit::chrome(0x334155))
                                             .flex_shrink_0()
                                             .child("目标分辨率"),
                                     )
@@ -1263,7 +1263,7 @@ impl ScoreSyncApp {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x64748b))
+                                            .text_color(ui_kit::chrome(0x64748b))
                                             .flex_shrink_0()
                                             .child(":"),
                                     )
@@ -1277,7 +1277,7 @@ impl ScoreSyncApp {
                                     ),
                             ),
                     )
-                    .child(div().flex_shrink_0().h(px(1.)).w_full().bg(rgb(0xcbd5e1)))
+                    .child(div().flex_shrink_0().h(px(1.)).w_full().bg(ui_kit::chrome(0xcbd5e1)))
                     .child(
                         div()
                             .flex_1()
@@ -1318,18 +1318,18 @@ impl ScoreSyncApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let bg = if !enabled {
-            rgb(0xf1f5f9)
+            ui_kit::chrome(0xf1f5f9)
         } else if active {
-            rgb(0x2563eb)
+            ui_kit::chrome(0x2563eb)
         } else {
-            rgb(0xe2e8f0)
+            ui_kit::chrome(0xe2e8f0)
         };
         let fg = if !enabled {
-            rgb(0x94a3b8)
+            ui_kit::chrome(0x94a3b8)
         } else if active {
             rgb(0xffffff)
         } else {
-            rgb(0x0f172a)
+            ui_kit::chrome(0x0f172a)
         };
         div()
             .id(id)
@@ -1340,7 +1340,7 @@ impl ScoreSyncApp {
             .rounded_md()
             .bg(bg)
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .text_color(fg)
             .text_xs()
             .flex()
@@ -1351,7 +1351,7 @@ impl ScoreSyncApp {
                 let id_up = id;
                 let id_out = id;
                 d.cursor_pointer()
-                    .hover(move |s| s.bg(if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) }))
+                    .hover(move |s| s.bg(if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -1414,7 +1414,7 @@ impl ScoreSyncApp {
             .w_full()
             .rounded_sm()
             .border_1()
-            .border_color(rgb(0x64748b));
+            .border_color(ui_kit::chrome(0x64748b));
         el = if grow {
             el.flex_1().min_h(px(0.))
         } else {
@@ -1424,7 +1424,7 @@ impl ScoreSyncApp {
             let color_u = color_u32(color);
             el.bg(rgb(color_u))
                 .cursor_pointer()
-                .hover(|s| s.border_color(rgb(0x94a3b8)))
+                .hover(|s| s.border_color(ui_kit::chrome(0x94a3b8)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
@@ -1438,7 +1438,7 @@ impl ScoreSyncApp {
                     }),
                 )
         } else {
-            el.bg(rgb(0x0f172a))
+            el.bg(ui_kit::chrome(0x0f172a))
         }
     }
 
@@ -1461,9 +1461,9 @@ impl ScoreSyncApp {
             .flex_shrink_0()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x1e293b))
+            .bg(ui_kit::chrome(0x1e293b))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(ui_kit::chrome(0x334155))
             .flex()
             .flex_col()
             .gap_2()
@@ -1511,7 +1511,7 @@ impl ScoreSyncApp {
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
-                            .border_color(rgb(0x475569))
+                            .border_color(ui_kit::chrome(0x475569))
                             .cursor_pointer()
                             .child(
                                 canvas(
@@ -1548,7 +1548,7 @@ impl ScoreSyncApp {
                                             px(5.),
                                             rgb(0xffffff),
                                             px(1.5),
-                                            rgb(0x0f172a),
+                                            ui_kit::chrome(0x0f172a),
                                             Default::default(),
                                         ));
                                     },
@@ -1600,7 +1600,7 @@ impl ScoreSyncApp {
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
-                            .border_color(rgb(0x475569))
+                            .border_color(ui_kit::chrome(0x475569))
                             .cursor_pointer()
                             .child(
                                 canvas(
@@ -1636,7 +1636,7 @@ impl ScoreSyncApp {
                                             px(0.),
                                             rgb(0xffffff),
                                             px(1.),
-                                            rgb(0x0f172a),
+                                            ui_kit::chrome(0x0f172a),
                                             Default::default(),
                                         ));
                                     },
@@ -1682,7 +1682,7 @@ impl ScoreSyncApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0xcbd5e1))
+                            .text_color(ui_kit::chrome(0xcbd5e1))
                             .flex_shrink_0()
                             .child("RGB"),
                     )
@@ -1700,15 +1700,15 @@ impl ScoreSyncApp {
                             .border_color(if drop_on {
                                 rgb(0x38bdf8)
                             } else {
-                                rgb(0x475569)
+                                ui_kit::chrome(0x475569)
                             })
                             .bg(if drop_on {
                                 rgb(0x0ea5e9)
                             } else {
-                                rgb(0x334155)
+                                ui_kit::chrome(0x334155)
                             })
                             .text_xs()
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(ui_kit::chrome(0xf8fafc))
                             .child("取")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1718,7 +1718,7 @@ impl ScoreSyncApp {
                                 }),
                             ),
                     )
-                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("R"))
+                    .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("R"))
                     .child(
                         div()
                             .id("bg_rgb_r")
@@ -1727,7 +1727,7 @@ impl ScoreSyncApp {
                             .h(px(20.))
                             .child(r_in),
                     )
-                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("G"))
+                    .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("G"))
                     .child(
                         div()
                             .id("bg_rgb_g")
@@ -1736,7 +1736,7 @@ impl ScoreSyncApp {
                             .h(px(20.))
                             .child(g_in),
                     )
-                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("B"))
+                    .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("B"))
                     .child(
                         div()
                             .id("bg_rgb_b")
@@ -1796,7 +1796,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1816,9 +1816,9 @@ impl ScoreSyncApp {
                     .h(px(360.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1831,7 +1831,7 @@ impl ScoreSyncApp {
                         div()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("选择底色"),
+                            .child(ui_kit::t_src("选择底色")),
                     )
                     .child(
                         div()
@@ -1842,12 +1842,12 @@ impl ScoreSyncApp {
                             .rounded_lg()
                             .border_2()
                             .border_dashed()
-                            .border_color(rgb(0x94a3b8))
-                            .bg(rgb(0xf8fafc))
+                            .border_color(ui_kit::chrome(0x94a3b8))
+                            .bg(ui_kit::chrome(0xf8fafc))
                             .relative()
                             .overflow_hidden()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xf1f5f9)).border_color(rgb(0x64748b)))
+                            .hover(|s| s.bg(ui_kit::chrome(0xf1f5f9)).border_color(ui_kit::chrome(0x64748b)))
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| this.pick_bg_file_dialog(cx)),
@@ -1868,12 +1868,12 @@ impl ScoreSyncApp {
                                         .justify_center()
                                         .gap_2()
                                         .child(
-                                            div().text_3xl().text_color(rgb(0x64748b)).child("🖼"),
+                                            div().text_3xl().text_color(ui_kit::chrome(0x64748b)).child("🖼"),
                                         )
                                         .child(
                                             div()
                                                 .text_sm()
-                                                .text_color(rgb(0x475569))
+                                                .text_color(ui_kit::chrome(0x475569))
                                                 .child(hint.clone()),
                                         ),
                                 )
@@ -1890,7 +1890,7 @@ impl ScoreSyncApp {
                                         .flex()
                                         .justify_center()
                                         .child(
-                                            div().text_xs().text_color(rgb(0xf8fafc)).child(hint),
+                                            div().text_xs().text_color(ui_kit::chrome(0xf8fafc)).child(hint),
                                         ),
                                 )
                             }),
@@ -1934,7 +1934,7 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(ui_kit::overlay())
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1951,9 +1951,9 @@ impl ScoreSyncApp {
                     .max_w(px(720.))
                     .max_h(px(520.))
                     .rounded_lg()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
@@ -1971,7 +1971,7 @@ impl ScoreSyncApp {
                             .px_3()
                             .py_2()
                             .border_b_1()
-                            .border_color(rgb(0xcbd5e1))
+                            .border_color(ui_kit::chrome(0xcbd5e1))
                             .child(
                                 div()
                                     .text_sm()
@@ -1984,7 +1984,7 @@ impl ScoreSyncApp {
                                     .id("bg_batch_close")
                                     .px_2()
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0xe2e8f0)))
+                                    .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)))
                                     .child("×")
                                     .on_mouse_down(
                                         MouseButton::Left,

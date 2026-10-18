@@ -779,9 +779,9 @@ impl ScoreSyncApp {
             .min_w(px(196.))
             .py_1()
             .rounded_md()
-            .bg(rgb(0xffffff))
+            .bg(ui_kit::card())
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -801,7 +801,7 @@ impl ScoreSyncApp {
                     .px_3()
                     .py_1()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(0xdbeafe)))
+                    .hover(|s| s.bg(ui_kit::chrome(0xdbeafe)))
                     .child(Self::menu_item_label(global, "全局开启"))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -818,7 +818,7 @@ impl ScoreSyncApp {
                     .px_3()
                     .py_1()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(0xdbeafe)))
+                    .hover(|s| s.bg(ui_kit::chrome(0xdbeafe)))
                     .child(Self::menu_item_label(sync, "同步同根数位置"))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -835,7 +835,7 @@ impl ScoreSyncApp {
                     .mt_1()
                     .pt_1()
                     .border_t_1()
-                    .border_color(rgb(0xe2e8f0))
+                    .border_color(ui_kit::chrome(0xe2e8f0))
                     .px_3()
                     .py_1()
                     .flex()
@@ -845,7 +845,7 @@ impl ScoreSyncApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x475569))
+                            .text_color(ui_kit::chrome(0x475569))
                             .child("当前页根数"),
                     )
                     .child(self.guide_count_step_btn("guide-cnt-dec", "−", can_dec, false, cx))
@@ -853,7 +853,7 @@ impl ScoreSyncApp {
                         div()
                             .min_w(px(20.))
                             .text_sm()
-                            .text_color(rgb(0x0f172a))
+                            .text_color(ui_kit::chrome(0x0f172a))
                             .child(format!("{guide_n}")),
                     )
                     .child(self.guide_count_step_btn("guide-cnt-inc", "+", can_inc, true, cx)),
@@ -871,9 +871,9 @@ impl ScoreSyncApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let fg = if enabled {
-            rgb(0x0f172a)
+            ui_kit::chrome(0x0f172a)
         } else {
-            rgb(0x94a3b8)
+            ui_kit::chrome(0x94a3b8)
         };
         let mut el = div()
             .id(id)
@@ -884,13 +884,13 @@ impl ScoreSyncApp {
             .items_center()
             .justify_center()
             .border_1()
-            .border_color(rgb(0xcbd5e1))
+            .border_color(ui_kit::chrome(0xcbd5e1))
             .text_color(fg)
             .child(label);
         if enabled {
             el = el
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0xe2e8f0)))
+                .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
@@ -913,9 +913,9 @@ impl ScoreSyncApp {
     fn align_menu_panel(&self, x: f32, y: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let can_global = self.global_align_available(cx);
         let global_fg = if can_global {
-            rgb(0x0f172a)
+            ui_kit::chrome(0x0f172a)
         } else {
-            rgb(0x94a3b8)
+            ui_kit::chrome(0x94a3b8)
         };
         let mut global_row = div()
             .id("align-ctx-global")
@@ -926,7 +926,7 @@ impl ScoreSyncApp {
         if can_global {
             global_row = global_row
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0xdbeafe)))
+                .hover(|s| s.bg(ui_kit::chrome(0xdbeafe)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
@@ -944,9 +944,9 @@ impl ScoreSyncApp {
                 .min_w(px(168.))
                 .py_1()
                 .rounded_md()
-                .bg(rgb(0xffffff))
+                .bg(ui_kit::card())
                 .border_1()
-                .border_color(rgb(0x94a3b8))
+                .border_color(ui_kit::chrome(0x94a3b8))
                 .occlude()
                 .on_mouse_down(
                     MouseButton::Left,
@@ -967,7 +967,7 @@ impl ScoreSyncApp {
                         .px_3()
                         .py_1()
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0xdbeafe)))
+                        .hover(|s| s.bg(ui_kit::chrome(0xdbeafe)))
                         .child("还原初始状态")
                         .on_mouse_down(
                             MouseButton::Left,

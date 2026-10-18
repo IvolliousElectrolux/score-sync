@@ -459,8 +459,8 @@ impl ScoreSyncApp {
             let gid = g.id.clone();
             let active = active_gid.as_ref() == Some(&gid);
             let label = self.doc.group_crop_label(i);
-            let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
-            let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
+            let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
+            let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
             row = row.child(
                 div()
                     .id(SharedString::from(format!("mask-tab-{gid}")))
@@ -501,8 +501,8 @@ impl ScoreSyncApp {
             .flex_col()
             .w_full()
             .border_b_1()
-            .border_color(rgb(0xcbd5e1))
-            .bg(rgb(0xf8fafc))
+            .border_color(ui_kit::chrome(0xcbd5e1))
+            .bg(ui_kit::chrome(0xf8fafc))
             .child(row);
         if show_h {
             let thumb_w = ((track_w * track_w) / (track_w + max_x)).clamp(24.0, track_w);
@@ -516,7 +516,7 @@ impl ScoreSyncApp {
                     .h(px(8.))
                     .w_full()
                     .relative()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -547,7 +547,7 @@ impl ScoreSyncApp {
                             .h_full()
                             .w(px(thumb_w))
                             .rounded_sm()
-                            .bg(rgb(0x94a3b8))
+                            .bg(ui_kit::chrome(0x94a3b8))
                             .cursor_pointer()
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -625,8 +625,8 @@ impl ScoreSyncApp {
             let idx = tab.index;
             let active = tab.active;
             let dragging = drag_from == Some(idx);
-            let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
-            let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
+            let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
+            let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
             row = row.child(
                 div()
                     .id(SharedString::from(format!("tab-{idx}")))
@@ -663,7 +663,7 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .when(!tab_reordering, |d| {
-                                d.hover(|s| s.bg(rgb(0x94a3b8))).block_mouse_except_scroll()
+                                d.hover(|s| s.bg(ui_kit::chrome(0x94a3b8))).block_mouse_except_scroll()
                             })
                             .child("×")
                             .on_mouse_down(
@@ -759,7 +759,7 @@ impl ScoreSyncApp {
                 .px_2()
                 .py_1()
                 .rounded_md()
-                .bg(rgb(0xcbd5e1))
+                .bg(ui_kit::chrome(0xcbd5e1))
                 .cursor_pointer()
                 .flex_shrink_0()
                 .child("+")
@@ -831,8 +831,8 @@ impl ScoreSyncApp {
             .flex_col()
             .w_full()
             .border_b_1()
-            .border_color(rgb(0xcbd5e1))
-            .bg(rgb(0xf8fafc))
+            .border_color(ui_kit::chrome(0xcbd5e1))
+            .bg(ui_kit::chrome(0xf8fafc))
             .child(row);
 
         if show_h {
@@ -847,7 +847,7 @@ impl ScoreSyncApp {
                     .h(px(8.))
                     .w_full()
                     .relative()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -878,7 +878,7 @@ impl ScoreSyncApp {
                             .h_full()
                             .w(px(thumb_w))
                             .rounded_sm()
-                            .bg(rgb(0x94a3b8))
+                            .bg(ui_kit::chrome(0x94a3b8))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -940,7 +940,7 @@ impl ScoreSyncApp {
             .top(px(f32::from(b.origin.y)))
             .w(px(2.))
             .h(px(f32::from(b.size.height)))
-            .bg(rgb(0xf59e0b))
+            .bg(ui_kit::chrome(0xf59e0b))
             .into_any_element()
     }
 
@@ -971,11 +971,11 @@ impl ScoreSyncApp {
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(rgb(0x2563eb))
+            .bg(ui_kit::chrome(0x2563eb))
             .text_color(rgb(0xffffff))
             .text_sm()
             .border_1()
-            .border_color(rgb(0x1e40af))
+            .border_color(ui_kit::chrome(0x1e40af))
             .whitespace_nowrap()
             .child(label)
             .into_any_element()
@@ -1073,9 +1073,9 @@ impl ScoreSyncApp {
                     .min_w(px(148.))
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0xffffff))
+                    .bg(ui_kit::card())
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _, _, cx| {
@@ -1088,7 +1088,7 @@ impl ScoreSyncApp {
                             .px_3()
                             .py_1()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xdbeafe)))
+                            .hover(|s| s.bg(ui_kit::chrome(0xdbeafe)))
                             .child("复制本页")
                             .on_mouse_down(
                                 MouseButton::Left,

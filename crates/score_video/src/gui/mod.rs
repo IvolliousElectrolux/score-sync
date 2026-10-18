@@ -363,7 +363,7 @@ impl ScoreVideoApp {
                 div()
                     .w(px(440.))
                     .max_h(px(420.))
-                    .bg(rgb(0x1e293b))
+                    .bg(ui_kit::chrome(0x1e293b))
                     .rounded_lg()
                     .p_4()
                     .flex()
@@ -379,7 +379,7 @@ impl ScoreVideoApp {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(ui_kit::chrome(0xf8fafc))
                             .text_lg()
                             .child(title),
                     )
@@ -391,7 +391,7 @@ impl ScoreVideoApp {
                             .max_h(px(280.))
                             .overflow_scroll()
                             .text_sm()
-                            .text_color(rgb(0xcbd5e1))
+                            .text_color(ui_kit::chrome(0xcbd5e1))
                             .whitespace_normal()
                             .child(body),
                     )
@@ -402,11 +402,11 @@ impl ScoreVideoApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(0x2563eb))
+                            .bg(ui_kit::chrome(0x2563eb))
                             .text_color(rgb(0xffffff))
                             .text_sm()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x1d4ed8)))
+                            .hover(|s| s.bg(ui_kit::chrome(0x1d4ed8)))
                             .child("确定")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -480,6 +480,7 @@ impl Render for ScoreVideoApp {
 /// 独立运行入口 (仅供该 crate 单独调试): 传入若干图片作为素材池 + 可选音频.
 pub fn run_gui(images: Vec<PathBuf>, audio: Option<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
+        ui_kit::load_prefs_from_disk();
         bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1360.), px(860.)), cx);
         cx.open_window(

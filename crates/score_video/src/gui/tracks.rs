@@ -14,7 +14,7 @@ impl ScoreVideoApp {
             .h(px(TRACK_H))
             .flex_shrink_0()
             .border_b_1()
-            .border_color(rgb(0x1e293b));
+            .border_color(ui_kit::chrome(0x1e293b));
         for c in self.timeline.video_clips.clone() {
             let x = ((c.start - scroll) as f32) * pps;
             let w = ((c.end - c.start) as f32 * pps).max(2.0);
@@ -34,16 +34,16 @@ impl ScoreVideoApp {
                     .bottom_0()
                     .left(px(x))
                     .w(px(w))
-                    .bg(if is_sel { rgb(0x2563eb) } else { rgb(0x334155) })
+                    .bg(if is_sel { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0x334155) })
                     .border_1()
                     .border_color(if is_sel {
                         rgb(0x93c5fd)
                     } else {
-                        rgb(0x0f172a)
+                        ui_kit::chrome(0x0f172a)
                     })
                     .overflow_hidden()
                     .text_xs()
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(ui_kit::chrome(0xe2e8f0))
                     .px_1()
                     .child(label)
                     .cursor_pointer()
@@ -70,7 +70,7 @@ impl ScoreVideoApp {
             .h(px(TRACK_H))
             .flex_shrink_0()
             .border_b_1()
-            .border_color(rgb(0x1e293b))
+            .border_color(ui_kit::chrome(0x1e293b))
             .bg(rgb(0x111827))
             .on_mouse_down(
                 MouseButton::Left,
@@ -107,16 +107,16 @@ impl ScoreVideoApp {
                 (FadeKind::Out, true) => rgb(0xfbbf24),
             };
             let border = if is_sel {
-                rgb(0xf8fafc)
+                ui_kit::chrome(0xf8fafc)
             } else if keep_bg {
                 rgb(0xfef3c7)
             } else {
-                rgb(0x0f172a)
+                ui_kit::chrome(0x0f172a)
             };
             let text_color = if keep_bg {
-                rgb(0x1e293b)
+                ui_kit::chrome(0x1e293b)
             } else {
-                rgb(0xf1f5f9)
+                ui_kit::chrome(0xf1f5f9)
             };
             let id = f.id;
             row = row.child(
@@ -264,9 +264,9 @@ impl ScoreVideoApp {
                     .min_w(px(180.))
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x1e293b))
+                    .bg(ui_kit::chrome(0x1e293b))
                     .border_1()
-                    .border_color(rgb(0x64748b))
+                    .border_color(ui_kit::chrome(0x64748b))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _, _, cx| {
@@ -280,8 +280,8 @@ impl ScoreVideoApp {
                             .py_1()
                             .cursor_pointer()
                             .text_xs()
-                            .text_color(rgb(0xf1f5f9))
-                            .hover(|s| s.bg(rgb(0x334155)))
+                            .text_color(ui_kit::chrome(0xf1f5f9))
+                            .hover(|s| s.bg(ui_kit::chrome(0x334155)))
                             .child(label)
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -365,7 +365,7 @@ impl ScoreVideoApp {
                 .w(px(w))
                 .bg(if is_sel { rgb(0x0891b2) } else { rgb(0x155e63) })
                 .border_1()
-                .border_color(rgb(0x0f172a))
+                .border_color(ui_kit::chrome(0x0f172a))
                 .overflow_hidden()
                 .cursor(if split_armed {
                     CursorStyle::Crosshair
@@ -374,10 +374,10 @@ impl ScoreVideoApp {
                 })
                 .when(dragging, |d| d.opacity(0.35))
                 .when(show_line && !line_after, |d| {
-                    d.border_l_2().border_color(rgb(0xf59e0b))
+                    d.border_l_2().border_color(ui_kit::chrome(0xf59e0b))
                 })
                 .when(show_line && line_after, |d| {
-                    d.border_r_2().border_color(rgb(0xf59e0b))
+                    d.border_r_2().border_color(ui_kit::chrome(0xf59e0b))
                 })
                 .child({
                     let entity = cx.entity().clone();
@@ -443,7 +443,7 @@ impl ScoreVideoApp {
                     .top_0()
                     .left_0()
                     .text_xs()
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(ui_kit::chrome(0xe2e8f0))
                     .bg(rgba(0x0f172ab0))
                     .px_1()
                     .child(c.label.clone()),
@@ -681,7 +681,7 @@ impl ScoreVideoApp {
             .h(px(TRACK_BAR_H))
             .flex_shrink_0()
             .border_t_1()
-            .border_color(rgb(0x1e293b))
+            .border_color(ui_kit::chrome(0x1e293b))
             .bg(rgb(0x0b1220))
             .child(
                 canvas(
@@ -729,8 +729,8 @@ impl ScoreVideoApp {
                     .left(px(thumb_left))
                     .w(px(thumb_w))
                     .rounded_sm()
-                    .bg(rgb(0x334155))
-                    .hover(|s| s.bg(rgb(0x475569)))
+                    .bg(ui_kit::chrome(0x334155))
+                    .hover(|s| s.bg(ui_kit::chrome(0x475569)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -755,7 +755,7 @@ impl ScoreVideoApp {
                             .rounded_full()
                             .bg(rgb(0x93c5fd))
                             .border_1()
-                            .border_color(rgb(0x0f172a))
+                            .border_color(ui_kit::chrome(0x0f172a))
                             .cursor(CursorStyle::ResizeColumn)
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -779,7 +779,7 @@ impl ScoreVideoApp {
                             .rounded_full()
                             .bg(rgb(0x93c5fd))
                             .border_1()
-                            .border_color(rgb(0x0f172a))
+                            .border_color(ui_kit::chrome(0x0f172a))
                             .cursor(CursorStyle::ResizeColumn)
                             .on_mouse_down(
                                 MouseButton::Left,

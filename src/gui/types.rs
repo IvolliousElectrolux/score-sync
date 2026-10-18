@@ -56,7 +56,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 【分块】快捷键:\n\
   {m}O 打开图片/PDF (仅本面板) | {ms}N 新建工程 | {ms}O 打开工程 | {m}S 保存工程 | {ms}S 另存工程\n\
   D 识别本页 | A 识别全部页\n\
-  工具栏「谱表分块 | 双页对开」切换整份工程的版式. 对开不识别谱表, 按页序两页一册 (末页落单则右页留空, 要错开就在前面插入空白页). 空白页是和这格空页一样的占位, 不是白纸, 成片里不画它. 一对里左右都是空页时, 这一对自动去掉. 缩略图下是这一页自己的文件名, `_p` 页码始终留着, 太长时省略号放在页码前面. 拖动换位后仍然认得出来. 多册按窗口宽度折行. 拖动改页序, 拖到相邻页且不会换位时不亮指示线; 把一对的右页拖进下一对左页的左侧, 会在原位置补空白页, 让左页单独留下. {m}点击按点选顺序多选, Shift 连选, Delete 删除. 「复制」把选中页收成一串, 紧贴在最后点中的那一页右侧 (中间有空的也会靠拢). {m}C 只记入待贴内容, {m}V 贴到当时选中页的右侧. 右键可复制, 粘贴到这一页的左侧或右侧, 或在这一页前面或后面插入空白页. 点一册后切到蒙版即这一对开.\n\
+  设置里的项目属性切换「谱表分块」或「双页对开」. 对开不识别谱表, 按页序两页一册 (末页落单则右页留空, 要错开就在前面插入空白页). 空白页是和这格空页一样的占位, 不是白纸, 成片里不画它. 一对里左右都是空页时, 这一对自动去掉. 缩略图下是这一页自己的文件名, `_p` 页码始终留着, 太长时省略号放在页码前面. 拖动换位后仍然认得出来. 多册按窗口宽度折行. 拖动改页序, 拖到相邻页且不会换位时不亮指示线; 把一对的右页拖进下一对左页的左侧, 会在原位置补空白页, 让左页单独留下. {m}点击按点选顺序多选, Shift 连选, Delete 删除. 「复制」把选中页收成一串, 紧贴在最后点中的那一页右侧 (中间有空的也会靠拢). {m}C 只记入待贴内容, {m}V 贴到当时选中页的右侧. 右键可复制, 粘贴到这一页的左侧或右侧, 或在这一页前面或后面插入空白页. 点一册后切到蒙版即这一对开.\n\
   对开的蒙版可直接拖页面 (不必按 Shift). 左右可以从初始位置向外滑出成片, 直到这一页只剩一条边还留在原来的成片里; 往对面拖则停在成片对侧. 上下和谱表分块一样, 到边就停: 两页一样高时已经顶住上下边, 不能再上下拖. 「左右对称」默认开着: 拖一页, 另一页反向移动. 关掉后只移动被拖的那一页, 另一页留在原地. 「同步左右」把当前这一对里各页相对自己槽位的左右偏移, 按像素套到其余每一对的同一侧 (左对左, 右对右). 页更窄、移不到那么远时停在成片边缘, 已画上的蒙版跟着页走. 只改左右, 不改上下和四边裁切. 当前只有左页时, 只同步各对的左页. 四边仍是裁切, 向外扩也留在成片里. 此模式没有辅助线和对齐. 谱表分块仍是 Shift+拖左右, 探出原块左右的部分只在蒙版里画出, 终稿会裁掉.\n\
   N 添加新块 | S 分割块 | M 合并组合 | {m}M 一键两两合并 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
   E 导出组合 | R 重置本页分组 | P 组织页面 | H / F1 操作说明\n\
@@ -172,22 +172,92 @@ pub(crate) const HELP_TEMPLATE: &str = "\
   空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
   P 组织页面: 缩略图后台并行加载 (关窗仍保留), 拖动排序, {m}点击多选 / Shift 连选, Delete 删除选中页.\n\
   右侧顶栏可切换「分块 / 底色 / 蒙版 / 视频」四个面板.\n\
-  标题栏右侧图标: 新建 / 打开工程 / 保存 / 另存 ({ms}N / {ms}O / {m}S / {ms}S), 悬停显示名称; ? 为操作说明 (H / F1).\n\
+  标题栏右侧图标: 新建 / 打开工程 / 保存 / 另存 / 操作说明 / 设置 ({ms}N / {ms}O / {m}S / {ms}S / H / {m},), 悬停显示名称.\n\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
   {ms}M 把当前内存分项写到状态栏与 %TEMP%/score_sync_trace.log (页图/底色/贴图/蒙版/视频池); `SCORE_SYNC_TRACE=1` 时每 2 秒自动采样.\n\
   视频终稿缓存在工程旁 `.staffcrop.cache/pool/` (不打进 zip); 切到视频面板时按当前组合重建, 已删除组合的旧文件会清掉.\n\
-  启动时若已联网会检查 GitHub 更新, 有新版本则弹出当前到最新之间的版本摘要.\n\
+  设置里可以改配色, 语言和快捷键. 若开着「启动时检查更新」且已联网, 会检查 GitHub, 有新版本则弹出当前到最新之间的版本摘要. 键位以设置为准, 下面列出的是默认方案.\n\
   PDF: 以路径和文字为主的页保持矢量 (工程里嵌 PDF, 分块坐标是 point, 不落整页 PNG). 放大时按视口重光栅. 成片在没有底色时大约按页宽 1600px, 有底色时对齐目标分辨率. 铺满扫描图、几乎没有路径的页仍走分辨率框 (默认标记尺寸×3; 页内图像更大则按图像像素预填), 导出使用导入后的像素, 不会再放大.\n\
   PDF 导入依赖 pdfium、视频导出依赖 ffmpeg, 需把对应文件放在程序所在目录 (或系统 PATH) 下.";
 
 pub(crate) fn help_text() -> String {
+    let template = if ui_kit::language() == ui_kit::Language::En {
+        HELP_TEMPLATE_EN
+    } else {
+        HELP_TEMPLATE
+    };
     // {ma} / {ms} 必须先于 {m}, 否则会被拆开.
-    HELP_TEMPLATE
+    template
         .replace("{ms}", apply_bg::primary_shift())
         .replace("{ma}", apply_bg::primary_alt())
         .replace("{m}", apply_bg::primary_mod())
         .replace("{a}", apply_bg::alt_mod())
 }
+
+const HELP_TEMPLATE_EN: &str = "\
+[Blocks]\n\
+  {m}O open image/PDF (this panel only) | {ms}N new project | {ms}O open project | {m}S save | {ms}S save as\n\
+  D detect this page | A detect all pages\n\
+  Project properties in Settings switches Staff blocks or Two-page spread. Spread does not detect staves: pages are paired in order (a leftover last page leaves the right side empty; insert a blank page in front to offset the pairing). A blank page is an empty slot, not paper, and is not drawn in the finished image. A pair of two blanks is dropped. The filename sits under each thumbnail; the _p number is kept, with the ellipsis before the number when the name is long. Dragging to reorder keeps the name. Books wrap to the window width. Dragging onto a neighbor that would not change order shows no indicator. Dragging a right page to the left of the next pair's left page inserts a blank so the left page stays alone. {m}click adds to the selection in click order, Shift extends, Delete removes. Duplicate gathers the selection and places it just to the right of the last clicked page. {m}C remembers the selection, {m}V pastes to the right of the page selected at that moment. Right-click can duplicate, paste to the left or right, or insert a blank before or after. Opening Mask on a book edits that pair.\n\
+  Spread mask: drag a page directly (no Shift). Left and right can slide outward until one edge remains inside the original sheet; dragging toward the other page stops at the far side. Up and down stop at the edge. Mirror left/right is on by default: the other page moves the opposite way. Turn it off to move only the dragged page. Sync left/right copies the current pair's horizontal offsets, in pixels, onto the same side of every other pair. A narrower page stops at the sheet edge, and masks move with the page. Only horizontal offsets change. Edge drags stay inside the sheet. This mode has no guides or align. Staff blocks still use Shift to drag sideways; the part past the original block is drawn here and cropped in the final image.\n\
+  N add block | S split | M merge | {m}M pair ungrouped | U ungroup | G share footnote | Delete delete\n\
+  E export groups | R reset this page | P organize pages | H / F1 help\n\
+  {m}A select all blocks on the page | {m}click multi-selects output groups\n\
+  {m}Z/Y undo (remembered per panel; closing a page can still undo)\n\
+  Wheel scrolls vertically, Shift+wheel horizontally, {m}wheel zooms\n\
+  {m}Left / {m}Up previous page, {m}Right / {m}Down next page; {ms}wheel does the same\n\
+\n\
+[Background] (after switching the right side to Background):\n\
+  The left side previews the background and group (read-only, wheel changes group).\n\
+  Choose background imports a picture. Apply / Clear background and solid color are mutually exclusive.\n\
+  Edit background opens the imported picture. Use as resolution sets the target to the source width and height. Cover scales the picture so the short side matches; a long side within 10 px and 0.5% of the target is snapped. The score uses the same placement as the mask: width matches the target, and it shrinks only when it is too tall.\n\
+  Formats are detected from file contents. A picture smaller than the target is scaled with Cover when applied.\n\
+  After clearing the background, vector ink is padded by its own color and transparency is no longer filled white.\n\
+  The palette is HSV / RGB / recent colors. The eyedropper samples the preview.\n\
+  Target resolution and batch background are independent. {m}Z/Y undoes apply, clear, cover, resolution, solid color, and target size.\n\
+\n\
+[Mask] (after switching the right side to Mask):\n\
+  Start in select mode. With no mask selected, drag a block up/down, drag a side to crop, Shift+drag to move sideways.\n\
+  B box | L lasso | P pan | brush/eraser in the sidebar ({a}+wheel changes size)\n\
+  E export this page | F fit | Delete delete selection\n\
+  {m}Left / Up previous group, {m}Right / Down next group; {ms}wheel does the same\n\
+  {m}A select all masks | {m}Z/Y undo\n\
+  T or Edit enters edit for the selected block. Vector pages open vector edit; bitmap pages open bitmap edit.\n\
+  Box (V) / wand (W) / lasso (L); move (M); canvas (K). Stamp (S) samples with {a}. Brush (B). Eraser (E). {m}C / {m}V copies a selection on the canvas, or a layer when the click is on the layer panel.\n\
+  Filters and Adjust affect the current layer, or the selection when there is one. Esc closes the picker or an open lasso first, then clears the selection, then leaves edit. {m}S still saves the project.\n\
+  Vector edit (T on a vector page; H is the hand here, help is F1 or the title-bar ?):\n\
+  Select (V), nodes (A), canvas (K), hand (H or hold Space), pen (P), pencil (B), eraser (E), lasso (L).\n\
+  {m}G group, {ms}G ungroup, {ma}G regroup. {m}C / {m}V copy and paste. J extracts to a new layer. F2 renames. F fits.\n\
+  Guides and Align are in the top bar. Right-click for global options.\n\
+\n\
+[Video] (after switching the right side to Video, click the timeline or preview first):\n\
+  Space play/pause | Left / Right seek 1 second | Shift+Left / Shift+Right seek 5 seconds\n\
+  N insert the next group | W wipe in the next page\n\
+  I mark fade in | O mark fade out\n\
+  Delete / Backspace deletes the selection\n\
+  {m}Z/Y undo timeline edits\n\
+  Drag clip edges to trim, drag the body to move. {m}click multi-selects fades. Right-click Keep background fades the score only.\n\
+  {m}wheel zooms the timeline.\n\
+\n\
+Steps:\n\
+1. Open or drop images or a PDF. Page images live in a session temp directory; memory keeps a preview proxy.\n\
+2. {m}S saves one .staffcrop package. {ms}O continues later. {ms}N starts empty. Closing with unsaved changes asks first.\n\
+3. Right-click a tab to duplicate the page. Organize pages (P) reorders and deletes with thumbnails.\n\
+4. Each page is detected on its own. Detect all pages runs in parallel within the memory budget. Vector PDFs stay vector and use long horizontal staff lines.\n\
+5. Add block (N), split (S), merge (M), share footnote, and {m}M to pair ungrouped blocks.\n\
+6. Mask edits the vertical composite of the current group. Drag blocks, then export.\n\
+7. Background is an undoable layer under each output group. Batch background is separate from the project resolution.\n\
+8. Video: preview, three tracks, and a pool of output groups. Audio is not stored in the project, only its path.\n\
+9. Export video: MP4 (AAC) or MKV (FLAC). Resolution follows the largest still.\n\
+\n\
+Other:\n\
+  Double-click empty space or press F to fit. Drag the splitter to resize the side panel.\n\
+  The right side switches Blocks / Background / Mask / Video.\n\
+  Title-bar icons: new, open, save, save as, help, settings. A * means unsaved; a spinner means saving.\n\
+  Shortcuts can be changed in Settings. The keys above are the defaults.\n\
+  If Check for updates on startup is on and the machine is online, GitHub is checked once.\n\
+  PDF and video export need pdfium and ffmpeg beside the program or on PATH.\n\
+";
 
 /// 画布编辑工具 (互斥)
 #[derive(Clone, Copy, PartialEq, Eq, Default)]

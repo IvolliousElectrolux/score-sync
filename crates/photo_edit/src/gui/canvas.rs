@@ -345,7 +345,7 @@ impl PhotoEditApp {
                             ox,
                             oy,
                             layer,
-                            rgb(0x64748b),
+                            ui_kit::chrome(0x64748b),
                             1.2,
                             true,
                         );
@@ -404,7 +404,7 @@ impl PhotoEditApp {
                         }
                     };
                     if show_canvas {
-                        paint_rect(0.0, 0.0, cw - 1.0, ch - 1.0, rgb(0xf59e0b), 1.6, true, 1.0, false);
+                        paint_rect(0.0, 0.0, cw - 1.0, ch - 1.0, ui_kit::chrome(0xf59e0b), 1.6, true, 1.0, false);
                     }
                     let (bw, bh, shift_x, shift_y) = if let Some((ow, oh, _, ox, oy)) = canvas_drag
                     {
@@ -521,7 +521,7 @@ impl PhotoEditApp {
                                     size: size(px(hs * 2.0), px(hs * 2.0)),
                                 },
                                 px(0.),
-                                rgb(0xf8fafc),
+                                ui_kit::chrome(0xf8fafc),
                                 px(1.2),
                                 rgb(0xf97316),
                                 Default::default(),
@@ -611,7 +611,7 @@ impl PhotoEditApp {
                             stroke.move_to(point(px(ox + sx0), px(oy + sy0)));
                             stroke.line_to(point(px(ox + sx1), px(oy + sy1)));
                             if let Ok(path) = stroke.build() {
-                                window.paint_path(path, if on { rgb(0x38bdf8) } else { rgb(0xf59e0b) });
+                                window.paint_path(path, if on { rgb(0x38bdf8) } else { ui_kit::chrome(0xf59e0b) });
                             }
                         }
                     }
@@ -660,9 +660,9 @@ impl PhotoEditApp {
                                         size: size(px(hs * 2.0), px(hs * 2.0)),
                                     },
                                     px(0.),
-                                    rgb(0xf8fafc),
+                                    ui_kit::chrome(0xf8fafc),
                                     px(1.2),
-                                    rgb(0x0f172a),
+                                    ui_kit::chrome(0x0f172a),
                                     Default::default(),
                                 ));
                             }
@@ -1773,9 +1773,9 @@ fn paint_closed_outline(
     if segs.is_empty() {
         return;
     }
-    let mut halo = rgb(0x0f172a);
+    let mut halo = ui_kit::chrome(0x0f172a);
     halo.a = 0.72;
-    let mut core = rgb(0xf8fafc);
+    let mut core = ui_kit::chrome(0xf8fafc);
     core.a = 0.95;
     paint_segments(window, &segs, 2.8, halo);
     paint_segments(window, &segs, 1.4, core);
@@ -2126,7 +2126,7 @@ fn paint_brush_ring(
     fill_rgb: Option<[u8; 3]>,
 ) {
     let r = r.max(1.5);
-    let mut fill = fill_rgb.map(rgb8).unwrap_or(rgb(0xf8fafc));
+    let mut fill = fill_rgb.map(rgb8).unwrap_or(ui_kit::chrome(0xf8fafc));
     fill.a = if fill_rgb.is_some() { 0.35 } else { 0.16 };
     let ring_w = (r * 0.08).clamp(1.5, 2.5);
     let b = Bounds {

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, point, prelude::*, px, rgb, size, App, Application, Bounds, Context, Entity,
+    actions, div, point, prelude::*, px, size, App, Application, Bounds, Context, Entity,
     ExternalPaths, FocusHandle, Focusable, KeyBinding, Pixels, Point, Render, RenderImage,
     SharedString, Window, WindowBounds, WindowOptions,
 };
@@ -1952,15 +1952,15 @@ impl Render for VectorEditApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0xf8fafc))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::chrome(0xf8fafc))
+            .text_color(ui_kit::chrome(0x0f172a))
             .font_family(apply_bg::ui_font())
             .child(
                 div()
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(0xcbd5e1))
+                    .border_color(ui_kit::chrome(0xcbd5e1))
                     .child(div().text_lg().child(title))
                     .child(self.toolbar(cx)),
             )
@@ -2102,6 +2102,7 @@ pub fn bind_keys(cx: &mut App) {
 
 pub fn run_gui(initial: Option<PathBuf>) {
     Application::new().run(move |cx: &mut App| {
+        ui_kit::load_prefs_from_disk();
         apply_bg::text_input::bind_keys(cx);
         bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);

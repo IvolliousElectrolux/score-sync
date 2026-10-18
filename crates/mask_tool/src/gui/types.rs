@@ -150,7 +150,7 @@ pub(crate) fn sample_ring_points(cx: f32, cy: f32, r: f32) -> impl Iterator<Item
 
 /// 滴管 / 取色图标 (约 14×14 视口内绘制).
 pub(crate) fn eyedropper_icon(active: bool) -> impl IntoElement {
-    let stroke = if active { rgb(0xf8fafc) } else { rgb(0xe2e8f0) };
+    let stroke = if active { ui_kit::chrome(0xf8fafc) } else { ui_kit::chrome(0xe2e8f0) };
     div().size(px(14.)).flex_shrink_0().child(
         canvas(|_, _, _| {}, {
             move |bounds, _, window, _| {

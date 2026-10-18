@@ -13,6 +13,19 @@ pub enum ToolMode {
 }
 
 impl ToolMode {
+    pub fn command_id(self) -> &'static str {
+        match self {
+            ToolMode::Select => "vector.select",
+            ToolMode::Node => "vector.node",
+            ToolMode::Canvas => "vector.canvas",
+            ToolMode::Hand => "vector.hand",
+            ToolMode::Pen => "vector.pen",
+            ToolMode::Pencil => "vector.pencil",
+            ToolMode::Eraser => "vector.eraser",
+            ToolMode::Lasso => "vector.lasso",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ToolMode::Select => "选择",

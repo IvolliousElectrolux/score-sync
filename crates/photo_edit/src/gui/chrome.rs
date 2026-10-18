@@ -17,83 +17,93 @@ impl PhotoEditApp {
             .w_full()
             .child(self.tool_btn(
                 "sel",
-                "框选 (V)",
+                ui_kit::menu_label(ui_kit::t("photo.select"), "photo.select"),
                 self.mode == ToolMode::Select,
                 ToolMode::Select,
                 cx,
             ))
             .child(self.tool_btn(
                 "mov",
-                "移动 (M)",
+                ui_kit::menu_label(ui_kit::t("photo.move"), "photo.move"),
                 self.mode == ToolMode::Move,
                 ToolMode::Move,
                 cx,
             ))
             .child(self.tool_btn(
                 "can",
-                "画布 (K)",
+                ui_kit::menu_label(ui_kit::t("photo.canvas"), "photo.canvas"),
                 self.mode == ToolMode::Canvas,
                 ToolMode::Canvas,
                 cx,
             ))
             .child(self.tool_btn(
                 "hel",
-                "修复 (H)",
+                ui_kit::menu_label(ui_kit::t("photo.heal"), "photo.heal"),
                 self.mode == ToolMode::Heal,
                 ToolMode::Heal,
                 cx,
             ))
             .child(self.tool_btn(
                 "cln",
-                "图章 (S)",
+                ui_kit::menu_label(ui_kit::t("photo.clone"), "photo.clone"),
                 self.mode == ToolMode::Clone,
                 ToolMode::Clone,
                 cx,
             ))
             .child(self.tool_btn(
                 "pnt",
-                "画笔 (B)",
+                ui_kit::menu_label(ui_kit::t("photo.paint"), "photo.paint"),
                 self.mode == ToolMode::Paint,
                 ToolMode::Paint,
                 cx,
             ))
             .child(self.tool_btn(
                 "ers",
-                "橡皮 (E)",
+                ui_kit::menu_label(ui_kit::t("photo.eraser"), "photo.eraser"),
                 self.mode == ToolMode::Eraser,
                 ToolMode::Eraser,
                 cx,
             ))
             .child(self.tool_btn(
                 "wnd",
-                "魔棒 (W)",
+                ui_kit::menu_label(ui_kit::t("photo.wand"), "photo.wand"),
                 self.mode == ToolMode::Wand,
                 ToolMode::Wand,
                 cx,
             ))
             .child(self.tool_btn(
                 "las",
-                "套索 (L)",
+                ui_kit::menu_label(ui_kit::t("photo.lasso"), "photo.lasso"),
                 self.mode == ToolMode::Lasso,
                 ToolMode::Lasso,
                 cx,
             ))
             .child(self.action_btn(
                 "newl",
-                "提出图层 (J)",
+                ui_kit::menu_label(ui_kit::t("photo.extract"), "photo.extract"),
                 |t, _, cx| t.new_layer_from_selection(cx),
                 cx,
             ))
-            .child(self.action_btn("fit", "适应 (F)", |t, _, cx| t.fit_to_view(cx), cx))
+            .child(self.action_btn(
+                "fit",
+                ui_kit::menu_label(ui_kit::t("photo.fit"), "photo.fit"),
+                |t, _, cx| t.fit_to_view(cx),
+                cx,
+            ))
             .when(!self.standalone, |d| {
-                d.child(self.action_btn("apply", "应用并退出", |t, _, cx| t.request_apply(cx), cx))
+                d.child(self.action_btn(
+                    "apply",
+                    ui_kit::t_src("应用并退出"),
+                    |t, _, cx| t.request_apply(cx),
+                    cx,
+                ))
                     .child(self.action_btn(
                         "cancel",
-                        "取消 (Esc)",
+                        ui_kit::menu_label(ui_kit::t("photo.cancel"), "photo.cancel"),
                         |t, _, cx| t.request_cancel(cx),
                         cx,
                     ))
-                    .child(self.action_btn("rest", "还原", |t, _, cx| t.request_restore(cx), cx))
+                    .child(self.action_btn("rest", ui_kit::t_src("还原"), |t, _, cx| t.request_restore(cx), cx))
             })
             .when(!self.status.is_empty(), |d| {
                 d.child(div().flex_1()).child(
@@ -102,7 +112,7 @@ impl PhotoEditApp {
                         .flex()
                         .items_center()
                         .text_xs()
-                        .text_color(rgb(0x64748b))
+                        .text_color(ui_kit::chrome(0x64748b))
                         .child(self.status.clone()),
                 )
             })
@@ -115,7 +125,7 @@ impl PhotoEditApp {
     fn tool_btn(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         on: bool,
         mode: ToolMode,
         cx: &mut Context<Self>,
@@ -156,9 +166,9 @@ impl PhotoEditApp {
             .text_xs()
             .cursor_pointer()
             .when(on, |d| {
-                d.bg(rgb(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
-            .hover(|s| s.bg(rgb(0xd8e0ea)))
+            .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
             .child(label.into())
             .on_mouse_up(
                 gpui::MouseButton::Left,
@@ -177,14 +187,14 @@ impl PhotoEditApp {
                 d.w(px(260.))
                     .flex_shrink_0()
                     .border_l_1()
-                    .border_color(rgb(0xcbd5e1))
+                    .border_color(ui_kit::chrome(0xcbd5e1))
             })
             .when(!self.standalone, |d| d.w_full())
             .h_full()
             .flex()
             .flex_col()
             .relative()
-            .bg(rgb(0xf1f5f9))
+            .bg(ui_kit::chrome(0xf1f5f9))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _: &gpui::MouseDownEvent, _, _| {
@@ -353,17 +363,17 @@ impl PhotoEditApp {
                         .px_2()
                         .py_1()
                         .rounded_sm()
-                        .bg(if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) })
-                        .text_color(if active { rgb(0xffffff) } else { rgb(0x0f172a) })
+                        .bg(if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) })
+                        .text_color(if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) })
                         .text_xs()
                         .cursor_pointer()
                         .flex_shrink_0()
                         .when(dragging, |d| d.opacity(0.35))
                         .when(show_line && !line_after, |d| {
-                            d.border_t_2().border_color(rgb(0xf59e0b))
+                            d.border_t_2().border_color(ui_kit::chrome(0xf59e0b))
                         })
                         .when(show_line && line_after, |d| {
-                            d.border_b_2().border_color(rgb(0xf59e0b))
+                            d.border_b_2().border_color(ui_kit::chrome(0xf59e0b))
                         })
                         .child(Self::measure_layer_bounds(cx.entity(), display))
                         .child(
@@ -378,7 +388,7 @@ impl PhotoEditApp {
                                 .cursor_pointer()
                                 .child(apply_bg::palette::eye_icon(
                                     vis,
-                                    if active { rgb(0xffffff) } else { rgb(0x334155) },
+                                    if active { rgb(0xffffff) } else { ui_kit::chrome(0x334155) },
                                 ))
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -524,11 +534,11 @@ impl PhotoEditApp {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::card())
+            .text_color(ui_kit::chrome(0x0f172a))
             .text_xs()
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .whitespace_nowrap()
             .child(label)
             .into_any_element()
@@ -685,7 +695,7 @@ impl PhotoEditApp {
                         .px_1()
                         .py_1()
                         .rounded_sm()
-                        .bg(rgb(0xe2e8f0))
+                        .bg(ui_kit::chrome(0xe2e8f0))
                         .cursor_pointer()
                         .child(label)
                         .on_mouse_up(
@@ -722,9 +732,9 @@ impl PhotoEditApp {
                     .rounded_sm()
                     .overflow_hidden()
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .cursor_pointer()
-                    .hover(|s| s.border_color(rgb(0x334155)))
+                    .hover(|s| s.border_color(ui_kit::chrome(0x334155)))
                     .child(apply_bg::palette::checkerboard(4.0))
                     .child(
                         div()
@@ -763,7 +773,7 @@ impl PhotoEditApp {
             .child(
                 div()
                     .flex_1()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child(format!("点色块开调色盘 · {} 取样", apply_bg::alt_mod())),
             )
             .child(self.chip(
@@ -868,7 +878,7 @@ impl PhotoEditApp {
                     .ml(px(cap_ml))
                     .whitespace_nowrap()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child(caption),
             )
             .child(
@@ -880,9 +890,9 @@ impl PhotoEditApp {
                     .bottom_0()
                     .h(px(14.))
                     .rounded_full()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .overflow_hidden()
                     .cursor_pointer()
                     .child(
@@ -904,7 +914,7 @@ impl PhotoEditApp {
                         div()
                             .h_full()
                             .w(relative(frac))
-                            .bg(rgb(0x2563eb))
+                            .bg(ui_kit::chrome(0x2563eb))
                             .rounded_full(),
                     ),
             )
@@ -1067,7 +1077,7 @@ impl PhotoEditApp {
                     .ml(px(cap_ml))
                     .whitespace_nowrap()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child(caption),
             )
             .child(
@@ -1079,9 +1089,9 @@ impl PhotoEditApp {
                     .bottom_0()
                     .h(px(14.))
                     .rounded_full()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .overflow_hidden()
                     .cursor_pointer()
                     .child(
@@ -1106,7 +1116,7 @@ impl PhotoEditApp {
                             .bottom_0()
                             .left(relative(left))
                             .w(relative(span))
-                            .bg(rgb(0x2563eb)),
+                            .bg(ui_kit::chrome(0x2563eb)),
                     )
                     .child(
                         div()
@@ -1116,7 +1126,7 @@ impl PhotoEditApp {
                             .left(relative(0.5))
                             .ml(px(-0.5))
                             .w(px(1.))
-                            .bg(rgb(0x64748b)),
+                            .bg(ui_kit::chrome(0x64748b)),
                     ),
             )
     }

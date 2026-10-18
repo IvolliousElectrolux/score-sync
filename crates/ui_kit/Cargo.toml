@@ -1,0 +1,11 @@
+[package]
+name = "ui_kit"
+version.workspace = true
+edition.workspace = true
+description = "界面主题, 语言与全局偏好"
+license.workspace = true
+
+[dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest", "font-kit"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

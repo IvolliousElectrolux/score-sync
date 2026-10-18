@@ -9,24 +9,30 @@ impl MaskToolApp {
             .flex_row()
             .h_full()
             .w_full()
-            .child(self.menu_item("export", "导出本块 (E)", false, Self::export_image, cx))
+            .child(self.menu_item(
+                "export",
+                ui_kit::menu_label(ui_kit::t("mask.export"), "mask.export"),
+                false,
+                Self::export_image,
+                cx,
+            ))
             .child(self.menu_item(
                 "fit",
-                "适应 (F)",
+                ui_kit::menu_label(ui_kit::t("mask.fit"), "mask.fit"),
                 false,
                 |this, _, cx| this.fit_to_view(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "del",
-                "删除 (Del)",
+                ui_kit::menu_label(ui_kit::t("mask.delete"), "mask.delete"),
                 false,
                 |this, _, cx| this.delete_selected(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "clear",
-                "清空本页蒙版",
+                ui_kit::t_src("清空本页蒙版"),
                 false,
                 |this, _, cx| this.clear_masks(cx),
                 cx,
@@ -34,14 +40,14 @@ impl MaskToolApp {
             .when(self.spread && self.has_block_pieces(), |d| {
                 d.child(self.menu_item(
                     "spread_mirror",
-                    "左右对称",
+                    ui_kit::t_src("左右对称"),
                     self.spread_mirror_x,
                     |this, _, cx| {
                         this.spread_mirror_x = !this.spread_mirror_x;
                         this.status = if this.spread_mirror_x {
-                            "左右对称: 拖一页, 另一页反向跟着动.".into()
+                            ui_kit::t_src("左右对称: 拖一页, 另一页反向跟着动.")
                         } else {
-                            "左右独立: 只移动被拖的那一页.".into()
+                            ui_kit::t_src("左右独立: 只移动被拖的那一页.")
                         };
                         cx.notify();
                     },
@@ -49,7 +55,7 @@ impl MaskToolApp {
                 ))
                 .child(self.menu_item(
                     "spread_sync_x",
-                    "同步左右",
+                    ui_kit::t_src("同步左右"),
                     false,
                     |this, _, cx| {
                         this.guide_host_cmd = Some(GuideHostCmd::SyncSpreadX);
@@ -61,7 +67,7 @@ impl MaskToolApp {
             .when(self.has_block_pieces() && !self.spread, |d| {
                 d.child(self.menu_item_with_context(
                     "guides",
-                    "辅助线",
+                    ui_kit::t_src("辅助线"),
                     self.guides_on(),
                     |this, _, cx| this.guide_toggle(cx),
                     |this, ev, _, cx| {
@@ -76,7 +82,7 @@ impl MaskToolApp {
                 .when(self.guides_on(), |d2| {
                     d2.child(self.menu_item_with_context(
                         "guide_align",
-                        "对齐",
+                        ui_kit::t_src("对齐"),
                         false,
                         |this, _, cx| this.guide_align_current(cx),
                         |this, ev, _, cx| {
@@ -98,7 +104,7 @@ impl MaskToolApp {
                     .items_center()
                     .px_2()
                     .text_sm()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child(self.status.clone()),
             )
     }
@@ -110,7 +116,7 @@ impl MaskToolApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { rgb(0x0f172a) } else { rgb(0x334155) };
+        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x334155) };
         div()
             .id(id.into())
             .flex_shrink_0()
@@ -119,13 +125,13 @@ impl MaskToolApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(rgb(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
+            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -142,7 +148,7 @@ impl MaskToolApp {
         on_right: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { rgb(0x0f172a) } else { rgb(0x334155) };
+        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x334155) };
         div()
             .id(id.into())
             .flex_shrink_0()
@@ -151,13 +157,13 @@ impl MaskToolApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(rgb(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(rgb(0xd8e0ea)) })
+            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -181,9 +187,9 @@ impl MaskToolApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
-        let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
-        let hover = if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) };
+        let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
+        let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
+        let hover = if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) };
         let mut el = div()
             .id(id.into())
             .px_3()
@@ -191,7 +197,7 @@ impl MaskToolApp {
             .rounded_md()
             .bg(bg)
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .text_color(fg)
             .cursor_pointer()
             .hover(move |s| s.bg(hover));
@@ -214,9 +220,9 @@ impl MaskToolApp {
         on_right: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active { rgb(0x2563eb) } else { rgb(0xe2e8f0) };
-        let fg = if active { rgb(0xffffff) } else { rgb(0x0f172a) };
-        let hover = if active { rgb(0x1d4ed8) } else { rgb(0xcbd5e1) };
+        let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
+        let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
+        let hover = if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) };
         div()
             .id(id.into())
             .px_3()
@@ -224,7 +230,7 @@ impl MaskToolApp {
             .rounded_md()
             .bg(bg)
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .text_color(fg)
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
@@ -248,19 +254,19 @@ impl MaskToolApp {
             .flex_row()
             .h(px(28.))
             .w_full()
-            .bg(rgb(0xe2e8f0))
-            .child(self.menu_item("open", "打开", false, Self::open_file, cx))
-            .child(self.menu_item("export", "导出", false, Self::export_image, cx))
+            .bg(ui_kit::chrome(0xe2e8f0))
+            .child(self.menu_item("open", ui_kit::t_src("打开"), false, Self::open_file, cx))
+            .child(self.menu_item("export", ui_kit::t_src("导出"), false, Self::export_image, cx))
             .child(self.menu_item(
                 "fit",
-                "适应窗口",
+                ui_kit::t_src("适应窗口"),
                 false,
                 |this, _, cx| this.fit_to_view(cx),
                 cx,
             ))
             .child(self.menu_item(
                 "del",
-                "删除",
+                ui_kit::t_src("删除"),
                 false,
                 |this, _, cx| this.delete_selected(cx),
                 cx,
@@ -273,7 +279,7 @@ impl MaskToolApp {
                     .items_center()
                     .px_2()
                     .text_sm()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child(self.status.clone()),
             )
     }
@@ -304,9 +310,9 @@ impl MaskToolApp {
             .w_full()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x1e293b))
+            .bg(ui_kit::chrome(0x1e293b))
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(ui_kit::chrome(0x334155))
             .flex()
             .flex_col()
             .gap_2()
@@ -318,7 +324,7 @@ impl MaskToolApp {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0xcbd5e1))
+                    .text_color(ui_kit::chrome(0xcbd5e1))
                     .child(opacity_label),
             )
             .child({
@@ -328,9 +334,9 @@ impl MaskToolApp {
                     .w_full()
                     .h(px(14.))
                     .rounded_full()
-                    .bg(rgb(0x334155))
+                    .bg(ui_kit::chrome(0x334155))
                     .border_1()
-                    .border_color(rgb(0x475569))
+                    .border_color(ui_kit::chrome(0x475569))
                     .overflow_hidden()
                     .cursor_pointer()
                     .child(
@@ -385,9 +391,9 @@ impl MaskToolApp {
                         .rounded_sm()
                         .bg(rgb(color_u32))
                         .border_1()
-                        .border_color(rgb(0x64748b))
+                        .border_color(ui_kit::chrome(0x64748b))
                         .cursor_pointer()
-                        .hover(|s| s.border_color(rgb(0x94a3b8)))
+                        .hover(|s| s.border_color(ui_kit::chrome(0x94a3b8)))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
@@ -412,7 +418,7 @@ impl MaskToolApp {
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
-                            .border_color(rgb(0x475569))
+                            .border_color(ui_kit::chrome(0x475569))
                             .cursor_pointer()
                             .child(
                                 canvas(
@@ -451,7 +457,7 @@ impl MaskToolApp {
                                             px(5.),
                                             rgb(0xffffff),
                                             px(1.5),
-                                            rgb(0x0f172a),
+                                            ui_kit::chrome(0x0f172a),
                                             Default::default(),
                                         ));
                                     },
@@ -493,7 +499,7 @@ impl MaskToolApp {
                             .rounded_sm()
                             .overflow_hidden()
                             .border_1()
-                            .border_color(rgb(0x475569))
+                            .border_color(ui_kit::chrome(0x475569))
                             .cursor_pointer()
                             .child(
                                 canvas(
@@ -531,7 +537,7 @@ impl MaskToolApp {
                                             px(0.),
                                             rgb(0xffffff),
                                             px(1.),
-                                            rgb(0x0f172a),
+                                            ui_kit::chrome(0x0f172a),
                                             Default::default(),
                                         ));
                                     },
@@ -579,7 +585,7 @@ impl MaskToolApp {
                             .items_center()
                             .gap_1()
                             .flex_shrink_0()
-                            .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("RGB"))
+                            .child(div().text_xs().text_color(ui_kit::chrome(0xcbd5e1)).child("RGB"))
                             .child(
                                 div()
                                     .id("eyedropper_btn")
@@ -594,12 +600,12 @@ impl MaskToolApp {
                                     .border_color(if drop_on {
                                         rgb(0x38bdf8)
                                     } else {
-                                        rgb(0x475569)
+                                        ui_kit::chrome(0x475569)
                                     })
                                     .bg(if drop_on {
                                         rgb(0x0ea5e9)
                                     } else {
-                                        rgb(0x334155)
+                                        ui_kit::chrome(0x334155)
                                     })
                                     .child(eyedropper_icon(drop_on))
                                     .on_mouse_down(
@@ -623,7 +629,7 @@ impl MaskToolApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(ui_kit::chrome(0x94a3b8))
                                     .flex_shrink_0()
                                     .child("R"),
                             )
@@ -638,7 +644,7 @@ impl MaskToolApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(ui_kit::chrome(0x94a3b8))
                                     .flex_shrink_0()
                                     .child("G"),
                             )
@@ -653,7 +659,7 @@ impl MaskToolApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(ui_kit::chrome(0x94a3b8))
                                     .flex_shrink_0()
                                     .child("B"),
                             )
@@ -695,11 +701,11 @@ impl MaskToolApp {
             .flex()
             .flex_col()
             // padding 放内层, 避免绝对定位悬浮窗与侧栏 bounds 坐标系差出 padding 偏移
-            .bg(rgb(0xf1f5f9));
+            .bg(ui_kit::chrome(0xf1f5f9));
         if embedded {
             panel = panel.w_full();
         } else {
-            panel = panel.w(px(side_w)).border_l_1().border_color(rgb(0xcbd5e1));
+            panel = panel.w(px(side_w)).border_l_1().border_color(ui_kit::chrome(0xcbd5e1));
         }
         panel
             .child(
@@ -732,7 +738,7 @@ impl MaskToolApp {
                             .flex_shrink_0()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x334155))
+                            .text_color(ui_kit::chrome(0x334155))
                             .child(if embedded {
                                 format!(
                                     "蒙版列表 ({}A 全选 · Delete 删除)",
@@ -748,15 +754,15 @@ impl MaskToolApp {
                             .flex_1()
                             .min_h(px(0.))
                             .overflow_y_scroll()
-                            .bg(rgb(0xffffff))
+                            .bg(ui_kit::card())
                             .border_1()
-                            .border_color(rgb(0xcbd5e1))
+                            .border_color(ui_kit::chrome(0xcbd5e1))
                             .rounded_md()
                             .p_1()
                             .children(list_items.into_iter().map(|(id, label, selected)| {
                                 let id_click = id.clone();
                                 let bg = if selected {
-                                    rgb(0xdbeafe)
+                                    ui_kit::chrome(0xdbeafe)
                                 } else {
                                     rgb(0xffffff)
                                 };
@@ -768,9 +774,9 @@ impl MaskToolApp {
                                     .rounded_sm()
                                     .bg(bg)
                                     .text_sm()
-                                    .text_color(rgb(0x0f172a))
+                                    .text_color(ui_kit::chrome(0x0f172a))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0xe2e8f0)))
+                                    .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)))
                                     .child(label)
                                     .on_mouse_up(
                                         MouseButton::Left,
@@ -831,7 +837,7 @@ impl MaskToolApp {
                                             .border_2()
                                             .border_color(rgb(0x000000))
                                             .cursor_pointer()
-                                            .hover(|s| s.border_color(rgb(0x334155)))
+                                            .hover(|s| s.border_color(ui_kit::chrome(0x334155)))
                                             .child(
                                                 canvas(
                                                     {
@@ -877,7 +883,7 @@ impl MaskToolApp {
                                                     .ml(px(-14.))
                                                     .whitespace_nowrap()
                                                     .text_xs()
-                                                    .text_color(rgb(0x64748b))
+                                                    .text_color(ui_kit::chrome(0x64748b))
                                                     .child(format!("{brush_px}px")),
                                             )
                                             .child(
@@ -889,9 +895,9 @@ impl MaskToolApp {
                                                     .bottom_0()
                                                     .h(px(14.))
                                                     .rounded_full()
-                                                    .bg(rgb(0xe2e8f0))
+                                                    .bg(ui_kit::chrome(0xe2e8f0))
                                                     .border_1()
-                                                    .border_color(rgb(0x94a3b8))
+                                                    .border_color(ui_kit::chrome(0x94a3b8))
                                                     .overflow_hidden()
                                                     .cursor_pointer()
                                                     .child(
@@ -914,7 +920,7 @@ impl MaskToolApp {
                                                         div()
                                                             .h_full()
                                                             .w(relative(size_frac))
-                                                            .bg(rgb(0x2563eb))
+                                                            .bg(ui_kit::chrome(0x2563eb))
                                                             .rounded_full(),
                                                     )
                                                     .on_mouse_down(
@@ -965,7 +971,7 @@ impl MaskToolApp {
                                     .w_full()
                                     .child(self.btn(
                                         "mode_draw",
-                                        "框选 (B)",
+                                        ui_kit::menu_label(ui_kit::t("mask.box"), "mask.box"),
                                         self.mode == ToolMode::Draw,
                                         true,
                                         |this, _, cx| this.toggle_draw_mode(cx),
@@ -973,7 +979,7 @@ impl MaskToolApp {
                                     ))
                                     .child(self.btn(
                                         "mode_poly",
-                                        "套索 (L)",
+                                        ui_kit::menu_label(ui_kit::t("mask.lasso"), "mask.lasso"),
                                         self.mode == ToolMode::Poly,
                                         true,
                                         |this, _, cx| this.toggle_poly_mode(cx),
@@ -990,7 +996,7 @@ impl MaskToolApp {
                                             .border_2()
                                             .border_color(rgb(0x000000))
                                             .cursor_pointer()
-                                            .hover(|s| s.border_color(rgb(0x334155)))
+                                            .hover(|s| s.border_color(ui_kit::chrome(0x334155)))
                                             .child(
                                                 canvas(
                                                     {
@@ -1019,7 +1025,7 @@ impl MaskToolApp {
                                     )
                                     .child(self.btn(
                                         "mode_pan",
-                                        "平移 (P)",
+                                        ui_kit::menu_label(ui_kit::t("mask.pan"), "mask.pan"),
                                         self.mode == ToolMode::Pan,
                                         true,
                                         |this, _, cx| this.toggle_pan_mode(cx),

@@ -7,6 +7,15 @@ use gpui::{
 use super::tools;
 use super::*;
 
+fn menu_key(id: &str, fallback: &str) -> String {
+    if !ui_kit::show_menu_shortcuts() {
+        return String::new();
+    }
+    ui_kit::shortcut_hint(id)
+        .filter(|hint| !hint.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 impl VectorEditApp {
     pub fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.toolbar_embedded(cx)
@@ -38,19 +47,29 @@ impl VectorEditApp {
             row = row.child(self.tool_btn(mode, cx));
         }
         row = row
-            .child(self.action_btn("取出", "v-extract", cx, |this, cx| this.extract_selection(cx)))
-            .child(self.action_btn("适应", "v-fit", cx, |this, cx| this.fit_to_view(cx)));
+            .child(self.action_btn(
+                ui_kit::menu_label(ui_kit::t("vector.extract"), "vector.extract"),
+                "v-extract",
+                cx,
+                |this, cx| this.extract_selection(cx),
+            ))
+            .child(self.action_btn(
+                ui_kit::menu_label(ui_kit::t("vector.fit"), "vector.fit"),
+                "v-fit",
+                cx,
+                |this, cx| this.fit_to_view(cx),
+            ));
         if !self.standalone {
             row = row
-                .child(self.action_btn("应用", "v-apply", cx, |this, cx| this.request_apply(cx)))
-                .child(self.action_btn("还原", "v-restore", cx, |this, cx| this.request_restore(cx)))
-                .child(self.action_btn("取消", "v-cancel", cx, |this, cx| {
+                .child(self.action_btn(ui_kit::t_src("应用"), "v-apply", cx, |this, cx| this.request_apply(cx)))
+                .child(self.action_btn(ui_kit::t_src("还原"), "v-restore", cx, |this, cx| this.request_restore(cx)))
+                .child(self.action_btn(ui_kit::menu_label(ui_kit::t("vector.cancel"), "vector.cancel"), "v-cancel", cx, |this, cx| {
                     this.host_cmd = Some(HostCmd::Cancel);
                     cx.notify();
                 }));
         } else {
             row = row
-                .child(self.action_btn("保存", "v-save", cx, |this, cx| this.request_apply(cx)))
+                .child(self.action_btn(ui_kit::t_src("保存"), "v-save", cx, |this, cx| this.request_apply(cx)))
                 .child(self.action_btn("PNG", "v-png", cx, |this, cx| this.export_png(cx)))
                 .child(self.action_btn("SVG", "v-svg", cx, |this, cx| this.export_svg(cx)));
         }
@@ -70,9 +89,9 @@ impl VectorEditApp {
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .when(on, |d| d.bg(rgb(0xffffff)).font_weight(gpui::FontWeight::SEMIBOLD))
-            .hover(|s| s.bg(rgb(0xd8e0ea)))
-            .child(mode.label())
+            .when(on, |d| d.bg(ui_kit::card()).font_weight(gpui::FontWeight::SEMIBOLD))
+            .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
+            .child(ui_kit::menu_label(ui_kit::t(mode.command_id()), mode.command_id()))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -100,7 +119,7 @@ impl VectorEditApp {
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xd8e0ea)))
+            .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
             .child(label)
             .on_mouse_up(
                 MouseButton::Left,
@@ -125,7 +144,7 @@ impl VectorEditApp {
             .p_2()
             .gap_2()
             .overflow_y_scroll();
-        bottom = bottom.child(div().text_sm().child("外观")).child(
+        bottom = bottom.child(div().text_sm().child(ui_kit::t_src("外观"))).child(
             div()
                 .flex()
                 .flex_row()
@@ -142,11 +161,11 @@ impl VectorEditApp {
         bottom = bottom.child(
             div()
                 .text_xs()
-                .text_color(rgb(0x94a3b8))
+                .text_color(ui_kit::chrome(0x94a3b8))
                 .child(format!("{}+滚轮调线宽", apply_bg::alt_mod())),
         );
         if !self.import_options.is_empty() {
-            bottom = bottom.child(div().text_sm().child("导入其它块"));
+            bottom = bottom.child(div().text_sm().child(ui_kit::t_src("导入其它块")));
             for opt in self.import_options.clone() {
                 let id = opt.id.clone();
                 bottom = bottom.child(
@@ -172,13 +191,13 @@ impl VectorEditApp {
                 d.w(px(260.))
                     .flex_shrink_0()
                     .border_l_1()
-                    .border_color(rgb(0xcbd5e1))
+                    .border_color(ui_kit::chrome(0xcbd5e1))
             })
             .when(!self.standalone, |d| d.w_full())
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xf1f5f9))
+            .bg(ui_kit::chrome(0xf1f5f9))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -369,11 +388,11 @@ impl VectorEditApp {
         let can_extract = !self.selected.is_empty();
         let can_paste_obj = self.obj_clip.is_some();
         let can_paste_layer = self.layer_clip.is_some();
-        let group_hint = format!("{}G", apply_bg::primary_mod());
-        let ungroup_hint = format!("{}G", apply_bg::primary_shift());
-        let regroup_hint = format!("{}G", apply_bg::primary_alt());
-        let copy_hint = format!("{}C", apply_bg::primary_mod());
-        let paste_hint = format!("{}V", apply_bg::primary_mod());
+        let group_hint = menu_key("vector.group", &format!("{}G", apply_bg::primary_mod()));
+        let ungroup_hint = menu_key("vector.ungroup", &format!("{}G", apply_bg::primary_shift()));
+        let regroup_hint = menu_key("vector.regroup", &format!("{}G", apply_bg::primary_alt()));
+        let copy_hint = menu_key("vector.copy", &format!("{}C", apply_bg::primary_mod()));
+        let paste_hint = menu_key("vector.paste", &format!("{}V", apply_bg::primary_mod()));
         let mut col = div()
             .id("vector-outline-menu")
             .absolute()
@@ -382,10 +401,10 @@ impl VectorEditApp {
             .flex()
             .flex_col()
             .rounded_md()
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::card())
+            .text_color(ui_kit::chrome(0x0f172a))
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .when(menu.pin_right, |d| d.right(px(8.)).top(px(menu.y)))
             .when(!menu.pin_right, |d| d.left(px(menu.x)).top(px(menu.y)))
             .child({
@@ -411,12 +430,12 @@ impl VectorEditApp {
                 MouseButton::Right,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             )
-            .child(self.menu_row("vmenu-rename", "重命名", "F2", cx, |this, window, cx| {
+            .child(self.menu_row("vmenu-rename", ui_kit::t_src("重命名"), menu_key("vector.rename", "F2"), cx, |this, window, cx| {
                 this.begin_rename(window, cx);
             }))
             .child(self.menu_row(
                 "vmenu-vis",
-                if shown { "隐藏" } else { "显示" },
+                if shown { ui_kit::t_src("隐藏") } else { ui_kit::t_src("显示") },
                 "",
                 cx,
                 {
@@ -424,28 +443,28 @@ impl VectorEditApp {
                     move |this, _, cx| this.toggle_row_visible(&target, cx)
                 },
             ))
-            .child(div().my(px(4.)).h(px(1.)).bg(rgb(0xe2e8f0)))
+            .child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)))
             .child(self.menu_row(
                 "vmenu-all",
-                "全选",
-                format!("{}A", apply_bg::primary_mod()),
+                ui_kit::t_src("全选"),
+                menu_key("vector.select_all", &format!("{}A", apply_bg::primary_mod())),
                 cx,
                 |this, window, cx| this.select_all(window, cx),
             ))
-            .child(self.menu_row("vmenu-del", "删除", "Del", cx, |this, window, cx| {
+            .child(self.menu_row("vmenu-del", ui_kit::t_src("删除"), menu_key("vector.delete", "Del"), cx, |this, window, cx| {
                 this.delete_selection(window, cx);
             }));
         if can_group || can_ungroup || can_regroup {
-            col = col.child(div().my(px(4.)).h(px(1.)).bg(rgb(0xe2e8f0)));
+            col = col.child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)));
             if can_group {
-                col = col.child(self.menu_row("vmenu-group", "组合", group_hint.clone(), cx, |this, _, cx| {
+                col = col.child(self.menu_row("vmenu-group", ui_kit::t_src("组合"), group_hint.clone(), cx, |this, _, cx| {
                     this.group_selected(cx);
                 }));
             }
             if can_ungroup {
                 col = col.child(self.menu_row(
                     "vmenu-ungroup",
-                    "取消组合",
+                    ui_kit::t_src("取消组合"),
                     ungroup_hint,
                     cx,
                     |this, _, cx| this.ungroup_selected(cx),
@@ -454,7 +473,7 @@ impl VectorEditApp {
             if can_regroup {
                 col = col.child(self.menu_row(
                     "vmenu-regroup",
-                    "重新组合",
+                    ui_kit::t_src("重新组合"),
                     regroup_hint,
                     cx,
                     |this, _, cx| this.regroup_selected(cx),
@@ -462,8 +481,8 @@ impl VectorEditApp {
             }
         }
         col = col
-            .child(div().my(px(4.)).h(px(1.)).bg(rgb(0xe2e8f0)))
-            .child(self.menu_row("vmenu-copy", "复制", copy_hint, cx, |this, window, cx| {
+            .child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)))
+            .child(self.menu_row("vmenu-copy", ui_kit::t_src("复制"), copy_hint, cx, |this, window, cx| {
                 if this.selected.is_empty() {
                     this.clip_on_canvas = false;
                     this.copy_layer(window, cx);
@@ -474,7 +493,7 @@ impl VectorEditApp {
         if can_paste_obj {
             col = col.child(self.menu_row(
                 "vmenu-paste-obj",
-                "粘贴对象",
+                ui_kit::t_src("粘贴对象"),
                 paste_hint.clone(),
                 cx,
                 |this, window, cx| {
@@ -486,7 +505,7 @@ impl VectorEditApp {
         if can_paste_layer {
             col = col.child(self.menu_row(
                 "vmenu-paste-layer",
-                "粘贴图层",
+                ui_kit::t_src("粘贴图层"),
                 if can_paste_obj { String::new() } else { paste_hint },
                 cx,
                 |this, window, cx| {
@@ -497,8 +516,8 @@ impl VectorEditApp {
         }
         if can_extract {
             col = col
-                .child(div().my(px(4.)).h(px(1.)).bg(rgb(0xe2e8f0)))
-                .child(self.menu_row("vmenu-extract", "取出到新图层", "J", cx, |this, _, cx| {
+                .child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)))
+                .child(self.menu_row("vmenu-extract", ui_kit::t_src("取出到新图层"), menu_key("vector.extract", "J"), cx, |this, _, cx| {
                     this.extract_selection(cx);
                 }));
         }
@@ -518,11 +537,11 @@ impl VectorEditApp {
         let can_regroup = !self.regroup_mem.is_empty();
         let has_sel = !self.selected.is_empty();
         let can_paste_obj = self.obj_clip.is_some();
-        let group_hint = format!("{}G", apply_bg::primary_mod());
-        let ungroup_hint = format!("{}G", apply_bg::primary_shift());
-        let regroup_hint = format!("{}G", apply_bg::primary_alt());
-        let copy_hint = format!("{}C", apply_bg::primary_mod());
-        let paste_hint = format!("{}V", apply_bg::primary_mod());
+        let group_hint = menu_key("vector.group", &format!("{}G", apply_bg::primary_mod()));
+        let ungroup_hint = menu_key("vector.ungroup", &format!("{}G", apply_bg::primary_shift()));
+        let regroup_hint = menu_key("vector.regroup", &format!("{}G", apply_bg::primary_alt()));
+        let copy_hint = menu_key("vector.copy", &format!("{}C", apply_bg::primary_mod()));
+        let paste_hint = menu_key("vector.paste", &format!("{}V", apply_bg::primary_mod()));
         let mut col = div()
             .id("vector-canvas-menu")
             .absolute()
@@ -533,10 +552,10 @@ impl VectorEditApp {
             .flex()
             .flex_col()
             .rounded_md()
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::card())
+            .text_color(ui_kit::chrome(0x0f172a))
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .child({
                 let entity = cx.entity().clone();
                 canvas(
@@ -562,27 +581,27 @@ impl VectorEditApp {
             )
             .child(self.menu_row(
                 "cmenu-all",
-                "全选",
-                format!("{}A", apply_bg::primary_mod()),
+                ui_kit::t_src("全选"),
+                menu_key("vector.select_all", &format!("{}A", apply_bg::primary_mod())),
                 cx,
                 |this, window, cx| this.select_all(window, cx),
             ));
         if has_sel {
-            col = col.child(self.menu_row("cmenu-del", "删除", "Del", cx, |this, window, cx| {
+            col = col.child(self.menu_row("cmenu-del", ui_kit::t_src("删除"), menu_key("vector.delete", "Del"), cx, |this, window, cx| {
                 this.delete_selection(window, cx);
             }));
         }
         if can_group || can_ungroup || can_regroup {
-            col = col.child(div().my(px(4.)).h(px(1.)).bg(rgb(0xe2e8f0)));
+            col = col.child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)));
             if can_group {
-                col = col.child(self.menu_row("cmenu-group", "组合", group_hint, cx, |this, _, cx| {
+                col = col.child(self.menu_row("cmenu-group", ui_kit::t_src("组合"), group_hint, cx, |this, _, cx| {
                     this.group_selected(cx);
                 }));
             }
             if can_ungroup {
                 col = col.child(self.menu_row(
                     "cmenu-ungroup",
-                    "取消组合",
+                    ui_kit::t_src("取消组合"),
                     ungroup_hint,
                     cx,
                     |this, _, cx| this.ungroup_selected(cx),
@@ -591,7 +610,7 @@ impl VectorEditApp {
             if can_regroup {
                 col = col.child(self.menu_row(
                     "cmenu-regroup",
-                    "重新组合",
+                    ui_kit::t_src("重新组合"),
                     regroup_hint,
                     cx,
                     |this, _, cx| this.regroup_selected(cx),
@@ -599,17 +618,17 @@ impl VectorEditApp {
             }
         }
         if has_sel || can_paste_obj {
-            col = col.child(div().my(px(4.)).h(px(1.)).bg(rgb(0xe2e8f0)));
+            col = col.child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)));
         }
         if has_sel {
-            col = col.child(self.menu_row("cmenu-copy", "复制", copy_hint, cx, |this, _, cx| {
+            col = col.child(self.menu_row("cmenu-copy", ui_kit::t_src("复制"), copy_hint, cx, |this, _, cx| {
                 this.copy_selection(cx);
             }));
         }
         if can_paste_obj {
             col = col.child(self.menu_row(
                 "cmenu-paste",
-                "粘贴对象",
+                ui_kit::t_src("粘贴对象"),
                 paste_hint,
                 cx,
                 |this, window, cx| {
@@ -619,7 +638,7 @@ impl VectorEditApp {
             ));
         }
         if has_sel {
-            col = col.child(self.menu_row("cmenu-extract", "取出到新图层", "J", cx, |this, _, cx| {
+            col = col.child(self.menu_row("cmenu-extract", ui_kit::t_src("取出到新图层"), menu_key("vector.extract", "J"), cx, |this, _, cx| {
                 this.extract_selection(cx);
             }));
         }
@@ -646,10 +665,10 @@ impl VectorEditApp {
             .justify_between()
             .gap_3()
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0xdbeafe)))
+            .hover(|s| s.bg(ui_kit::chrome(0xdbeafe)))
             .child(div().text_xs().child(label.into()))
             .when(show_hint, |d| {
-                d.child(div().text_xs().text_color(rgb(0x94a3b8)).child(hint))
+                d.child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child(hint))
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -673,8 +692,8 @@ impl VectorEditApp {
                 .flex_1()
                 .p_2()
                 .text_xs()
-                .text_color(rgb(0x94a3b8))
-                .child("没有图层")
+                .text_color(ui_kit::chrome(0x94a3b8))
+                .child(ui_kit::t_src("没有图层"))
                 .into_any_element();
         }
         let pins = self.pin_ids();
@@ -691,7 +710,7 @@ impl VectorEditApp {
             pin_col = pin_col.child(self.outline_row(row, cx));
         }
         if !pinned.is_empty() {
-            pin_col = pin_col.border_b_1().border_color(rgb(0xe2e8f0)).pb_1();
+            pin_col = pin_col.border_b_1().border_color(ui_kit::chrome(0xe2e8f0)).pb_1();
         }
         div()
             .flex_1()
@@ -782,7 +801,7 @@ impl VectorEditApp {
             .flex_shrink_0()
             .relative()
             .rounded_sm()
-            .bg(rgb(0xe2e8f0))
+            .bg(ui_kit::chrome(0xe2e8f0))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -815,8 +834,8 @@ impl VectorEditApp {
                     .w_full()
                     .h(px(thumb_h))
                     .rounded_sm()
-                    .bg(rgb(0x94a3b8))
-                    .hover(|s| s.bg(rgb(0x64748b)))
+                    .bg(ui_kit::chrome(0x94a3b8))
+                    .hover(|s| s.bg(ui_kit::chrome(0x64748b)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -893,14 +912,14 @@ impl VectorEditApp {
             .pl(px(row.depth as f32 * 12.0))
             .pr_1()
             .rounded_sm()
-            .when(direct || layer_is_selection, |d| d.bg(rgb(0xdbeafe)))
-            .when(nested, |d| d.bg(rgb(0xeff6ff)))
+            .when(direct || layer_is_selection, |d| d.bg(ui_kit::chrome(0xdbeafe)))
+            .when(nested, |d| d.bg(ui_kit::chrome(0xeff6ff)))
             .when(active_layer && !direct && !layer_is_selection && !holds_selection, |d| {
-                d.bg(rgb(0xe2e8f0))
+                d.bg(ui_kit::chrome(0xe2e8f0))
             })
             .when(dragging, |d| d.opacity(0.35))
-            .when(show_line && !line_after, |d| d.border_t_2().border_color(rgb(0xf59e0b)))
-            .when(show_line && line_after, |d| d.border_b_2().border_color(rgb(0xf59e0b)))
+            .when(show_line && !line_after, |d| d.border_t_2().border_color(ui_kit::chrome(0xf59e0b)))
+            .when(show_line && line_after, |d| d.border_b_2().border_color(ui_kit::chrome(0xf59e0b)))
             .when(row.kind == RowKind::Layer, |d| {
                 d.child(Self::measure_layer_bounds(cx.entity(), display))
             })
@@ -1014,7 +1033,7 @@ impl VectorEditApp {
             .justify_center()
             .flex_shrink_0()
             .cursor_pointer()
-            .child(apply_bg::palette::eye_icon(open, rgb(0x334155)))
+            .child(apply_bg::palette::eye_icon(open, ui_kit::chrome(0x334155)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
@@ -1182,11 +1201,11 @@ impl VectorEditApp {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x0f172a))
+            .bg(ui_kit::card())
+            .text_color(ui_kit::chrome(0x0f172a))
             .text_xs()
             .border_1()
-            .border_color(rgb(0x94a3b8))
+            .border_color(ui_kit::chrome(0x94a3b8))
             .whitespace_nowrap()
             .child(label)
             .into_any_element()
@@ -1245,7 +1264,7 @@ impl VectorEditApp {
                     .ml(px(cap_ml))
                     .whitespace_nowrap()
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(ui_kit::chrome(0x64748b))
                     .child(caption),
             )
             .child(
@@ -1257,9 +1276,9 @@ impl VectorEditApp {
                     .bottom_0()
                     .h(px(14.))
                     .rounded_full()
-                    .bg(rgb(0xe2e8f0))
+                    .bg(ui_kit::chrome(0xe2e8f0))
                     .border_1()
-                    .border_color(rgb(0x94a3b8))
+                    .border_color(ui_kit::chrome(0x94a3b8))
                     .overflow_hidden()
                     .child(
                         canvas(
@@ -1278,7 +1297,7 @@ impl VectorEditApp {
                         div()
                             .h_full()
                             .w(relative(frac))
-                            .bg(rgb(0x2563eb))
+                            .bg(ui_kit::chrome(0x2563eb))
                             .rounded_full(),
                     ),
             )
@@ -1399,7 +1418,7 @@ impl VectorEditApp {
             .h(px(20.))
             .overflow_hidden()
             .border_1()
-            .border_color(rgb(0x334155))
+            .border_color(ui_kit::chrome(0x334155))
             .cursor_pointer()
             .child(apply_bg::palette::checkerboard(4.0));
         if let Some(c) = rgba {
@@ -1443,7 +1462,7 @@ fn stroke_hole() -> impl IntoElement {
         .right(px(4.))
         .bottom(px(4.))
         .border_1()
-        .border_color(rgb(0x334155))
+        .border_color(ui_kit::chrome(0x334155))
         .overflow_hidden()
         .child(apply_bg::palette::checkerboard(4.0))
 }
@@ -1471,7 +1490,7 @@ fn none_slash() -> impl IntoElement {
             path.move_to(point(x0, y0));
             path.line_to(point(x1, y1));
             if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(0xef4444));
+                window.paint_path(path, ui_kit::chrome(0xef4444));
             }
         },
     )

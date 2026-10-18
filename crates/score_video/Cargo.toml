@@ -6,6 +6,7 @@ description = "谱面同步视频轨道编辑与 ffmpeg 导出 (GPUI)"
 
 [dependencies]
 apply_bg = { path = "../apply_bg" }
+ui_kit = { path = "../ui_kit" }
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
 gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest", "font-kit"] }

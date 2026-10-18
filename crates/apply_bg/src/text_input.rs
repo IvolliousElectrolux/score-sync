@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
+    actions, div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
@@ -753,12 +753,12 @@ impl Render for TextInput {
             .when(compact, |d| d.rounded_sm())
             .when(!compact, |d| d.rounded_md())
             .border_1()
-            .border_color(rgb(0xcbd5e1))
-            .bg(rgb(0xf8fafc))
+            .border_color(ui_kit::chrome(0xcbd5e1))
+            .bg(ui_kit::chrome(0xf8fafc))
             .min_w(px(0.))
             .line_height(line_h)
             .text_size(text_size)
-            .text_color(rgb(0x0f172a))
+            .text_color(ui_kit::chrome(0x0f172a))
             .child(
                 div()
                     .h(inner_h)

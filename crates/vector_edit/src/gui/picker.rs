@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use apply_bg::palette::{self, PaletteSlot, SB_SIZE, HUE_BAR_W};
 use gpui::{
-    canvas, div, point, prelude::*, px, rgb, Bounds, Context, Entity, MouseButton, MouseDownEvent,
+    canvas, div, point, prelude::*, px, Bounds, Context, Entity, MouseButton, MouseDownEvent,
     MouseUpEvent, PathBuilder, Pixels, RenderImage,
 };
 
@@ -646,7 +646,7 @@ impl VectorEditApp {
                     }
                     builder.close();
                     if let Ok(path) = builder.build() {
-                        window.paint_path(path, rgb(0x1e293b));
+                        window.paint_path(path, ui_kit::chrome(0x1e293b));
                     }
                 }
             })
