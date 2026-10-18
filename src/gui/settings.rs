@@ -93,6 +93,7 @@ impl ScoreSyncApp {
             .flex()
             .flex_col()
             .bg(rgb(theme.bg_panel))
+            .rounded_l(px(7.))
             .border_r_1()
             .border_color(rgb(theme.border))
             .py_2()
@@ -429,24 +430,15 @@ impl ScoreSyncApp {
                 )
             })
             .child(
-                div()
-                    .id("settings_keys_scroll")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .px_4()
-                    .py_2()
-                    .child(list),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(rgb(theme.border))
-                    .text_xs()
-                    .text_color(rgb(theme.text_muted))
-                    .child(t("settings.fixed")),
+                self.attach_scrollbars(
+                    "settings_keys_scroll".into(),
+                    ScrollList::Settings,
+                    &self.settings_scroll,
+                    list.px_4().py_2(),
+                    cx,
+                )
+                .flex_1()
+                .min_h(px(0.)),
             )
     }
 

@@ -525,6 +525,7 @@ impl ScoreSyncApp {
             ScrollList::Help => &self.help_scroll,
             ScrollList::Update => &self.update_scroll,
             ScrollList::PageOrganize => &self.page_organize_scroll,
+            ScrollList::Settings => &self.settings_scroll,
         }
     }
 

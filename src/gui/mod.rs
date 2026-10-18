@@ -224,6 +224,7 @@ pub(crate) struct ScoreSyncApp {
     tab_scroll: ScrollHandle,
     /// 「组织页面」网格滚动; 对开网格共用.
     page_organize_scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
     spread_cells: HashMap<usize, Bounds<Pixels>>,
     /// 点选顺序. 复制时按这个顺序收成一串, 不按页序.
     spread_selected: Vec<String>,
@@ -482,6 +483,7 @@ impl ScoreSyncApp {
             update_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             page_organize_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
             spread_cells: HashMap::new(),
             spread_selected: Vec::new(),
             spread_anchor: None,

@@ -452,6 +452,8 @@ pub(crate) enum ScrollList {
     Update,
     /// 「组织页面」缩略图网格
     PageOrganize,
+    /// 设置里的快捷键列表
+    Settings,
 }
 
 #[derive(Clone)]
