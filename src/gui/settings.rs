@@ -66,6 +66,38 @@ impl ScoreSyncApp {
                 MouseButton::Right,
                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
             )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                // 遮罩 occlude 挡住了根节点, 拖动条的移动只能在这里接着算.
+                // 指针离开拖动条后, 只要还按着, 就继续跟着走.
+                if matches!(
+                    this.drag,
+                    Some(DragKind::Scrollbar {
+                        which: ScrollList::Settings,
+                        ..
+                    })
+                ) {
+                    this.apply_scrollbar_drag(
+                        f32::from(ev.position.x),
+                        f32::from(ev.position.y),
+                        cx,
+                    );
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if matches!(
+                        this.drag,
+                        Some(DragKind::Scrollbar {
+                            which: ScrollList::Settings,
+                            ..
+                        })
+                    ) {
+                        this.drag = None;
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 div()
                     .id("settings_card")

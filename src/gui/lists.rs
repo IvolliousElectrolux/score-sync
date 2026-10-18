@@ -686,6 +686,7 @@ impl ScoreSyncApp {
                                         grab: (y - cur_top).clamp(0.0, thumb),
                                         vertical: true,
                                     });
+                                    cx.stop_propagation();
                                     cx.notify();
                                 }),
                             ),
