@@ -93,7 +93,7 @@ pub(crate) use gpui::prelude::*;
 pub(crate) use gpui::{
     canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
     DispatchPhase, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
@@ -179,10 +179,15 @@ pub(crate) struct ScoreSyncApp {
     tab_menu: Option<TabContextMenu>,
     /// 页签悬停 1s 后的完整文件名提示
     tab_hover_idx: Option<usize>,
+    /// 对开缩略图下被截断的文件名, 悬停 1s 后共用 `tab_tooltip`
+    spread_title_hover: Option<usize>,
     /// 标题栏图标悬停 (与页签共用 `tab_tooltip` / `tab_hover_gen`)
     header_hover_id: Option<&'static str>,
     tab_hover_gen: u64,
     tab_tooltip: Option<TabTooltip>,
+    /// 提示已经显示过. 离开目标后还热一小段, 移到下一个该出提示的元素上不再等 1 秒.
+    tooltip_warm: bool,
+    tooltip_warm_gen: u64,
     /// 标题栏图标屏幕 bounds, 供悬浮提示定位
     header_btn_bounds: HashMap<String, Bounds<Pixels>>,
     /// 最近一帧窗口客户区, 悬浮提示夹紧用
@@ -226,6 +231,8 @@ pub(crate) struct ScoreSyncApp {
     page_organize_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
     spread_cells: HashMap<usize, Bounds<Pixels>>,
+    /// 对开文件名那一行的屏幕范围, 悬浮提示锚在这里
+    spread_caption_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 点选顺序. 复制时按这个顺序收成一串, 不按页序.
     spread_selected: Vec<String>,
     spread_anchor: Option<String>,
@@ -452,9 +459,12 @@ impl ScoreSyncApp {
             update_probe: settings::UpdateProbe::Idle,
             tab_menu: None,
             tab_hover_idx: None,
+            spread_title_hover: None,
             header_hover_id: None,
             tab_hover_gen: 0,
             tab_tooltip: None,
+            tooltip_warm: false,
+            tooltip_warm_gen: 0,
             header_btn_bounds: HashMap::new(),
             viewport_w: 0.0,
             viewport_h: 0.0,
@@ -485,6 +495,7 @@ impl ScoreSyncApp {
             page_organize_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
             spread_cells: HashMap::new(),
+            spread_caption_bounds: HashMap::new(),
             spread_selected: Vec::new(),
             spread_anchor: None,
             spread_clip: Vec::new(),
@@ -1270,7 +1281,7 @@ impl Render for ScoreSyncApp {
                     .child(
                         div()
                             .id("side_split")
-                            .w(px(5.))
+                            .w(px(SIDE_SPLIT_W))
                             .h_full()
                             .flex_shrink_0()
                             .cursor(CursorStyle::ResizeColumn)
@@ -1309,8 +1320,31 @@ impl Render for ScoreSyncApp {
     }
 }
 
+struct HeaderIcons;
+
+impl gpui::AssetSource for HeaderIcons {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let bytes: Option<&'static [u8]> = match path {
+            "header/new.svg" => Some(include_bytes!("../../assets/全局选项图标/new.svg")),
+            "header/open-project.svg" => {
+                Some(include_bytes!("../../assets/全局选项图标/open-project.svg"))
+            }
+            "header/save.svg" => Some(include_bytes!("../../assets/全局选项图标/save.svg")),
+            "header/save-as.svg" => Some(include_bytes!("../../assets/全局选项图标/save as.svg")),
+            "header/help.svg" => Some(include_bytes!("../../assets/全局选项图标/help.svg")),
+            "header/setting.svg" => Some(include_bytes!("../../assets/全局选项图标/setting.svg")),
+            _ => None,
+        };
+        Ok(bytes.map(std::borrow::Cow::Borrowed))
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
+}
+
 pub fn run_gui(initial: Vec<PathBuf>) {
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(HeaderIcons).run(move |cx: &mut App| {
         ui_kit::load_prefs_from_disk();
         keymap::install(cx);
         let bounds = default_window_bounds(cx);

@@ -242,11 +242,17 @@ impl ScoreSyncApp {
         if self.tab_hover_idx == Some(idx) {
             return;
         }
+        let warm = self.tooltip_warm;
         self.tab_hover_idx = Some(idx);
         self.header_hover_id = None;
-        self.tab_tooltip = None;
+        self.spread_title_hover = None;
         self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
         let gen = self.tab_hover_gen;
+        if warm {
+            self.show_tab_tooltip(idx, cx);
+            return;
+        }
+        self.tab_tooltip = None;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(1000))
@@ -255,50 +261,108 @@ impl ScoreSyncApp {
                 if view.tab_hover_gen != gen || view.tab_hover_idx != Some(idx) {
                     return;
                 }
-                let (show, full) = view.page_tab_caption(idx);
-                if show == full {
-                    return;
-                }
-                let (ax, ay, aw, ah) = view
-                    .tab_bounds
-                    .get(&idx)
-                    .map(|b| {
-                        (
-                            f32::from(b.origin.x),
-                            f32::from(b.origin.y),
-                            f32::from(b.size.width),
-                            f32::from(b.size.height),
-                        )
-                    })
-                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
-                view.tab_tooltip = Some(TabTooltip {
-                    id: format!("tab-{idx}").into(),
-                    anchor_x: ax,
-                    anchor_y: ay,
-                    anchor_w: aw,
-                    anchor_h: ah,
-                    text: full,
-                    measured_w: 0.0,
-                    measured_h: 0.0,
-                });
-                cx.notify();
+                view.show_tab_tooltip(idx, cx);
             })
             .ok();
         })
         .detach();
     }
 
+    fn show_tab_tooltip(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let (show, full) = self.page_tab_caption(idx);
+        if show == full {
+            if self.tab_tooltip.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let (ax, ay, aw, ah) = self
+            .tab_bounds
+            .get(&idx)
+            .map(|b| {
+                (
+                    f32::from(b.origin.x),
+                    f32::from(b.origin.y),
+                    f32::from(b.size.width),
+                    f32::from(b.size.height),
+                )
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 0.0));
+        self.publish_hover_tooltip(
+            TabTooltip {
+                id: format!("tab-{idx}").into(),
+                anchor_x: ax,
+                anchor_y: ay,
+                anchor_w: aw,
+                anchor_h: ah,
+                text: full,
+                measured_w: 0.0,
+                measured_h: 0.0,
+            },
+            cx,
+        );
+    }
+
     pub(super) fn clear_tab_hover(&mut self, cx: &mut Context<Self>) {
         if self.tab_hover_idx.is_none()
             && self.header_hover_id.is_none()
+            && self.spread_title_hover.is_none()
             && self.tab_tooltip.is_none()
         {
             return;
         }
         self.tab_hover_idx = None;
         self.header_hover_id = None;
+        self.spread_title_hover = None;
         self.tab_tooltip = None;
         self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
+        self.tooltip_warm = false;
+        self.tooltip_warm_gen = self.tooltip_warm_gen.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// 指针离开当前目标. 提示已经在显示时先保持热, 滑到相邻目标上就立刻换内容.
+    pub(super) fn release_tab_hover(&mut self, cx: &mut Context<Self>) {
+        let was_warm = self.tooltip_warm || self.tab_tooltip.is_some();
+        if self.tab_hover_idx.is_none()
+            && self.header_hover_id.is_none()
+            && self.spread_title_hover.is_none()
+            && self.tab_tooltip.is_none()
+            && !was_warm
+        {
+            return;
+        }
+        self.tab_hover_idx = None;
+        self.header_hover_id = None;
+        self.spread_title_hover = None;
+        self.tab_tooltip = None;
+        self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
+        if was_warm {
+            self.tooltip_warm = true;
+            self.tooltip_warm_gen = self.tooltip_warm_gen.wrapping_add(1);
+            let gen = self.tooltip_warm_gen;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(TOOLTIP_HANDOFF_MS))
+                    .await;
+                this.update(cx, |view, cx| {
+                    if view.tooltip_warm_gen != gen {
+                        return;
+                    }
+                    view.tooltip_warm = false;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn publish_hover_tooltip(&mut self, tip: TabTooltip, cx: &mut Context<Self>) {
+        self.tooltip_warm = true;
+        self.tooltip_warm_gen = self.tooltip_warm_gen.wrapping_add(1);
+        self.tab_tooltip = Some(tip);
         cx.notify();
     }
 
@@ -651,7 +715,7 @@ impl ScoreSyncApp {
                             if *hovered {
                                 this.note_tab_hover(idx, cx);
                             } else if this.tab_hover_idx == Some(idx) {
-                                this.clear_tab_hover(cx);
+                                this.release_tab_hover(cx);
                             }
                         }))
                     })
@@ -985,16 +1049,37 @@ impl ScoreSyncApp {
         let Some(ref tip) = self.tab_tooltip else {
             return div().into_any_element();
         };
+        let spread = self.spread_title_hover.is_some();
+        let (ax, ay, aw, ah) = self
+            .spread_title_hover
+            .and_then(|idx| self.spread_caption_bounds.get(&idx))
+            .map(|b| {
+                (
+                    f32::from(b.origin.x),
+                    f32::from(b.origin.y),
+                    f32::from(b.size.width),
+                    f32::from(b.size.height),
+                )
+            })
+            .unwrap_or((tip.anchor_x, tip.anchor_y, tip.anchor_w, tip.anchor_h));
+        // 页签和图标很窄, 提示从锚点右下角长出去. 对开标题和缩略图一样宽,
+        // 再从右缘起算就会整块偏到文字右边.
+        let align = if spread {
+            HoverTipAlign::BelowStart
+        } else {
+            HoverTipAlign::After
+        };
         let (x, y) = hover_tooltip_pos(
-            tip.anchor_x,
-            tip.anchor_y,
-            tip.anchor_w,
-            tip.anchor_h,
+            ax,
+            ay,
+            aw,
+            ah,
             tip.text.as_ref(),
             tip.measured_w,
             tip.measured_h,
             self.viewport_w,
             self.viewport_h,
+            align,
         );
         let entity = cx.entity();
         div()
@@ -1107,6 +1192,9 @@ impl ScoreSyncApp {
 /// 点选贴边页签时多留一点空, 避免相邻页签贴着裁切边缘不好点.
 const TAB_NEIGHBOR_PAD: f32 = 4.0;
 
+/// 提示还在显示时移开, 这段时间内进入下一个目标就不再等 1 秒.
+const TOOLTIP_HANDOFF_MS: u64 = 300;
+
 /// 尽量保持当前位置, 只在需要露出的区间超出可视区时才滚.
 pub(super) fn neighbor_hscroll_offset(
     off: f32,
@@ -1157,7 +1245,16 @@ fn apply_tab_neighbor_scroll(
     }
 }
 
-/// 悬浮提示: 左上角对齐锚点右下角 (偏右下); 超出窗口则贴边, 只用实测/紧估算宽度.
+/// 提示相对锚点的水平对齐.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum HoverTipAlign {
+    /// 左上角对齐锚点右下角. 窄按钮用.
+    After,
+    /// 左上角对齐锚点左下角. 宽标题用.
+    BelowStart,
+}
+
+/// 悬浮提示: 超出窗口则贴边, 只用实测/紧估算宽度.
 pub(super) fn hover_tooltip_pos(
     ax: f32,
     ay: f32,
@@ -1168,6 +1265,7 @@ pub(super) fn hover_tooltip_pos(
     measured_h: f32,
     view_w: f32,
     view_h: f32,
+    align: HoverTipAlign,
 ) -> (f32, f32) {
     const PAD: f32 = 2.0;
     const GAP: f32 = 2.0;
@@ -1177,7 +1275,10 @@ pub(super) fn hover_tooltip_pos(
     let vw = if view_w > 32.0 { view_w } else { 4096.0 };
     let vh = if view_h > 32.0 { view_h } else { 4096.0 };
 
-    let mut x = ax + aw;
+    let mut x = match align {
+        HoverTipAlign::After => ax + aw,
+        HoverTipAlign::BelowStart => ax,
+    };
     if x + tw > vw - PAD {
         x = vw - PAD - tw;
     }
@@ -1389,7 +1490,18 @@ mod tests {
         let text = "另存工程 (Ctrl+Shift+S)";
         let (tw, th) = estimate_hover_tooltip_size(text);
         // 右侧按钮: 默认从图标右下角出发, 超出则贴窗口右缘 (2px), 不留大空档
-        let (x, y) = hover_tooltip_pos(970.0, 8.0, 22.0, 22.0, text, tw, th, 1000.0, 800.0);
+        let (x, y) = hover_tooltip_pos(
+            970.0,
+            8.0,
+            22.0,
+            22.0,
+            text,
+            tw,
+            th,
+            1000.0,
+            800.0,
+            HoverTipAlign::After,
+        );
         assert!(x >= PAD);
         assert!((x + tw - (1000.0 - PAD)).abs() < 0.6);
         assert!(y >= 8.0 + 22.0);
@@ -1398,13 +1510,70 @@ mod tests {
         let new_text = "新建工程 (Ctrl+Shift+N)";
         let (nw, nh) = estimate_hover_tooltip_size(new_text);
         let (x_mid, y_mid) =
-            hover_tooltip_pos(800.0, 8.0, 22.0, 22.0, new_text, nw, nh, 1200.0, 800.0);
+            hover_tooltip_pos(
+                800.0,
+                8.0,
+                22.0,
+                22.0,
+                new_text,
+                nw,
+                nh,
+                1200.0,
+                800.0,
+                HoverTipAlign::After,
+            );
         assert!((x_mid - 822.0).abs() < 0.6);
         assert!((y_mid - (8.0 + 22.0 + 2.0)).abs() < 0.6);
         // 底部贴边时翻到锚点上方
-        let (x2, y2) = hover_tooltip_pos(20.0, 780.0, 40.0, 22.0, text, tw, th, 1000.0, 800.0);
+        let (x2, y2) = hover_tooltip_pos(
+            20.0,
+            780.0,
+            40.0,
+            22.0,
+            text,
+            tw,
+            th,
+            1000.0,
+            800.0,
+            HoverTipAlign::After,
+        );
         assert!(x2 >= PAD);
         assert!(y2 + th <= 780.0 + 0.5);
         assert!(y2 >= PAD);
+    }
+
+    #[test]
+    fn spread_tooltip_lines_up_with_caption_left() {
+        let text = "Beethoven_Sonata_Op027_No2_Moonlight_p012.png";
+        let (tw, th) = estimate_hover_tooltip_size(text);
+        let (x, y) = hover_tooltip_pos(
+            140.0,
+            220.0,
+            180.0,
+            16.0,
+            text,
+            tw,
+            th,
+            1600.0,
+            900.0,
+            HoverTipAlign::BelowStart,
+        );
+        assert!((x - 140.0).abs() < 0.6, "{x}");
+        assert!((y - (220.0 + 16.0 + 2.0)).abs() < 0.6, "{y}");
+        // 贴在窗口右侧时仍整块留在窗口里, 而不是从标题右缘再往外探.
+        let (x_edge, _) = hover_tooltip_pos(
+            1400.0,
+            220.0,
+            180.0,
+            16.0,
+            text,
+            tw,
+            th,
+            1600.0,
+            900.0,
+            HoverTipAlign::BelowStart,
+        );
+        assert!(x_edge + tw <= 1600.0 - 2.0 + 0.6);
+        assert!(x_edge < 1400.0 + 180.0);
     }
 }

@@ -50,36 +50,42 @@ impl ScoreSyncApp {
             .flex_row()
             .child(self.header_icon_btn(
                 "hdr-new",
-                HeaderGlyph::NewDoc,
+                "header/new.svg",
                 ui_kit::always_hint(ui_kit::t("chrome.new"), "app.new").into(),
                 |this, window, cx| this.request_new_project(window, cx),
                 cx,
             ))
             .child(self.header_icon_btn(
                 "hdr-open",
-                HeaderGlyph::OpenFolder,
+                "header/open-project.svg",
                 ui_kit::always_hint(ui_kit::t("chrome.open_project"), "app.open_project").into(),
                 |this, window, cx| this.open_project(window, cx),
                 cx,
             ))
             .child(self.header_icon_btn(
                 "hdr-save",
-                HeaderGlyph::SaveDisk,
+                "header/save.svg",
                 ui_kit::always_hint(ui_kit::t("chrome.save"), "app.save").into(),
                 |this, window, cx| this.save_project(window, cx),
                 cx,
             ))
             .child(self.header_icon_btn(
                 "hdr-saveas",
-                HeaderGlyph::SaveAsDisk,
+                "header/save-as.svg",
                 ui_kit::always_hint(ui_kit::t("chrome.save_as"), "app.save_as").into(),
                 |this, window, cx| this.save_project_as(window, cx),
                 cx,
             ))
-            .child(self.header_help_btn(cx))
+            .child(self.header_icon_btn(
+                "hdr-help",
+                "header/help.svg",
+                ui_kit::always_hint(ui_kit::t("chrome.help"), "app.help").into(),
+                |this, _, cx| this.show_help(cx),
+                cx,
+            ))
             .child(self.header_icon_btn(
                 "hdr-settings",
-                HeaderGlyph::Gear,
+                "header/setting.svg",
                 ui_kit::always_hint(ui_kit::t("chrome.settings"), "app.settings").into(),
                 |this, _, cx| this.open_settings(cx),
                 cx,
@@ -89,7 +95,7 @@ impl ScoreSyncApp {
     fn header_icon_btn(
         &self,
         id: &'static str,
-        glyph: HeaderGlyph,
+        icon: &'static str,
         tip: SharedString,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -121,19 +127,17 @@ impl ScoreSyncApp {
                 .size_full(),
             )
             .child(
-                canvas(|_, _, _| {}, {
-                    move |bounds, _, window, _| {
-                        paint_header_glyph(window, bounds, glyph, ui_kit::chrome(0x334155));
-                    }
-                })
-                .w(px(13.))
-                .h(px(13.)),
+                gpui::svg()
+                    .path(icon)
+                    .w(px(16.))
+                    .h(px(16.))
+                    .text_color(ui_kit::chrome(0x334155)),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.note_header_hover(id, tip_hover.clone(), cx);
                 } else if this.header_hover_id == Some(id) {
-                    this.clear_tab_hover(cx);
+                    this.release_tab_hover(cx);
                 }
             }))
             .on_mouse_up(
@@ -145,63 +149,21 @@ impl ScoreSyncApp {
             )
     }
 
-    fn header_help_btn(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        let tip: SharedString = ui_kit::always_hint(ui_kit::t("chrome.help"), "app.help").into();
-        let tip_hover = tip.clone();
-        div()
-            .id("hdr-help")
-            .relative()
-            .flex_shrink_0()
-            .w(px(28.))
-            .h_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_xs()
-            .text_color(ui_kit::chrome(0x334155))
-            .cursor_pointer()
-            .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
-            .child(
-                canvas(
-                    move |bounds, _, cx| {
-                        entity.update(cx, |this, _| {
-                            this.header_btn_bounds
-                                .insert("hdr-help".to_string(), bounds);
-                        });
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0()
-                .size_full(),
-            )
-            .child("?")
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.note_header_hover("hdr-help", tip_hover.clone(), cx);
-                } else if this.header_hover_id == Some("hdr-help") {
-                    this.clear_tab_hover(cx);
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.clear_tab_hover(cx);
-                    this.show_help(cx);
-                }),
-            )
-    }
-
     fn note_header_hover(&mut self, id: &'static str, text: SharedString, cx: &mut Context<Self>) {
         if self.header_hover_id == Some(id) {
             return;
         }
+        let warm = self.tooltip_warm;
         self.tab_hover_idx = None;
         self.header_hover_id = Some(id);
-        self.tab_tooltip = None;
+        self.spread_title_hover = None;
         self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
         let gen = self.tab_hover_gen;
+        if warm {
+            self.show_header_tooltip(id, text, cx);
+            return;
+        }
+        self.tab_tooltip = None;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(1000))
@@ -210,33 +172,39 @@ impl ScoreSyncApp {
                 if view.tab_hover_gen != gen || view.header_hover_id != Some(id) {
                     return;
                 }
-                let (ax, ay, aw, ah) = view
-                    .header_btn_bounds
-                    .get(id)
-                    .map(|b| {
-                        (
-                            f32::from(b.origin.x),
-                            f32::from(b.origin.y),
-                            f32::from(b.size.width),
-                            f32::from(b.size.height),
-                        )
-                    })
-                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
-                view.tab_tooltip = Some(TabTooltip {
-                    id: id.into(),
-                    anchor_x: ax,
-                    anchor_y: ay,
-                    anchor_w: aw,
-                    anchor_h: ah,
-                    text,
-                    measured_w: 0.0,
-                    measured_h: 0.0,
-                });
-                cx.notify();
+                view.show_header_tooltip(id, text, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    fn show_header_tooltip(&mut self, id: &'static str, text: SharedString, cx: &mut Context<Self>) {
+        let (ax, ay, aw, ah) = self
+            .header_btn_bounds
+            .get(id)
+            .map(|b| {
+                (
+                    f32::from(b.origin.x),
+                    f32::from(b.origin.y),
+                    f32::from(b.size.width),
+                    f32::from(b.size.height),
+                )
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 0.0));
+        self.publish_hover_tooltip(
+            TabTooltip {
+                id: id.into(),
+                anchor_x: ax,
+                anchor_y: ay,
+                anchor_w: aw,
+                anchor_h: ah,
+                text,
+                measured_w: 0.0,
+                measured_h: 0.0,
+            },
+            cx,
+        );
     }
 
     pub(super) fn btn(
@@ -719,7 +687,19 @@ impl ScoreSyncApp {
                         .child(self.tab_bar(cx)),
                 )
             })
-            .child(div().flex_1().min_h(px(0.)).min_w(px(0.)).child(canvas))
+            .child(
+                // 定高的列: 子元素 flex_1 / h_full 才能落到视口, 而不是按内容把整块撑高.
+                // 对开网格若跟着内容长高, 滚轮和右侧滑块都没有可滚距离.
+                div()
+                    .id("left_canvas_host")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(canvas),
+            )
             .into_any_element()
     }
 
@@ -1560,125 +1540,5 @@ impl ScoreSyncApp {
                     ),
             )
             .into_any_element()
-    }
-}
-
-#[derive(Clone, Copy)]
-enum HeaderGlyph {
-    NewDoc,
-    OpenFolder,
-    SaveDisk,
-    SaveAsDisk,
-    Gear,
-}
-
-fn paint_header_glyph(
-    window: &mut Window,
-    bounds: Bounds<Pixels>,
-    glyph: HeaderGlyph,
-    color: gpui::Rgba,
-) {
-    let ox = f32::from(bounds.origin.x);
-    let oy = f32::from(bounds.origin.y);
-    let s = f32::from(bounds.size.width)
-        .min(f32::from(bounds.size.height))
-        .max(1.0);
-    let p = |x: f32, y: f32| point(px(ox + x / 16.0 * s), px(oy + y / 16.0 * s));
-    // 与问号圆框 border_1 同级细线, 不再用加粗描边.
-    let thick = px(1.);
-    let mut stroke = |pts: &[(f32, f32)], close: bool| {
-        if pts.is_empty() {
-            return;
-        }
-        let mut b = PathBuilder::stroke(thick);
-        b.move_to(p(pts[0].0, pts[0].1));
-        for &(x, y) in &pts[1..] {
-            b.line_to(p(x, y));
-        }
-        if close {
-            b.close();
-        }
-        if let Ok(path) = b.build() {
-            window.paint_path(path, color);
-        }
-    };
-    match glyph {
-        HeaderGlyph::NewDoc => {
-            // 折角纸, 开口轮廓, 两行字
-            stroke(
-                &[
-                    (10.0, 2.4),
-                    (4.6, 2.4),
-                    (4.6, 13.6),
-                    (11.6, 13.6),
-                    (11.6, 4.2),
-                    (10.0, 2.4),
-                ],
-                false,
-            );
-            stroke(&[(10.0, 2.4), (10.0, 4.2), (11.6, 4.2)], false);
-            stroke(&[(6.4, 7.4), (10.0, 7.4)], false);
-            stroke(&[(6.4, 10.2), (9.2, 10.2)], false);
-        }
-        HeaderGlyph::OpenFolder => {
-            stroke(&[(3.4, 5.6), (3.4, 3.8), (7.2, 3.8), (8.1, 5.6)], false);
-            stroke(
-                &[
-                    (3.4, 5.6),
-                    (3.4, 12.8),
-                    (12.6, 12.8),
-                    (12.6, 5.6),
-                    (3.4, 5.6),
-                ],
-                false,
-            );
-        }
-        HeaderGlyph::SaveDisk => paint_floppy(&mut stroke, false),
-        HeaderGlyph::SaveAsDisk => paint_floppy(&mut stroke, true),
-        HeaderGlyph::Gear => {
-            let cx = 8.0;
-            let cy = 8.0;
-            let mut circle = |r: f32| {
-                let n = 12;
-                let mut pts = Vec::with_capacity(n);
-                for i in 0..n {
-                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
-                    pts.push((cx + r * a.cos(), cy + r * a.sin()));
-                }
-                stroke(&pts, true);
-            };
-            circle(3.1);
-            circle(1.5);
-            for i in 0..8 {
-                let a = i as f32 / 8.0 * std::f32::consts::TAU;
-                stroke(
-                    &[
-                        (cx + 3.3 * a.cos(), cy + 3.3 * a.sin()),
-                        (cx + 5.3 * a.cos(), cy + 5.3 * a.sin()),
-                    ],
-                    false,
-                );
-            }
-        }
-    }
-}
-
-fn paint_floppy(stroke: &mut impl FnMut(&[(f32, f32)], bool), save_as: bool) {
-    stroke(
-        &[
-            (4.4, 2.8),
-            (11.6, 2.8),
-            (11.6, 13.2),
-            (4.4, 13.2),
-            (4.4, 2.8),
-        ],
-        false,
-    );
-    stroke(&[(6.6, 2.8), (6.6, 5.4), (9.4, 5.4), (9.4, 2.8)], false);
-    stroke(&[(6.0, 8.2), (10.0, 8.2)], false);
-    stroke(&[(6.0, 10.4), (9.2, 10.4)], false);
-    if save_as {
-        stroke(&[(10.2, 6.8), (13.2, 3.8)], false);
-        stroke(&[(11.4, 3.8), (13.2, 3.8), (13.2, 5.6)], false);
     }
 }

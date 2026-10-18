@@ -21,10 +21,13 @@ pdfium.dll
 # 工作区 crate 若单独 cargo 过会产生 lock; 主工程只用根 Cargo.lock
 crates/**/Cargo.lock
 
-# 图标源稿/预览脚本只留本地; 嵌入 Windows 的只有 ico 和 rc
+# 图标源稿/预览脚本只留本地; 嵌入 Windows 的只有 ico 和 rc.
+# 标题栏六个图标随程序编译进二进制.
 /assets/*
 !/assets/app.ico
 !/assets/app.rc
+!/assets/全局选项图标/
+!/assets/全局选项图标/*.svg
 
 # PyInstaller
 /dist/

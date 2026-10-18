@@ -221,7 +221,7 @@ fn classify_spread_drop(
     }
 }
 
-/// 一册占用的列数. 窗口够宽时一行排多册, 不够就折行.
+/// 按原册宽, 一行放得下几册. 窗口够宽时多册并排, 不够就折行.
 fn spread_books_per_row(avail: f32, books: usize) -> usize {
     if books == 0 {
         return 1;
@@ -234,24 +234,63 @@ fn spread_books_per_row(avail: f32, books: usize) -> usize {
     cols.max(1).min(books)
 }
 
-fn spread_grid_width(avail: f32, books: usize) -> f32 {
-    if books == 0 {
-        return 0.0;
+/// 一行 `cols` 册把可用宽度摊满后, 每一册的外宽. 册间距仍是原来的固定值.
+fn spread_book_width(avail: f32, books: usize) -> f32 {
+    if books == 0 || avail <= 1.0 {
+        return SPREAD_BOOK_W;
     }
-    let cols = spread_books_per_row(avail, books);
-    cols as f32 * SPREAD_BOOK_W + (cols.saturating_sub(1) as f32) * SPREAD_BOOK_GAP
+    let cols = spread_books_per_row(avail, books).max(1);
+    let gaps = cols.saturating_sub(1) as f32 * SPREAD_BOOK_GAP;
+    // 每册留 1px, 布局取整后才不会把最后一册挤到下一行.
+    let slack = cols as f32;
+    ((avail - gaps - slack) / cols as f32).max(1.0)
+}
+
+/// 摊满后的一册. 页, 缩略图, 书脊, 内边距按同一个比例缩放, 边框仍是 1px.
+#[derive(Clone, Copy)]
+struct SpreadFit {
+    book_w: f32,
+    page_w: f32,
+    thumb_w: f32,
+    thumb_h: f32,
+    spine_w: f32,
+    pad: f32,
+    scale: f32,
+}
+
+fn spread_fit(avail: f32, books: usize) -> SpreadFit {
+    let book_w = spread_book_width(avail, books);
+    let border = SPREAD_BOOK_BORDER * 2.0;
+    let inner = (SPREAD_BOOK_W - border).max(1.0);
+    let scale = ((book_w - border) / inner).max(0.2);
+    SpreadFit {
+        book_w: border + inner * scale,
+        page_w: SPREAD_PAGE_W * scale,
+        thumb_w: SPREAD_THUMB_W * scale,
+        thumb_h: SPREAD_THUMB_H * scale,
+        spine_w: SPREAD_SPINE_W * scale,
+        pad: SPREAD_BOOK_PAD * scale,
+        scale,
+    }
+}
+
+/// 页题按 12px 量宽, 显示时再乘上同一比例. 传入的是未缩放的像素预算.
+fn spread_caption_px(fit: SpreadFit) -> f32 {
+    ((fit.thumb_w - 4.0) / fit.scale.max(0.2)).max(8.0)
 }
 
 impl ScoreSyncApp {
-    fn spread_grid_avail(&self) -> f32 {
-        let host = self.viewport_w - self.side_width - 5.0;
-        (host - 32.0 - 28.0).max(SPREAD_BOOK_W)
+    /// 对开网格真正能用来排册的宽度: 左栏去掉分隔条, 右侧滚动条和四周留白.
+    fn spread_row_avail(&self) -> f32 {
+        let left = (self.viewport_w - self.side_width - SIDE_SPLIT_W).max(0.0);
+        (left - ORG_SCROLLBAR_W - SPREAD_SCROLL_PAD * 2.0).max(1.0)
     }
 
     pub(super) fn spread_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         self.queue_spread_thumbs(cx);
         let n = self.doc.pages.len();
         let rows = n.div_ceil(2);
+        let fit = spread_fit(self.spread_row_avail(), rows);
         self.spread_cells.clear();
         let moving: HashSet<usize> = self
             .spread_drag
@@ -259,15 +298,17 @@ impl ScoreSyncApp {
             .filter(|d| d.armed)
             .map(|d| self.spread_moving(d.from).into_iter().collect())
             .unwrap_or_default();
-        let grid_w = spread_grid_width(self.spread_grid_avail(), rows);
+        // 滚动条量的是这一层的直接子元素. 再套一层且那层被拉成视口高时,
+        // 折行后的册只溢出内层, 外层仍认为没有可滚距离.
         let mut books = div()
-            .id("spread_grid")
+            .id("spread_scroll_body")
             .flex()
             .flex_row()
             .flex_wrap()
             .items_start()
+            .content_start()
             .gap(px(SPREAD_BOOK_GAP))
-            .when(grid_w > 1.0, |d| d.w(px(grid_w)));
+            .p(px(SPREAD_SCROLL_PAD));
         if n == 0 {
             books = books.child(
                 div()
@@ -277,19 +318,15 @@ impl ScoreSyncApp {
             );
         }
         for row in 0..rows {
-            books = books.child(self.spread_book(row, &moving, cx));
+            books = books.child(self.spread_book(row, &moving, fit, cx));
         }
-        let hint = format!(
-            "拖动改页序 · {}点击按点选顺序多选 · Shift 连选 · Delete 删除 · 「复制」紧贴在最后点中的页右侧 · {}C 复制, {}V 贴到当时选中页的右侧",
-            apply_bg::primary_mod(),
-            apply_bg::primary_mod(),
-            apply_bg::primary_mod()
-        );
         div()
             .id("spread_workspace")
             .flex_1()
+            .h_full()
             .min_h(px(0.))
             .min_w(px(0.))
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(ui_kit::chrome(0xf1f5f9))
@@ -303,19 +340,11 @@ impl ScoreSyncApp {
                 }),
             )
             .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_xs()
-                    .text_color(ui_kit::chrome(0x64748b))
-                    .child(hint),
-            )
-            .child(
-                self.attach_scrollbars(
+                self.attach_scrollbars_pinned(
                     "spread_scroll".into(),
                     ScrollList::PageOrganize,
                     &self.page_organize_scroll,
-                    div().id("spread_scroll_body").p_4().child(books),
+                    books,
                     cx,
                 )
                 .flex_1()
@@ -327,6 +356,7 @@ impl ScoreSyncApp {
         &self,
         row: usize,
         moving: &HashSet<usize>,
+        fit: SpreadFit,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let n = self.doc.pages.len();
@@ -337,11 +367,13 @@ impl ScoreSyncApp {
         div()
             .id(SharedString::from(format!("spread_book_{row}")))
             .flex_shrink_0()
-            .w(px(SPREAD_BOOK_W))
+            .w(px(fit.book_w))
+            .min_w(px(0.))
+            .max_w(px(fit.book_w))
             .flex()
             .flex_col()
-            .gap_1()
-            .p(px(SPREAD_BOOK_PAD))
+            .gap(px(4.0 * fit.scale))
+            .p(px(fit.pad))
             .rounded_md()
             .bg(rgb(0xfffbf5))
             .border_1()
@@ -350,7 +382,8 @@ impl ScoreSyncApp {
             .child(
                 div()
                     .px_1()
-                    .text_xs()
+                    .h(px(16.0 * fit.scale))
+                    .text_size(px(12.0 * fit.scale))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(if active { ui_kit::chrome(0x1d4ed8) } else { rgb(0x78716c) })
                     .child(format!("第 {} 对", row + 1)),
@@ -360,40 +393,42 @@ impl ScoreSyncApp {
                     .flex()
                     .flex_row()
                     .items_start()
-                    .child(self.spread_page_half(left, moving.contains(&left), cx))
-                    .child(self.spread_spine())
+                    .child(self.spread_page_half(left, moving.contains(&left), fit, cx))
+                    .child(self.spread_spine(fit))
                     .when(right < n, |d| {
-                        d.child(self.spread_page_half(right, moving.contains(&right), cx))
+                        d.child(self.spread_page_half(right, moving.contains(&right), fit, cx))
                     })
-                    .when(right >= n, |d| d.child(self.spread_empty_half())),
+                    .when(right >= n, |d| d.child(self.spread_empty_half(fit))),
             )
     }
 
-    fn spread_spine(&self) -> impl IntoElement {
+    fn spread_spine(&self, fit: SpreadFit) -> impl IntoElement {
         div()
-            .w(px(SPREAD_SPINE_W))
-            .h(px(SPREAD_THUMB_H))
+            .w(px(fit.spine_w))
+            .h(px(fit.thumb_h))
             .flex_shrink_0()
             .flex()
             .flex_row()
             .bg(rgb(0xe7e5e4))
             .child(div().flex_1())
-            .child(div().w(px(2.)).h_full().bg(rgb(0xa8a29e)))
+            .child(div().w(px(2.0 * fit.scale)).h_full().bg(rgb(0xa8a29e)))
             .child(div().flex_1())
     }
 
-    fn spread_empty_half(&self) -> impl IntoElement {
+    fn spread_empty_half(&self, fit: SpreadFit) -> impl IntoElement {
         div()
-            .w(px(SPREAD_PAGE_W))
+            .w(px(fit.page_w))
+            .min_w(px(0.))
+            .max_w(px(fit.page_w))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
-            .gap_1()
+            .gap(px(4.0 * fit.scale))
             .child(
                 div()
-                    .w(px(SPREAD_THUMB_W))
-                    .h(px(SPREAD_THUMB_H))
+                    .w(px(fit.thumb_w))
+                    .h(px(fit.thumb_h))
                     .rounded_sm()
                     .bg(rgb(0xf5f5f4))
                     .border_1()
@@ -405,13 +440,14 @@ impl ScoreSyncApp {
                     .text_color(rgb(0xa8a29e))
                     .child("空页"),
             )
-            .child(self.spread_caption_line(""))
+            .child(self.spread_caption_line("", fit.thumb_w))
     }
 
     fn spread_page_half(
         &self,
         idx: usize,
         dragging: bool,
+        fit: SpreadFit,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let page = &self.doc.pages[idx];
@@ -419,7 +455,8 @@ impl ScoreSyncApp {
         let blank = page.blank;
         let selected = self.spread_has(&id);
         let current = self.doc.current_page_index == idx;
-        let title = clip_spread_title(&page.spread_caption().0, SPREAD_THUMB_W - 4.0);
+        let full_title = page.spread_caption().0;
+        let title = clip_spread_title(&full_title, spread_caption_px(fit));
         let thumb = if blank {
             None
         } else {
@@ -446,12 +483,14 @@ impl ScoreSyncApp {
         div()
             .id(SharedString::from(format!("spread_card_{idx}")))
             .relative()
-            .w(px(SPREAD_PAGE_W))
+            .w(px(fit.page_w))
+            .min_w(px(0.))
+            .max_w(px(fit.page_w))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
-            .gap_1()
+            .gap(px(4.0 * fit.scale))
             .rounded_sm()
             .cursor_pointer()
             .when(selected, |d| d.bg(ui_kit::chrome(0xeff6ff)))
@@ -459,8 +498,8 @@ impl ScoreSyncApp {
             .child(Self::measure_spread_cell(entity, idx))
             .child(
                 div()
-                    .w(px(SPREAD_THUMB_W))
-                    .h(px(SPREAD_THUMB_H))
+                    .w(px(fit.thumb_w))
+                    .h(px(fit.thumb_h))
                     .rounded_sm()
                     .bg(if blank { rgb(0xf5f5f4) } else { rgb(0xffffff) })
                     .border_1()
@@ -554,7 +593,7 @@ impl ScoreSyncApp {
                         )
                     }),
             )
-            .child(self.spread_caption_line(&title))
+            .child(self.spread_caption_hover_line(idx, &full_title, &title, fit, cx))
             .when(line_before, |d| {
                 d.child(
                     div()
@@ -583,6 +622,7 @@ impl ScoreSyncApp {
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
+                    this.clear_tab_hover(cx);
                     this.spread_menu = None;
                     let ctrl = is_primary_mod(&ev.modifiers);
                     let shift = ev.modifiers.shift;
@@ -647,13 +687,139 @@ impl ScoreSyncApp {
             )
     }
 
-    fn spread_caption_line(&self, title: &str) -> impl IntoElement {
+    /// 文件名被截断时, 悬停满 1 秒后用和页签一样的提示显示全称.
+    fn spread_caption_hover_line(
+        &self,
+        idx: usize,
+        full: &str,
+        shown: &str,
+        fit: SpreadFit,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let truncated = shown != full;
+        let entity = cx.entity();
+        let clip_w = spread_caption_px(fit);
         div()
-            .w(px(SPREAD_THUMB_W))
-            .h(px(16.))
+            .id(SharedString::from(format!("spread_cap_{idx}")))
+            .relative()
+            .w(px(fit.thumb_w))
+            .min_w(px(0.))
+            .max_w(px(fit.thumb_w))
+            .h(px(16.0 * fit.scale))
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_xs()
+            .text_size(px(12.0 * fit.scale))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(0x292524))
+            .when(truncated, |d| {
+                d.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.note_spread_title_hover(idx, clip_w, cx);
+                    } else if this.spread_title_hover == Some(idx) {
+                        this.release_tab_hover(cx);
+                    }
+                }))
+            })
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        entity.update(cx, |this, _| {
+                            this.spread_caption_bounds.insert(idx, bounds);
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
+            .child(shown.to_string())
+    }
+
+    fn note_spread_title_hover(&mut self, idx: usize, clip_w: f32, cx: &mut Context<Self>) {
+        if self.spread_drag.is_some() {
+            self.clear_tab_hover(cx);
+            return;
+        }
+        if self.spread_title_hover == Some(idx) {
+            return;
+        }
+        let warm = self.tooltip_warm;
+        self.spread_title_hover = Some(idx);
+        self.tab_hover_idx = None;
+        self.header_hover_id = None;
+        self.tab_hover_gen = self.tab_hover_gen.wrapping_add(1);
+        let gen = self.tab_hover_gen;
+        if warm {
+            self.show_spread_title_tooltip(idx, clip_w, cx);
+            return;
+        }
+        self.tab_tooltip = None;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1000))
+                .await;
+            this.update(cx, |view, cx| {
+                if view.tab_hover_gen != gen || view.spread_title_hover != Some(idx) {
+                    return;
+                }
+                if view.spread_drag.is_some() {
+                    return;
+                }
+                view.show_spread_title_tooltip(idx, clip_w, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_spread_title_tooltip(&mut self, idx: usize, clip_w: f32, cx: &mut Context<Self>) {
+        let Some(page) = self.doc.pages.get(idx) else {
+            return;
+        };
+        let full = page.spread_caption().0;
+        let shown = clip_spread_title(&full, clip_w);
+        if shown == full {
+            if self.tab_tooltip.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let (ax, ay, aw, ah) = self
+            .spread_caption_bounds
+            .get(&idx)
+            .map(|b| {
+                (
+                    f32::from(b.origin.x),
+                    f32::from(b.origin.y),
+                    f32::from(b.size.width),
+                    f32::from(b.size.height),
+                )
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 0.0));
+        self.publish_hover_tooltip(
+            TabTooltip {
+                id: format!("spread-cap-{idx}").into(),
+                anchor_x: ax,
+                anchor_y: ay,
+                anchor_w: aw,
+                anchor_h: ah,
+                text: full.into(),
+                measured_w: 0.0,
+                measured_h: 0.0,
+            },
+            cx,
+        );
+    }
+
+    fn spread_caption_line(&self, title: &str, thumb_w: f32) -> impl IntoElement {
+        let scale = thumb_w / SPREAD_THUMB_W.max(1.0);
+        div()
+            .w(px(thumb_w))
+            .h(px(16.0 * scale))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(12.0 * scale))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(rgb(0x292524))
             .child(title.to_string())
@@ -800,11 +966,15 @@ impl ScoreSyncApp {
         } else {
             page.and_then(|p| self.org_thumbs.get(&p.id).cloned())
         };
+        let metrics = spread_fit(
+            self.spread_row_avail(),
+            self.doc.pages.len().div_ceil(2),
+        );
         let title = page
-            .map(|p| clip_spread_title(&p.spread_caption().0, SPREAD_THUMB_W - 4.0))
+            .map(|p| clip_spread_title(&p.spread_caption().0, spread_caption_px(metrics)))
             .unwrap_or_default();
         let count = self.spread_moving(drag.from).len().max(1);
-        let dx = (SPREAD_PAGE_W - SPREAD_THUMB_W) * 0.5;
+        let dx = (metrics.page_w - metrics.thumb_w) * 0.5;
         let gx = drag.origin_x + dx + (drag.x - drag.start_x);
         let gy = drag.origin_y + (drag.y - drag.start_y);
         div()
@@ -812,7 +982,7 @@ impl ScoreSyncApp {
             .absolute()
             .left(px(gx))
             .top(px(gy))
-            .w(px(SPREAD_THUMB_W))
+            .w(px(metrics.thumb_w))
             .opacity(0.72)
             .flex()
             .flex_col()
@@ -820,8 +990,8 @@ impl ScoreSyncApp {
             .gap_1()
             .child(
                 div()
-                    .w(px(SPREAD_THUMB_W))
-                    .h(px(SPREAD_THUMB_H))
+                    .w(px(metrics.thumb_w))
+                    .h(px(metrics.thumb_h))
                     .rounded_sm()
                     .bg(if blank { rgb(0xf5f5f4) } else { rgb(0xffffff) })
                     .border_1()
@@ -894,8 +1064,9 @@ impl ScoreSyncApp {
             )
             .child(
                 div()
-                    .w(px(SPREAD_THUMB_W))
-                    .text_xs()
+                    .w(px(metrics.thumb_w))
+                    .h(px(16.0 * metrics.scale))
+                    .text_size(px(12.0 * metrics.scale))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(0x292524))
                     .whitespace_nowrap()
@@ -1164,6 +1335,7 @@ impl ScoreSyncApp {
 
     pub(super) fn apply_sheet_layout(&mut self, to_spread: bool, cx: &mut Context<Self>) {
         self.dialog = None;
+        self.clear_tab_hover(cx);
         self.spread_menu = None;
         self.spread_drag = None;
         self.spread_selected.clear();
@@ -1594,16 +1766,35 @@ mod tests {
         let book = SPREAD_BOOK_W;
         let avail = book * 3.0 + SPREAD_BOOK_GAP * 2.0 + 8.0;
         assert_eq!(spread_books_per_row(avail, 8), 3);
-        let w = spread_grid_width(avail, 8);
-        assert!(w <= avail + 0.01);
-        assert!((w - (book * 3.0 + SPREAD_BOOK_GAP * 2.0)).abs() < 0.01);
+        let w = spread_book_width(avail, 8);
+        let used = w * 3.0 + SPREAD_BOOK_GAP * 2.0;
+        assert!(used <= avail + 0.01);
+        // 每册留 1px, 取整后最后一册才不会被挤到下一行.
+        assert!((avail - used - 3.0).abs() < 0.01);
+        assert!(w > book);
     }
 
     #[test]
     fn narrow_window_keeps_one_book() {
         assert_eq!(spread_books_per_row(SPREAD_BOOK_W - 4.0, 4), 1);
         assert_eq!(spread_books_per_row(SPREAD_BOOK_W + 4.0, 4), 1);
-        assert_eq!(spread_grid_width(0.0, 0), 0.0);
+        let narrow = SPREAD_BOOK_W - 40.0;
+        let w = spread_book_width(narrow, 4);
+        assert!((w - (narrow - 1.0)).abs() < 0.01);
+        assert_eq!(spread_book_width(0.0, 0), SPREAD_BOOK_W);
+    }
+
+    #[test]
+    fn book_keeps_page_aspect() {
+        let avail = SPREAD_BOOK_W * 2.0 + SPREAD_BOOK_GAP + 30.0;
+        let m = spread_fit(avail, 4);
+        let ratio = SPREAD_THUMB_W / SPREAD_THUMB_H;
+        assert!((m.thumb_w / m.thumb_h - ratio).abs() < 0.001);
+        let laid = m.pad * 2.0 + SPREAD_BOOK_BORDER * 2.0 + m.page_w * 2.0 + m.spine_w;
+        assert!((laid - m.book_w).abs() < 0.05);
+        let cols = spread_books_per_row(avail, 4);
+        let used = m.book_w * cols as f32 + SPREAD_BOOK_GAP * cols.saturating_sub(1) as f32;
+        assert!(used <= avail + 0.05);
     }
 
     #[test]

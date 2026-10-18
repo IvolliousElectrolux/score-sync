@@ -574,12 +574,127 @@ impl ScoreSyncApp {
         }
         cx.notify();
     }
+
+    /// 滑块在轨道内的 top 与高度. 读的是本帧 prepaint 已经写好的 ScrollHandle.
+    fn settings_vthumb(handle: &ScrollHandle) -> Option<(f32, f32)> {
+        let max_y = f32::from(handle.max_offset().height);
+        let track_h = f32::from(handle.bounds().size.height);
+        if max_y <= 1.0 || track_h <= 1.0 {
+            return None;
+        }
+        let thumb_h = ((track_h * track_h) / (track_h + max_y)).clamp(24.0, track_h);
+        let travel = (track_h - thumb_h).max(1.0);
+        let off_y = -f32::from(handle.offset().y);
+        let frac = (off_y / max_y).clamp(0.0, 1.0);
+        Some((frac * travel, thumb_h))
+    }
+
+    fn settings_vtrack(
+        &self,
+        wrap_id: &str,
+        which: ScrollList,
+        handle: &ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let paint_handle = handle.clone();
+        div()
+            .id(SharedString::from(format!("{wrap_id}-vtrack")))
+            .w(px(10.))
+            .h_full()
+            .flex_shrink_0()
+            .relative()
+            .rounded_sm()
+            .bg(ui_kit::chrome(0xe2e8f0))
+            .cursor_pointer()
+            .child(
+                canvas(
+                    move |_bounds, _, _| Self::settings_vthumb(&paint_handle),
+                    |bounds, geom, window, _| {
+                        let Some((top, thumb_h)) = geom else {
+                            return;
+                        };
+                        let color = ui_kit::chrome(0x94a3b8);
+                        window.paint_quad(quad(
+                            Bounds {
+                                origin: point(bounds.origin.x + px(1.), bounds.origin.y + px(top)),
+                                size: size(bounds.size.width - px(2.), px(thumb_h)),
+                            },
+                            px(2.),
+                            color,
+                            px(0.),
+                            color,
+                            Default::default(),
+                        ));
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    let y = f32::from(ev.position.y);
+                    let handle = this.scroll_handle(which).clone();
+                    let bounds = handle.bounds();
+                    let track_h = f32::from(bounds.size.height);
+                    let track_top = f32::from(bounds.origin.y);
+                    let Some((thumb_top, thumb_h)) = Self::settings_vthumb(&handle) else {
+                        return;
+                    };
+                    let travel = (track_h - thumb_h).max(1.0);
+                    let max = f32::from(handle.max_offset().height);
+                    let local = y - track_top;
+                    let on_thumb = local >= thumb_top && local <= thumb_top + thumb_h;
+                    let grab = if on_thumb {
+                        local - thumb_top
+                    } else {
+                        let target = (local - thumb_h * 0.5).clamp(0.0, travel);
+                        let ox = handle.offset().x;
+                        handle.set_offset(point(ox, px(-(target / travel) * max)));
+                        thumb_h * 0.5
+                    };
+                    this.drag = Some(DragKind::Scrollbar {
+                        which,
+                        grab,
+                        vertical: true,
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+    }
+
     pub(super) fn attach_scrollbars(
         &self,
         wrap_id: SharedString,
         which: ScrollList,
         handle: &ScrollHandle,
+        list: Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui::Div> {
+        self.attach_scrollbars_inner(wrap_id, which, handle, list, false, cx)
+    }
+
+    /// 和 [`attach_scrollbars`] 相同, 但竖向轨道从第一帧就占在右侧.
+    /// 内容还没溢出时不画滑块; 溢出后滑块按本帧测量画出, 列表不会被后补的轨道挤一下.
+    pub(super) fn attach_scrollbars_pinned(
+        &self,
+        wrap_id: SharedString,
+        which: ScrollList,
+        handle: &ScrollHandle,
+        list: Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui::Div> {
+        self.attach_scrollbars_inner(wrap_id, which, handle, list, true, cx)
+    }
+
+    fn attach_scrollbars_inner(
+        &self,
+        wrap_id: SharedString,
+        which: ScrollList,
+        handle: &ScrollHandle,
         mut list: Stateful<gpui::Div>,
+        pin_vtrack: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
         let max_y = f32::from(handle.max_offset().height);
@@ -607,7 +722,12 @@ impl ScoreSyncApp {
             .min_w(px(0.))
             .child(list);
 
-        if show_v {
+        // 快捷键列表第一次打开时, ScrollHandle 还没有上一帧的高度, 按 show_v
+        // 会先不画轨道, 布局完再补上, 列表会被挤一下. 轨道一开始就占位,
+        // 滑块在本帧 prepaint 之后再画, 和内容一起出现.
+        if pin_vtrack || which == ScrollList::Settings {
+            row = row.child(self.settings_vtrack(&wrap_id, which, handle, cx));
+        } else if show_v {
             let thumb_h = ((track_h * track_h) / (track_h + max_y)).clamp(24.0, track_h);
             let travel = (track_h - thumb_h).max(1.0);
             let off_y = -f32::from(handle.offset().y);
