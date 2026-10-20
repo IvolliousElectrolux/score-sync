@@ -1,4 +1,4 @@
-//! 上次打开工程路径 + 蒙版选色偏好: 存于用户配置目录 (Windows: %APPDATA%/score_sync).
+//! 上次打开工程路径、主窗口位置、蒙版选色偏好: 存于用户配置目录 (Windows: %APPDATA%/score_sync).
 //!
 //! `config.json` 为新格式; 若仅有旧版 `config.txt` 则读取 `last_project=` 并迁移.
 
@@ -41,6 +41,20 @@ pub struct Config {
     /// 和默认方案不同的键位. 键是命令 id, 值与默认槽位一一对应, 空串表示解开.
     #[serde(default)]
     pub shortcuts: HashMap<String, Vec<String>>,
+    /// 上次主窗口的位置和大小. 没有则居中打开.
+    #[serde(default)]
+    pub window: Option<WindowPlacement>,
+}
+
+/// 主窗口上次停留的客户区位置 (逻辑像素) 和是否最大化.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WindowPlacement {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 fn default_theme() -> String {
@@ -72,6 +86,7 @@ impl Default for Config {
             check_updates: true,
             show_menu_shortcuts: true,
             shortcuts: HashMap::new(),
+            window: None,
         }
     }
 }
@@ -190,4 +205,155 @@ pub fn remember_mask_prefs(prefs: &MaskColorPrefs) {
     let mut cfg = load();
     cfg.mask_prefs = prefs.clone().clamp();
     save(&cfg);
+}
+
+/// 记住主窗口位置. 尺寸过小或坐标非法时不写, 避免最小化或未布局完成的瞬时值盖掉上次的有效位置.
+pub fn remember_window(x: f32, y: f32, width: f32, height: f32, maximized: bool) {
+    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
+        return;
+    }
+    if width < 80. || height < 60. {
+        return;
+    }
+    let next = WindowPlacement {
+        x,
+        y,
+        width,
+        height,
+        maximized,
+    };
+    let mut cfg = load();
+    if cfg.window.as_ref().is_some_and(|old| same_placement(old, &next)) {
+        return;
+    }
+    cfg.window = Some(next);
+    save(&cfg);
+}
+
+fn same_placement(a: &WindowPlacement, b: &WindowPlacement) -> bool {
+    a.maximized == b.maximized
+        && (a.x - b.x).abs() < 0.5
+        && (a.y - b.y).abs() < 0.5
+        && (a.width - b.width).abs() < 0.5
+        && (a.height - b.height).abs() < 0.5
+}
+
+/// 把上次窗口摆到仍有重叠的那块屏幕上, 并保证至少有一条边留在屏幕内.
+/// 屏幕坐标是 `(x, y, width, height)`. 对不上任何屏幕时居中放到 `primary`.
+/// 返回 `(x, y, width, height, screen_index)`.
+pub fn place_window(
+    saved: &WindowPlacement,
+    screens: &[(f32, f32, f32, f32)],
+    primary: usize,
+) -> Option<(f32, f32, f32, f32, usize)> {
+    const MIN_W: f32 = 200.;
+    const MIN_H: f32 = 160.;
+    const VISIBLE: f32 = 48.;
+    if screens.is_empty()
+        || !saved.x.is_finite()
+        || !saved.y.is_finite()
+        || !saved.width.is_finite()
+        || !saved.height.is_finite()
+        || saved.width < 80.
+        || saved.height < 60.
+    {
+        return None;
+    }
+    let primary = primary.min(screens.len() - 1);
+    let host = screens
+        .iter()
+        .enumerate()
+        .map(|(i, screen)| (i, overlap(saved, *screen)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|(_, area)| *area > 0.)
+        .map(|(i, _)| i);
+    let Some(host) = host else {
+        let (sx, sy, sw, sh) = screens[primary];
+        if sw < 1. || sh < 1. {
+            return None;
+        }
+        let w = saved.width.clamp(MIN_W.min(sw), sw);
+        let h = saved.height.clamp(MIN_H.min(sh), sh);
+        return Some((sx + (sw - w) * 0.5, sy + (sh - h) * 0.5, w, h, primary));
+    };
+    let (sx, sy, sw, sh) = screens[host];
+    if sw < 1. || sh < 1. {
+        return None;
+    }
+    let w = saved.width.clamp(MIN_W.min(sw), sw);
+    let h = saved.height.clamp(MIN_H.min(sh), sh);
+    let visible_x = VISIBLE.min(w);
+    let visible_y = VISIBLE.min(h);
+    // 尺寸被屏幕裁过时贴齐屏幕原点, 避免裁完还向屏幕外偏出一截.
+    let x = if saved.width > sw + 0.5 {
+        sx
+    } else {
+        saved.x.clamp(sx + visible_x - w, sx + sw - visible_x)
+    };
+    let y = if saved.height > sh + 0.5 {
+        sy
+    } else {
+        saved.y.clamp(sy, sy + sh - visible_y)
+    };
+    Some((x, y, w, h, host))
+}
+
+fn overlap(saved: &WindowPlacement, screen: (f32, f32, f32, f32)) -> f32 {
+    let (sx, sy, sw, sh) = screen;
+    let x1 = saved.x.max(sx);
+    let y1 = saved.y.max(sy);
+    let x2 = (saved.x + saved.width).min(sx + sw);
+    let y2 = (saved.y + saved.height).min(sy + sh);
+    (x2 - x1).max(0.) * (y2 - y1).max(0.)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placement(x: f32, y: f32, width: f32, height: f32) -> WindowPlacement {
+        WindowPlacement {
+            x,
+            y,
+            width,
+            height,
+            maximized: false,
+        }
+    }
+
+    #[test]
+    fn keeps_a_window_on_the_screen_it_overlaps() {
+        let screens = [(0., 0., 1920., 1080.), (1920., 0., 1920., 1080.)];
+        let (x, y, w, h, screen) =
+            place_window(&placement(2100., 120., 900., 700.), &screens, 0).unwrap();
+        assert_eq!(screen, 1);
+        assert_eq!((x, y, w, h), (2100., 120., 900., 700.));
+    }
+
+    #[test]
+    fn centers_when_the_old_monitor_is_gone() {
+        let screens = [(0., 0., 1600., 900.)];
+        let (x, y, w, h, screen) =
+            place_window(&placement(4000., 200., 800., 600.), &screens, 0).unwrap();
+        assert_eq!(screen, 0);
+        assert_eq!((x, y, w, h), (400., 150., 800., 600.));
+    }
+
+    #[test]
+    fn shrinks_a_window_that_is_larger_than_the_screen() {
+        let screens = [(0., 0., 1280., 800.)];
+        let (x, y, w, h, _) =
+            place_window(&placement(40., 30., 2000., 900.), &screens, 0).unwrap();
+        assert_eq!((x, y, w, h), (0., 0., 1280., 800.));
+    }
+
+    #[test]
+    fn pulls_a_partly_offscreen_window_back_into_view() {
+        let screens = [(0., 0., 1280., 800.)];
+        // 只有 20px 还留在屏幕里, 应被拉回至少 48px.
+        let (x, y, w, h, _) =
+            place_window(&placement(-580., 40., 600., 400.), &screens, 0).unwrap();
+        assert_eq!((x, y, w, h), (-552., 40., 600., 400.));
+        assert!((x + w) >= 48.);
+    }
 }

@@ -92,9 +92,9 @@ pub(crate) use apply_bg::text_input::TextInput;
 pub(crate) use gpui::prelude::*;
 pub(crate) use gpui::{
     canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
-    DispatchPhase, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    DispatchPhase, DisplayId, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 pub(crate) use mask_tool::gui::MaskToolApp;
@@ -174,6 +174,10 @@ pub(crate) struct ScoreSyncApp {
     settings_capture: Option<(String, usize)>,
     settings_conflict: SharedString,
     capture_sub: Option<gpui::Subscription>,
+    /// 窗口移动/缩放观察, 必须留着, 否则订阅会立刻取消.
+    window_place_sub: Option<gpui::Subscription>,
+    /// 位置保存的代数. 拖动过程中只让最后一次定时写入落地.
+    window_place_gen: u64,
     update_probe: settings::UpdateProbe,
     /// 标签右键菜单
     tab_menu: Option<TabContextMenu>,
@@ -456,6 +460,8 @@ impl ScoreSyncApp {
             settings_capture: None,
             settings_conflict: SharedString::default(),
             capture_sub: None,
+            window_place_sub: None,
+            window_place_gen: 0,
             update_probe: settings::UpdateProbe::Idle,
             tab_menu: None,
             tab_hover_idx: None,
@@ -567,6 +573,38 @@ impl ScoreSyncApp {
         app.start_update_check(cx);
         app.start_memory_trace(cx);
         app
+    }
+
+    fn watch_window_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window_place_sub = Some(cx.observe_window_bounds(window, |this, window, cx| {
+            this.schedule_window_placement_save(window, cx);
+        }));
+    }
+
+    fn schedule_window_placement_save(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let (x, y, w, h, maximized) = window_placement_of(window);
+        self.window_place_gen = self.window_place_gen.wrapping_add(1);
+        let gen = self.window_place_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(350))
+                .await;
+            this.update(cx, |app, _| {
+                if app.window_place_gen != gen {
+                    return;
+                }
+                config::remember_window(x, y, w, h, maximized);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn store_window_placement(&mut self, window: &Window) {
+        // 关掉尚未落地的定时保存, 避免退出后用旧坐标覆盖这次的位置.
+        self.window_place_gen = self.window_place_gen.wrapping_add(1);
+        let (x, y, w, h, maximized) = window_placement_of(window);
+        config::remember_window(x, y, w, h, maximized);
     }
 
     /// 分块面板专属快捷键 (识别/开图/加块等). 蒙版、底色、视频和组织页面 overlay 都不走这套.
@@ -1347,11 +1385,12 @@ pub fn run_gui(initial: Vec<PathBuf>) {
     Application::new().with_assets(HeaderIcons).run(move |cx: &mut App| {
         ui_kit::load_prefs_from_disk();
         keymap::install(cx);
-        let bounds = default_window_bounds(cx);
+        let (bounds, display_id) = remembered_window_bounds(cx);
         let initial = initial.clone();
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(bounds),
+                display_id,
                 titlebar: Some(gpui::TitlebarOptions {
                     title: Some("曲谱同步 / Score Sync".into()),
                     ..Default::default()
@@ -1364,12 +1403,14 @@ pub fn run_gui(initial: Vec<PathBuf>) {
                     app.focus_handle.focus(window);
                     app
                 });
+                entity.update(cx, |app, cx| app.watch_window_placement(window, cx));
                 let weak = entity.downgrade();
-                window.on_window_should_close(cx, move |_window, cx| {
+                window.on_window_should_close(cx, move |window, cx| {
                     let Some(entity) = weak.upgrade() else {
                         return true;
                     };
                     entity.update(cx, |app, cx| {
+                        app.store_window_placement(window);
                         if app.allow_close {
                             return true;
                         }
@@ -1419,6 +1460,64 @@ fn paint_save_spinner(window: &mut Window, bounds: Bounds<Pixels>, phase: f32) {
             Default::default(),
         ));
     }
+}
+
+/// 最大化时记下的是还原后的矩形, 不是铺满屏幕的那一帧.
+fn window_placement_of(window: &Window) -> (f32, f32, f32, f32, bool) {
+    let state = window.window_bounds();
+    let maximized = matches!(
+        state,
+        WindowBounds::Maximized(_) | WindowBounds::Fullscreen(_)
+    );
+    let bounds = state.get_bounds();
+    (
+        f32::from(bounds.origin.x),
+        f32::from(bounds.origin.y),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+        maximized,
+    )
+}
+
+/// 有上次记录就按那个位置和大小打开 (最大化也恢复); 没有, 或屏幕对不上, 则居中.
+fn remembered_window_bounds(cx: &App) -> (WindowBounds, Option<DisplayId>) {
+    let fallback = WindowBounds::Windowed(default_window_bounds(cx));
+    let Some(saved) = config::load().window else {
+        return (fallback, None);
+    };
+    let displays = cx.displays();
+    if displays.is_empty() {
+        return (fallback, None);
+    }
+    let rects: Vec<(f32, f32, f32, f32)> = displays
+        .iter()
+        .map(|d| {
+            let b = d.bounds();
+            (
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height),
+            )
+        })
+        .collect();
+    let primary = cx
+        .primary_display()
+        .and_then(|p| displays.iter().position(|d| d.id() == p.id()))
+        .unwrap_or(0);
+    let Some((x, y, w, h, ix)) = config::place_window(&saved, &rects, primary) else {
+        return (fallback, None);
+    };
+    let bounds = Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(w), px(h)),
+    };
+    let state = if saved.maximized {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    };
+    (state, displays.get(ix).map(|d| d.id()))
 }
 
 /// 首选尺寸夹紧到主屏内并留边距, 保证四边都在屏幕内.
