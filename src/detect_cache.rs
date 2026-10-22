@@ -8,12 +8,24 @@ use std::path::{Path, PathBuf};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use crate::staff_detect::{detect_bands, Band, StaffGrouping};
+use crate::staff_detect::{
+    detect_bands, merge_system_bands, Band, StaffGrouping, StaffPackMode,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedStaffAnchor {
     /// `Some` = 谱表锚点 (相对条带顶); `None` = 已判定不是五线谱.
     pub y: Option<i32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CachedLineBand {
+    pub y0: i32,
+    pub y1: i32,
+    pub kind: String,
+    /// 相对条带顶. 旧缓存没有.
+    #[serde(default)]
+    pub staff_anchor: Option<CachedStaffAnchor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,7 +47,23 @@ pub struct PageDetectFile {
     pub margin: i32,
     #[serde(default)]
     pub staff_grouping: StaffGrouping,
+    /// 页内合并实际收进行数. 跨页组合不改几何, 这里仍是 1.
+    #[serde(default)]
+    pub staff_pack_lines: u32,
+    #[serde(default)]
+    pub staff_pack_mode: StaffPackMode,
+    /// 合并前的一行一块. 旧缓存没有.
+    #[serde(default)]
+    pub line_bands: Vec<CachedLineBand>,
     pub regions: Vec<CachedRegion>,
+}
+
+fn baked_pack_lines(lines: u32, mode: StaffPackMode) -> u32 {
+    if mode == StaffPackMode::WithinPage && lines >= 2 {
+        lines
+    } else {
+        1
+    }
 }
 
 pub fn sidecar_path(png: &Path) -> PathBuf {
@@ -60,7 +88,13 @@ fn new_rid() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
-pub fn detect_to_file(img: &RgbImage, ink_threshold: i32, margin: i32) -> PageDetectFile {
+pub fn detect_to_file(
+    img: &RgbImage,
+    ink_threshold: i32,
+    margin: i32,
+    pack_lines: u32,
+    pack_mode: StaffPackMode,
+) -> PageDetectFile {
     let mut bands = detect_bands(img, ink_threshold, margin);
     if bands.is_empty() {
         bands.push(Band {
@@ -68,6 +102,21 @@ pub fn detect_to_file(img: &RgbImage, ink_threshold: i32, margin: i32) -> PageDe
             y1: img.height().saturating_sub(1) as i32,
             kind: "region".into(),
         });
+    }
+    let line_bands = bands
+        .iter()
+        .map(|b| {
+            let y = mask_tool::staff::band_staff_anchor(img, b.y0, b.y1, ink_threshold);
+            CachedLineBand {
+                y0: b.y0,
+                y1: b.y1,
+                kind: b.kind.clone(),
+                staff_anchor: Some(CachedStaffAnchor { y }),
+            }
+        })
+        .collect();
+    if pack_mode == StaffPackMode::WithinPage {
+        bands = merge_system_bands(bands, pack_lines);
     }
     let regions = bands
         .into_iter()
@@ -88,6 +137,9 @@ pub fn detect_to_file(img: &RgbImage, ink_threshold: i32, margin: i32) -> PageDe
         ink_threshold,
         margin,
         staff_grouping: StaffGrouping::default(),
+        staff_pack_lines: pack_lines,
+        staff_pack_mode: pack_mode,
+        line_bands,
         regions,
     }
 }
@@ -98,8 +150,10 @@ pub fn detect_and_save(
     png_path: &Path,
     ink_threshold: i32,
     margin: i32,
+    pack_lines: u32,
+    pack_mode: StaffPackMode,
 ) -> PageDetectFile {
-    let file = detect_to_file(img, ink_threshold, margin);
+    let file = detect_to_file(img, ink_threshold, margin, pack_lines, pack_mode);
     if let Err(e) = save(png_path, &file) {
         crate::trace::log(&format!("detect sidecar 写入失败: {e}"));
     }
@@ -112,11 +166,24 @@ pub fn load_or_detect(
     png_path: &Path,
     ink_threshold: i32,
     margin: i32,
+    pack_lines: u32,
+    pack_mode: StaffPackMode,
 ) -> PageDetectFile {
     if let Some(cached) = load(png_path) {
-        if cached.ink_threshold == ink_threshold && cached.margin == margin {
+        if cached.ink_threshold == ink_threshold
+            && cached.margin == margin
+            && baked_pack_lines(cached.staff_pack_lines, cached.staff_pack_mode)
+                == baked_pack_lines(pack_lines, pack_mode)
+        {
             return cached;
         }
     }
-    detect_and_save(img, png_path, ink_threshold, margin)
+    detect_and_save(
+        img,
+        png_path,
+        ink_threshold,
+        margin,
+        pack_lines,
+        pack_mode,
+    )
 }

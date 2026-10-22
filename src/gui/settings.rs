@@ -213,6 +213,8 @@ impl ScoreSyncApp {
         div()
             .id("settings_project")
             .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
             .p_4()
             .flex()
             .flex_col()
@@ -235,6 +237,135 @@ impl ScoreSyncApp {
             .child(self.settings_choice("layout-spread", &t("settings.layout_spread"), &t("settings.layout_spread_hint"), spread, cx, |this, _, cx| {
                 this.request_sheet_layout(true, cx);
             }))
+            .child(self.settings_heading(&t("settings.pack")))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child(t("settings.pack_hint")),
+            )
+            .child(self.settings_pack_lines(cx))
+            .child(self.settings_choice(
+                "pack-within",
+                &t("settings.pack_within"),
+                &t("settings.pack_within_hint"),
+                self.doc.staff_pack_mode == crate::staff_detect::StaffPackMode::WithinPage,
+                cx,
+                |this, _, cx| {
+                    let lines = this.doc.staff_pack_lines.max(1);
+                    this.apply_staff_pack_choice(
+                        lines,
+                        crate::staff_detect::StaffPackMode::WithinPage,
+                        cx,
+                    );
+                },
+            ))
+            .child(self.settings_choice(
+                "pack-across",
+                &t("settings.pack_across"),
+                &t("settings.pack_across_hint"),
+                self.doc.staff_pack_mode == crate::staff_detect::StaffPackMode::AcrossPages,
+                cx,
+                |this, _, cx| {
+                    let lines = this.doc.staff_pack_lines.max(1);
+                    this.apply_staff_pack_choice(
+                        lines,
+                        crate::staff_detect::StaffPackMode::AcrossPages,
+                        cx,
+                    );
+                },
+            ))
+            .when(spread, |col| {
+                col.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child(t("settings.pack_spread_hint")),
+                )
+            })
+    }
+
+    fn settings_pack_lines(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = ui_kit::theme();
+        let lines = self.doc.staff_pack_lines.max(1);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(self.settings_text_btn(
+                "pack-dec",
+                &"-".into(),
+                false,
+                cx,
+                |this, _, cx| {
+                    let lines = this.doc.staff_pack_lines.max(1);
+                    let mode = this.doc.staff_pack_mode;
+                    this.apply_staff_pack_choice(lines.saturating_sub(1).max(1), mode, cx);
+                },
+            ))
+            .child(
+                div()
+                    .min_w(px(72.))
+                    .text_sm()
+                    .child(format!("{lines} {}", t("settings.pack_lines"))),
+            )
+            .child(self.settings_text_btn(
+                "pack-inc",
+                &"+".into(),
+                false,
+                cx,
+                |this, _, cx| {
+                    let lines = this.doc.staff_pack_lines.max(1);
+                    let mode = this.doc.staff_pack_mode;
+                    this.apply_staff_pack_choice((lines + 1).min(12), mode, cx);
+                },
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child("1-12"),
+            )
+    }
+
+    fn apply_staff_pack_choice(
+        &mut self,
+        lines: u32,
+        mode: crate::staff_detect::StaffPackMode,
+        cx: &mut Context<Self>,
+    ) {
+        let lines = lines.clamp(1, 12);
+        if self.doc.staff_pack_lines.max(1) == lines && self.doc.staff_pack_mode == mode {
+            return;
+        }
+        self.push_crop_undo_all_pages();
+        let spread = self.doc.is_spread();
+        let result = self.doc.apply_staff_pack(lines, mode);
+        let lines = self.doc.staff_pack_lines.max(1);
+        let mode = self.doc.staff_pack_mode;
+        self.status = match result {
+            crate::model::StaffPackApply::Unchanged => return,
+            crate::model::StaffPackApply::NeedRedetect => format!(
+                "已改为 {lines} 行. 眼下这些块是按页合并过的, 请重新识别才会按新行数切开."
+            )
+            .into(),
+            crate::model::StaffPackApply::Applied if spread => {
+                "已记下谱行合并. 双页对开不识别谱表, 切回去之后重新识别才会用上.".into()
+            }
+            crate::model::StaffPackApply::Applied if lines < 2 => "已改回一行一块.".into(),
+            crate::model::StaffPackApply::Applied
+                if mode == crate::staff_detect::StaffPackMode::AcrossPages =>
+            {
+                format!("已按 {lines} 行跨页组成组合. 标题和脚注没有并进去.").into()
+            }
+            crate::model::StaffPackApply::Applied => {
+                format!("已在每页把谱行按 {lines} 行收成一块.").into()
+            }
+        };
+        self.hint = self.status.clone();
+        self.mark_dirty();
+        self.after_doc_change(cx);
     }
 
     fn settings_project_name(&self) -> String {

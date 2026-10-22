@@ -131,6 +131,9 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
    识别先找五线谱表, 再看相邻谱表是否有墨迹像素直接 8 连通 (贴边分量、无内部孔洞或过窄的连通域不计).\n\
    矢量 PDF 不先光栅整页, 按长水平谱线收谱行; 没有这种谱线则收成整页一块.\n\
+   设置 → 项目属性「谱行合并」在上面这一步之后再生效. 行数 1 仍是一行一块.\n\
+   「页内成块」把同一页每 N 行收成一块 (上界取第一行, 下界取最后一行, 中间空隙算进去; 本页剩下的不跨页).\n\
+   「跨页组合」按顺序把谱行收成组合, 页末不够就接到后面页的谱行. 标题和脚注不参与.\n\
 5. 「添加新块」(N): 按下定一条边; 先上移则该边为下边线, 先下移则该边为上边线, 拖出另一边后松开.\n\
    新块按上边线 y 插入「输出组合」(本页自上而下), 不会丢到列表末尾.\n\
 6. 「分割块」(S): 在已有块内点击, 于指针 y 切成上下两块.\n\
@@ -248,6 +251,9 @@ Steps:\n\
 2. {m}S saves one .staffcrop package. {ms}O continues later. {ms}N starts empty. Closing with unsaved changes asks first.\n\
 3. Right-click a tab to duplicate the page. Organize pages (P) reorders and deletes with thumbnails.\n\
 4. Each page is detected on its own. Detect all pages runs in parallel within the memory budget. Vector PDFs stay vector and use long horizontal staff lines.\n\
+   Settings, Project, Staff packing runs after that. 1 keeps one staff line per block.\n\
+   Within page joins every N lines on the same page (top of the first through bottom of the last, including the gap; a short tail stays on that page).\n\
+   Across pages groups staff lines in order and continues a short tail onto the next page. Titles and footnotes stay out.\n\
 5. Add block (N), split (S), merge (M), share footnote, and {m}M to pair ungrouped blocks.\n\
 6. Mask edits the vertical composite of the current group. Drag blocks, then export.\n\
 7. Background is an undoable layer under each output group. Batch background is separate from the project resolution.\n\
@@ -310,6 +316,8 @@ pub(crate) struct CropSnap {
     pub(crate) active_group_id: Option<String>,
     pub(crate) groups_manual_order: bool,
     pub(crate) staff_grouping: crate::staff_detect::StaffGrouping,
+    pub(crate) staff_pack_lines: u32,
+    pub(crate) staff_pack_mode: crate::staff_detect::StaffPackMode,
     pub(crate) group_guides: HashMap<String, GuideState>,
     pub(crate) group_guide_defaults: HashMap<String, GuideState>,
     pub(crate) guides_global: bool,

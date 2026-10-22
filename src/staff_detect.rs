@@ -30,6 +30,75 @@ pub enum StaffGrouping {
     MultiStaff,
 }
 
+/// 识别收成一行一块之后, 再按几行谱表往下收.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaffPackMode {
+    /// 只在本页收: 上界取第一行, 下界取最后一行. 凑不满的留在本页.
+    #[default]
+    WithinPage,
+    /// 按顺序收成组合, 页末余数接到后面页的谱行. 标题和脚注不参与.
+    AcrossPages,
+}
+
+/// 合并前的一行. `anchor` 相对这条的顶.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineBand {
+    pub y0: i32,
+    pub y1: i32,
+    pub kind: String,
+    pub anchor: Option<i32>,
+}
+
+/// `count < 2` 时原样返回. 只把连续的 `system` 按 `count` 收成一块
+/// (上界 = 第一块上界, 下界 = 最后一块下界). 落在这块里面的其它条
+/// (行间 gap) 丢掉. 本页余数, header, footer 保持原块.
+pub fn merge_system_bands(mut bands: Vec<Band>, count: u32) -> Vec<Band> {
+    let count = count as usize;
+    if count < 2 || bands.len() < 2 {
+        return bands;
+    }
+    bands.sort_by_key(|b| (b.y0, b.y1));
+    let mut systems = Vec::new();
+    let mut others = Vec::new();
+    for band in bands {
+        if band.kind == "system" {
+            systems.push(band);
+        } else {
+            others.push(band);
+        }
+    }
+    let mut merged = Vec::new();
+    let mut i = 0;
+    while i < systems.len() {
+        if i + count <= systems.len() {
+            let y0 = systems[i].y0;
+            let y1 = systems[i + count - 1].y1;
+            merged.push(Band {
+                y0,
+                y1,
+                kind: "system".into(),
+            });
+            i += count;
+        } else {
+            merged.extend(systems.drain(i..));
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    for band in others {
+        let inside = merged
+            .iter()
+            .any(|sys| band.y0 >= sys.y0 && band.y1 <= sys.y1);
+        if !inside {
+            out.push(band);
+        }
+    }
+    out.extend(merged);
+    out.sort_by_key(|b| (b.y0, b.y1));
+    out
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Band {
     pub y0: i32,
@@ -1345,6 +1414,64 @@ pub fn detect_bands(image: &RgbImage, ink_threshold: i32, margin: i32) -> Vec<Ba
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+
+    #[test]
+    fn merge_systems_keeps_odd_tail_header_footer_and_drops_inner_gap() {
+        let bands = vec![
+            Band {
+                y0: 0,
+                y1: 10,
+                kind: "header".into(),
+            },
+            Band {
+                y0: 20,
+                y1: 40,
+                kind: "system".into(),
+            },
+            Band {
+                y0: 41,
+                y1: 48,
+                kind: "gap".into(),
+            },
+            Band {
+                y0: 50,
+                y1: 70,
+                kind: "system".into(),
+            },
+            Band {
+                y0: 90,
+                y1: 110,
+                kind: "system".into(),
+            },
+            Band {
+                y0: 130,
+                y1: 150,
+                kind: "system".into(),
+            },
+            Band {
+                y0: 170,
+                y1: 190,
+                kind: "system".into(),
+            },
+            Band {
+                y0: 200,
+                y1: 230,
+                kind: "footer".into(),
+            },
+        ];
+        let out = merge_system_bands(bands.clone(), 1);
+        assert_eq!(out.len(), bands.len());
+        let out = merge_system_bands(bands, 2);
+        let systems: Vec<_> = out
+            .iter()
+            .filter(|b| b.kind == "system")
+            .map(|b| (b.y0, b.y1))
+            .collect();
+        assert_eq!(systems, vec![(20, 70), (90, 150), (170, 190)]);
+        assert!(out.iter().any(|b| b.kind == "header"));
+        assert!(out.iter().any(|b| b.kind == "footer"));
+        assert!(out.iter().all(|b| b.kind != "gap"));
+    }
 
     #[test]
     fn empty_white_page_returns_empty_or_no_systems() {

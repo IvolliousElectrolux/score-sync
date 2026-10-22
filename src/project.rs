@@ -15,7 +15,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::model::{BlockAdjust, DocState, Group, Page, Region, SheetLayout};
-use crate::staff_detect::StaffGrouping;
+use crate::staff_detect::{StaffGrouping, StaffPackMode};
 use score_video::model::FadeKind;
 
 pub const PROJECT_EXT: &str = "staffcrop";
@@ -31,6 +31,11 @@ struct ProjectFile {
     ink_threshold: i32,
     #[serde(default)]
     staff_grouping: StaffGrouping,
+    /// 一次收几行谱表. 缺省 / 小于 2 = 一行一块.
+    #[serde(default)]
+    staff_pack_lines: u32,
+    #[serde(default)]
+    staff_pack_mode: StaffPackMode,
     mask_opacity: f32,
     #[serde(default)]
     mask_prefs: Option<mask_tool::color_prefs::MaskColorPrefs>,
@@ -445,6 +450,8 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
         margin: doc.margin,
         ink_threshold: doc.ink_threshold,
         staff_grouping: doc.staff_grouping,
+        staff_pack_lines: doc.staff_pack_lines,
+        staff_pack_mode: doc.staff_pack_mode,
         mask_opacity: doc.mask_prefs.mask_opacity,
         mask_prefs: Some(doc.mask_prefs.clone()),
         current_page_index: doc
@@ -769,6 +776,9 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         margin: meta.margin,
         ink_threshold: meta.ink_threshold,
         staff_grouping: meta.staff_grouping,
+        staff_pack_lines: meta.staff_pack_lines,
+        staff_pack_mode: meta.staff_pack_mode,
+        staff_line_atoms: HashMap::new(),
         group_masks: meta.group_masks,
         group_block_layout: meta
             .group_block_layout

@@ -25,6 +25,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use compose::compose_parts_impl;
 pub use compose::GroupRenderJob;
+pub use detect::StaffPackApply;
 pub use edits::{groups_using_region, remap_masks_after_height_change, EditKind, RegionEditMeta};
 pub use mask_tool::guide::GuideState;
 pub use mask_tool::layout::BlockAdjust;
@@ -40,7 +41,7 @@ use std::sync::Arc;
 
 use image::RgbImage;
 
-use crate::staff_detect::StaffGrouping;
+use crate::staff_detect::{LineBand, StaffGrouping, StaffPackMode};
 use mask_tool::color_prefs::MaskColorPrefs;
 use mask_tool::mask::MaskRect;
 use score_video::model::TimelineSnapshot;
@@ -57,6 +58,11 @@ pub struct DocState {
     pub ink_threshold: i32,
     /// 旧工程字段, 识别已不再使用.
     pub staff_grouping: StaffGrouping,
+    /// 识别之后一次收几行谱表. 小于 2 表示一行一块.
+    pub staff_pack_lines: u32,
+    pub staff_pack_mode: StaffPackMode,
+    /// 合并前的一行一块, 按页 id. 不进工程文件, 改行数时用来重放.
+    pub staff_line_atoms: HashMap<String, Vec<LineBand>>,
     /// 组合蒙版: key = group_id, 坐标相对预览画布上的谱面原点
     /// (flush 时已减去 hoff/voff; 谱面高于页面缩小时为缩小后的显示像素)
     pub group_masks: HashMap<String, Vec<MaskRect>>,
@@ -116,6 +122,7 @@ impl DocState {
         Self {
             margin: DEFAULT_MARGIN,
             ink_threshold: DEFAULT_INK_THRESHOLD,
+            staff_pack_lines: 1,
             mask_prefs: MaskColorPrefs::default(),
             bg_aspect_w: 2560,
             bg_aspect_h: 1440,
@@ -149,6 +156,9 @@ impl DocState {
             margin: self.margin,
             ink_threshold: self.ink_threshold,
             staff_grouping: self.staff_grouping,
+            staff_pack_lines: self.staff_pack_lines,
+            staff_pack_mode: self.staff_pack_mode,
+            staff_line_atoms: self.staff_line_atoms.clone(),
             group_masks: self.group_masks.clone(),
             group_block_layout: self.group_block_layout.clone(),
             group_voff_shift: self.group_voff_shift.clone(),

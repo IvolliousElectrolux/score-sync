@@ -231,6 +231,8 @@ impl ScoreSyncApp {
         let (tx, rx) = async_channel::unbounded::<PdfLoadMsg>();
         let ink = self.doc.ink_threshold;
         let margin = self.doc.margin;
+        let pack_lines = self.doc.staff_pack_lines;
+        let pack_mode = self.doc.staff_pack_mode;
         std::thread::spawn(move || {
             for job in jobs {
                 if token.load(Ordering::SeqCst) != gen {
@@ -256,6 +258,8 @@ impl ScoreSyncApp {
                             &pdf,
                             ink,
                             margin,
+                            pack_lines,
+                            pack_mode,
                             &scales,
                             &pages,
                             move || token_loop.load(Ordering::SeqCst) == gen,

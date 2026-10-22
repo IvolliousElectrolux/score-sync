@@ -21,6 +21,8 @@ impl ScoreSyncApp {
             active_group_id: self.doc.active_group_id.clone(),
             groups_manual_order: self.doc.groups_manual_order,
             staff_grouping: self.doc.staff_grouping,
+            staff_pack_lines: self.doc.staff_pack_lines,
+            staff_pack_mode: self.doc.staff_pack_mode,
             group_guides: self.doc.group_guides.clone(),
             group_guide_defaults: self.doc.group_guide_defaults.clone(),
             guides_global: self.doc.guides_global,
@@ -56,6 +58,8 @@ impl ScoreSyncApp {
             active_group_id: self.doc.active_group_id.clone(),
             groups_manual_order: self.doc.groups_manual_order,
             staff_grouping: self.doc.staff_grouping,
+            staff_pack_lines: self.doc.staff_pack_lines,
+            staff_pack_mode: self.doc.staff_pack_mode,
             group_guides: self.doc.group_guides.clone(),
             group_guide_defaults: self.doc.group_guide_defaults.clone(),
             guides_global: self.doc.guides_global,
@@ -123,6 +127,8 @@ impl ScoreSyncApp {
         self.doc.active_group_id = snap.active_group_id;
         self.doc.groups_manual_order = snap.groups_manual_order;
         self.doc.staff_grouping = snap.staff_grouping;
+        self.doc.staff_pack_lines = snap.staff_pack_lines;
+        self.doc.staff_pack_mode = snap.staff_pack_mode;
         self.doc.group_guides = snap.group_guides;
         self.doc.group_guide_defaults = snap.group_guide_defaults;
         self.doc.guides_global = snap.guides_global;

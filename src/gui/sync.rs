@@ -1075,6 +1075,8 @@ impl ScoreSyncApp {
         }
         let ink = self.doc.ink_threshold;
         let margin = self.doc.margin;
+        let pack_lines = self.doc.staff_pack_lines;
+        let pack_mode = self.doc.staff_pack_mode;
         let max_side = self.doc.display_max_side();
         let (tx, rx) = async_channel::unbounded::<(
             usize,
@@ -1112,7 +1114,14 @@ impl ScoreSyncApp {
                     let r = crate::page_cache::load_rgb(&path);
                     let detect = match &r {
                         Ok(img) => {
-                            Some(crate::detect_cache::load_or_detect(img, &path, ink, margin))
+                            Some(crate::detect_cache::load_or_detect(
+                                img,
+                                &path,
+                                ink,
+                                margin,
+                                pack_lines,
+                                pack_mode,
+                            ))
                         }
                         Err(_) => crate::detect_cache::load(&path),
                     };
@@ -1297,6 +1306,8 @@ impl ScoreSyncApp {
         let n = jobs.len();
         let ink = self.doc.ink_threshold;
         let margin = self.doc.margin;
+        let pack_lines = self.doc.staff_pack_lines;
+        let pack_mode = self.doc.staff_pack_mode;
         let gen = self.hydrate_gen;
         self.status = format!("部分页无缓存, 正在后台识别 ({n} 页)…").into();
         self.hint = self.status.clone();
@@ -1306,7 +1317,14 @@ impl ScoreSyncApp {
             for (idx, path) in jobs {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
-                        let file = crate::detect_cache::detect_and_save(&img, &path, ink, margin);
+                        let file = crate::detect_cache::detect_and_save(
+                            &img,
+                            &path,
+                            ink,
+                            margin,
+                            pack_lines,
+                            pack_mode,
+                        );
                         let _ = tx.send_blocking((idx, file));
                     }
                     Err(e) => {

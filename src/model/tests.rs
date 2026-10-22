@@ -998,3 +998,133 @@ fn copy_pages_after_packs_in_given_order() {
         ]
     );
 }
+
+fn seed_labeled(
+    doc: &mut DocState,
+    page_idx: usize,
+    bands: &[(&str, i32, i32)],
+) {
+    let page_id = doc.pages[page_idx].id.clone();
+    for (i, &(kind, y0, y1)) in bands.iter().enumerate() {
+        let rid = format!("r{page_idx}-{i}");
+        doc.pages[page_idx].regions.insert(
+            rid.clone(),
+            Region {
+                id: rid.clone(),
+                page_id: page_id.clone(),
+                y0,
+                y1,
+                kind: kind.into(),
+                color: COLORS[i % COLORS.len()].to_string(),
+            },
+        );
+        doc.groups.push(Group {
+            id: format!("g{page_idx}-{i}"),
+            region_ids: vec![rid],
+            name: String::new(),
+        });
+    }
+    doc.rebuild_rid_index();
+}
+
+#[test]
+fn within_page_pack_joins_bounds_and_leaves_odd_tail() {
+    let mut doc = DocState::new();
+    doc.pages.push(stub_page(400));
+    doc.pages.push(stub_page(400));
+    seed_labeled(
+        &mut doc,
+        0,
+        &[
+            ("header", 0, 8),
+            ("system", 20, 40),
+            ("gap", 41, 48),
+            ("system", 50, 70),
+            ("system", 90, 110),
+            ("system", 130, 150),
+            ("system", 170, 190),
+            ("footer", 210, 240),
+        ],
+    );
+    seed_labeled(
+        &mut doc,
+        1,
+        &[("system", 20, 40), ("system", 60, 80)],
+    );
+    let applied = doc.apply_staff_pack(2, crate::staff_detect::StaffPackMode::WithinPage);
+    assert_eq!(applied, StaffPackApply::Applied);
+    let mut spans: Vec<_> = doc.pages[0]
+        .regions
+        .values()
+        .map(|r| (r.kind.as_str(), r.y0, r.y1))
+        .collect();
+    spans.sort();
+    assert_eq!(
+        spans,
+        vec![
+            ("footer", 210, 240),
+            ("header", 0, 8),
+            ("system", 20, 70),
+            ("system", 90, 150),
+            ("system", 170, 190),
+        ]
+    );
+    let page1: Vec<_> = doc.pages[1]
+        .regions
+        .values()
+        .map(|r| (r.y0, r.y1))
+        .collect();
+    assert_eq!(page1, vec![(20, 80)]);
+}
+
+#[test]
+fn across_pack_spills_to_next_page_and_skips_header_footer() {
+    let mut doc = DocState::new();
+    doc.pages.push(stub_page(400));
+    doc.pages.push(stub_page(400));
+    seed_labeled(
+        &mut doc,
+        0,
+        &[
+            ("header", 0, 8),
+            ("system", 10, 20),
+            ("system", 30, 40),
+            ("system", 50, 60),
+            ("system", 70, 80),
+            ("system", 90, 100),
+            ("footer", 120, 140),
+        ],
+    );
+    seed_labeled(
+        &mut doc,
+        1,
+        &[
+            ("header", 0, 8),
+            ("system", 10, 20),
+            ("system", 30, 40),
+            ("system", 50, 60),
+            ("system", 70, 80),
+            ("system", 90, 100),
+            ("footer", 120, 140),
+        ],
+    );
+    assert_eq!(
+        doc.apply_staff_pack(2, crate::staff_detect::StaffPackMode::AcrossPages),
+        StaffPackApply::Applied
+    );
+    let grouped = group_rids(&doc);
+    assert_eq!(
+        grouped,
+        vec![
+            vec!["r0-0".to_string()],
+            vec!["r0-1".to_string(), "r0-2".to_string()],
+            vec!["r0-3".to_string(), "r0-4".to_string()],
+            vec!["r0-5".to_string(), "r1-1".to_string()],
+            vec!["r0-6".to_string()],
+            vec!["r1-0".to_string()],
+            vec!["r1-2".to_string(), "r1-3".to_string()],
+            vec!["r1-4".to_string(), "r1-5".to_string()],
+            vec!["r1-6".to_string()],
+        ]
+    );
+}

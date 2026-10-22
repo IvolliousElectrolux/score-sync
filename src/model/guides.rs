@@ -163,22 +163,24 @@ impl DocState {
         let computed: Vec<(String, Option<i32>)> = bands
             .into_iter()
             .map(|(id, y0, y1)| {
-                let y = found
+                let hits: Vec<_> = found
                     .iter()
-                    .find(|b| b.y0 == y0 && b.y1 == y1)
-                    .or_else(|| {
-                        found.iter().max_by_key(|b| {
-                            let lo = b.y0.max(y0);
-                            let hi = b.y1.min(y1);
-                            hi.saturating_sub(lo)
-                        })
-                    })
                     .filter(|b| {
                         let lo = b.y0.max(y0);
                         let hi = b.y1.min(y1);
                         hi > lo
                     })
-                    .and_then(|b| b.anchor);
+                    .collect();
+                let y = if let Some(band) = hits.iter().find(|b| b.y0 == y0 && b.y1 == y1) {
+                    band.anchor
+                } else if hits.len() > 1 {
+                    // 一块里收了多行: 用整块中线, 不能拿其中一行相对自己顶的锚点.
+                    Some((y1 - y0).max(0) / 2)
+                } else if let Some(band) = hits.first() {
+                    band.anchor.map(|anchor| anchor + band.y0 - y0)
+                } else {
+                    None
+                };
                 (id, y)
             })
             .collect();

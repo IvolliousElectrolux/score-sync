@@ -404,6 +404,110 @@ impl DocState {
         Ok(pairs.len())
     }
 
+    /// 只拆「成员全是谱行」的组合. 标题, 脚注, 以及混进了它们的组留着.
+    pub fn explode_pure_system_groups(&mut self) {
+        let mut new_groups = Vec::new();
+        for g in std::mem::take(&mut self.groups) {
+            let pure = g.region_ids.len() > 1
+                && g.region_ids.iter().all(|id| {
+                    self.get_region(id)
+                        .is_some_and(|r| r.kind == "system")
+                });
+            if !pure {
+                new_groups.push(g);
+                continue;
+            }
+            let gid = g.id.clone();
+            let mut ids = g.region_ids.clone();
+            ids.sort_by_key(|id| self.region_sort_key(id));
+            self.group_masks.remove(&gid);
+            self.group_block_layout.remove(&gid);
+            self.group_voff_shift.remove(&gid);
+            self.group_guides.remove(&gid);
+            self.group_guide_defaults.remove(&gid);
+            for id in ids {
+                new_groups.push(Group {
+                    id: new_id(),
+                    region_ids: vec![id],
+                    name: String::new(),
+                });
+            }
+        }
+        self.groups = new_groups;
+        self.ensure_active_group();
+    }
+
+    /// 尚未组合的谱行按 `count` 收成一组, 可跨页. header / footer / gap 不参与.
+    /// 页末不够时继续用后面页的谱行. 文档末尾凑不满的保持各自一块.
+    /// 新组沿用第一块原来的组 id.
+    pub fn pack_ungrouped_systems(&mut self, count: u32) -> usize {
+        let count = count as usize;
+        if count < 2 {
+            return 0;
+        }
+        let mut rids = Vec::new();
+        for page in &self.pages {
+            let mut regs: Vec<&Region> = page
+                .regions
+                .values()
+                .filter(|r| r.kind == "system")
+                .collect();
+            regs.sort_by_key(|r| (r.y0, r.y1));
+            for region in regs {
+                if self.region_is_uncombined(&region.id) {
+                    rids.push(region.id.clone());
+                }
+            }
+        }
+        let mut chunks = Vec::new();
+        let mut i = 0;
+        while i + count <= rids.len() {
+            chunks.push(rids[i..i + count].to_vec());
+            i += count;
+        }
+        let n = chunks.len();
+        for chunk in chunks {
+            let Some(first) = chunk.first() else {
+                continue;
+            };
+            let Some(idx) = self.groups.iter().position(|g| {
+                g.region_ids.len() == 1 && g.region_ids[0] == *first
+            }) else {
+                continue;
+            };
+            let gid = self.groups[idx].id.clone();
+            self.groups[idx].region_ids = chunk.clone();
+            let drop: HashSet<String> = chunk[1..].iter().cloned().collect();
+            self.groups.retain(|g| {
+                g.id == gid
+                    || !(g.region_ids.len() == 1 && drop.contains(&g.region_ids[0]))
+            });
+            self.group_masks.remove(&gid);
+            self.group_block_layout.remove(&gid);
+            self.group_voff_shift.remove(&gid);
+            self.group_guides.remove(&gid);
+            self.group_guide_defaults.remove(&gid);
+        }
+        if !self.groups_manual_order {
+            self.sort_groups();
+        }
+        self.ensure_active_group();
+        self.seed_guide_defaults();
+        n
+    }
+
+    pub(super) fn maybe_pack_across(&mut self) {
+        if self.is_spread() {
+            return;
+        }
+        if self.staff_pack_mode != crate::staff_detect::StaffPackMode::AcrossPages
+            || self.staff_pack_lines < 2
+        {
+            return;
+        }
+        self.pack_ungrouped_systems(self.staff_pack_lines);
+    }
+
     pub fn share_selected_into_active(&mut self) -> Result<usize, &'static str> {
         if self.active_group().is_none() {
             return Err("请先在「输出组合」里选一个目标组.");

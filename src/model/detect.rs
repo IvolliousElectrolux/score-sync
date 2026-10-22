@@ -3,7 +3,17 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::staff_detect::{detect_bands, Band};
+use crate::staff_detect::{
+    detect_bands, merge_system_bands, Band, LineBand, StaffPackMode,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaffPackApply {
+    Unchanged,
+    Applied,
+    /// 设置已记下. 当前块是页内合并过的, 内存里没有合并前的谱行.
+    NeedRedetect,
+}
 
 impl DocState {
     pub fn detect_page(&mut self, page_idx: usize, reset_groups: bool) {
@@ -56,6 +66,26 @@ impl DocState {
                 y1: h.saturating_sub(1) as i32,
                 kind: "region".into(),
             }]
+        } else {
+            bands
+        };
+        let atoms = bands
+            .iter()
+            .map(|b| LineBand {
+                y0: b.y0,
+                y1: b.y1,
+                kind: b.kind.clone(),
+                anchor: mask_tool::staff::band_staff_anchor(
+                    &full,
+                    b.y0,
+                    b.y1,
+                    self.ink_threshold,
+                ),
+            })
+            .collect();
+        self.staff_line_atoms.insert(page_id.clone(), atoms);
+        let bands = if self.packs_within_page() {
+            merge_system_bands(bands, self.staff_pack_lines)
         } else {
             bands
         };
@@ -137,6 +167,7 @@ impl DocState {
             self.prune_dangling_groups_if_hydrated();
             self.ensure_active_group();
             self.seed_guide_defaults();
+            self.maybe_pack_across();
         }
     }
 
@@ -159,6 +190,30 @@ impl DocState {
         };
         let found = crate::vector_page::detect_vector_bands(&scene, self.margin);
         let staff_found = !found.is_empty();
+        let atoms = if found.is_empty() {
+            vec![LineBand {
+                y0: 0,
+                y1: page_h.saturating_sub(1) as i32,
+                kind: "region".into(),
+                anchor: None,
+            }]
+        } else {
+            found
+                .iter()
+                .map(|b| LineBand {
+                    y0: b.y0,
+                    y1: b.y1,
+                    kind: "system".into(),
+                    anchor: b.anchor,
+                })
+                .collect()
+        };
+        self.staff_line_atoms.insert(page_id.clone(), atoms);
+        let found = if staff_found && self.packs_within_page() {
+            crate::vector_page::merge_staff_bands(found, self.staff_pack_lines)
+        } else {
+            found
+        };
         let bands = if found.is_empty() {
             vec![crate::vector_page::StaffBand {
                 y0: 0,
@@ -235,6 +290,7 @@ impl DocState {
             self.prune_dangling_groups_if_hydrated();
             self.ensure_active_group();
             self.seed_guide_defaults();
+            self.maybe_pack_across();
         }
         staff_found
     }
@@ -281,6 +337,19 @@ impl DocState {
                 self.region_staff_anchors.insert(r.id.clone(), a.y);
             }
         }
+        if !file.line_bands.is_empty() {
+            let atoms = file
+                .line_bands
+                .iter()
+                .map(|b| LineBand {
+                    y0: b.y0,
+                    y1: b.y1,
+                    kind: b.kind.clone(),
+                    anchor: b.staff_anchor.as_ref().and_then(|a| a.y),
+                })
+                .collect();
+            self.staff_line_atoms.insert(page_id, atoms);
+        }
         self.seed_region_anchors_for_page(page_idx);
     }
 
@@ -307,6 +376,25 @@ impl DocState {
             ink_threshold: self.ink_threshold,
             margin: self.margin,
             staff_grouping: self.staff_grouping,
+            staff_pack_lines: self.staff_pack_lines,
+            staff_pack_mode: self.staff_pack_mode,
+            line_bands: self
+                .staff_line_atoms
+                .get(&page.id)
+                .map(|bands| {
+                    bands
+                        .iter()
+                        .map(|b| crate::detect_cache::CachedLineBand {
+                            y0: b.y0,
+                            y1: b.y1,
+                            kind: b.kind.clone(),
+                            staff_anchor: Some(crate::detect_cache::CachedStaffAnchor {
+                                y: b.anchor,
+                            }),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             regions: regions
                 .into_iter()
                 .map(|r| crate::detect_cache::CachedRegion {
@@ -374,6 +462,7 @@ impl DocState {
         }
         self.seed_guide_defaults_for(&new_ids);
         self.ensure_active_group();
+        self.maybe_pack_across();
     }
 
     pub fn ensure_all_page_groups(&mut self) {
@@ -467,6 +556,7 @@ impl DocState {
         }
         self.seed_guide_defaults();
         self.ensure_active_group();
+        self.maybe_pack_across();
     }
 
     /// 按页序从当前各页 regions 重建全部 groups. 全量识别结束时调用一次,
@@ -490,6 +580,7 @@ impl DocState {
         self.sort_groups();
         self.ensure_active_group();
         self.seed_guide_defaults();
+        self.maybe_pack_across();
     }
 
     #[allow(dead_code)]
@@ -539,5 +630,244 @@ impl DocState {
         self.groups_manual_order = false;
         self.sort_groups();
         self.ensure_active_group();
+        self.maybe_pack_across();
+    }
+
+    fn prune_missing_selection(&mut self) {
+        let ids: Vec<String> = self.selected_region_ids.iter().cloned().collect();
+        self.selected_region_ids = ids
+            .into_iter()
+            .filter(|id| self.get_region(id).is_some())
+            .collect();
+    }
+
+    fn packs_within_page(&self) -> bool {
+        !self.is_spread()
+            && self.staff_pack_mode == StaffPackMode::WithinPage
+            && self.staff_pack_lines >= 2
+    }
+
+    fn line_atoms_ready(&self) -> bool {
+        self.pages
+            .iter()
+            .filter(|p| !p.blank && !p.regions.is_empty())
+            .all(|p| {
+                self.staff_line_atoms
+                    .get(&p.id)
+                    .is_some_and(|atoms| !atoms.is_empty())
+            })
+    }
+
+    fn capture_line_atoms_from_regions(&mut self) {
+        let mut next = Vec::new();
+        for page in &self.pages {
+            if page.blank {
+                continue;
+            }
+            let mut atoms: Vec<LineBand> = page
+                .regions
+                .values()
+                .map(|r| LineBand {
+                    y0: r.y0,
+                    y1: r.y1,
+                    kind: r.kind.clone(),
+                    anchor: self.region_staff_anchors.get(&r.id).and_then(|y| *y),
+                })
+                .collect();
+            atoms.sort_by_key(|a| (a.y0, a.y1));
+            next.push((page.id.clone(), atoms));
+        }
+        for (id, atoms) in next {
+            self.staff_line_atoms.insert(id, atoms);
+        }
+    }
+
+    fn restore_pages_from_line_atoms(&mut self) {
+        let page_ids: Vec<(usize, String)> = self
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, p.id.clone()))
+            .collect();
+        for (page_idx, page_id) in page_ids {
+            let Some(atoms) = self.staff_line_atoms.get(&page_id).cloned() else {
+                continue;
+            };
+            if atoms.is_empty() {
+                continue;
+            }
+            let old_ids: HashSet<String> = self
+                .pages
+                .get(page_idx)
+                .map(|p| p.regions.keys().cloned().collect())
+                .unwrap_or_default();
+            let mut regions = HashMap::new();
+            let mut anchors = Vec::new();
+            for (i, atom) in atoms.iter().enumerate() {
+                let rid = new_id();
+                regions.insert(
+                    rid.clone(),
+                    Region {
+                        id: rid.clone(),
+                        page_id: page_id.clone(),
+                        y0: atom.y0,
+                        y1: atom.y1,
+                        kind: atom.kind.clone(),
+                        color: COLORS[i % COLORS.len()].to_string(),
+                    },
+                );
+                anchors.push((rid, atom.anchor));
+            }
+            if let Some(page) = self.pages.get_mut(page_idx) {
+                page.regions = regions;
+            }
+            self.rebuild_rid_index();
+            for id in &old_ids {
+                self.region_staff_anchors.remove(id);
+                self.region_edits.remove(id);
+            }
+            for (rid, anchor) in anchors {
+                self.region_staff_anchors.insert(rid, anchor);
+            }
+            self.upsert_page_groups(page_idx, &old_ids);
+        }
+    }
+
+    fn merge_systems_on_page(&mut self, page_idx: usize) {
+        let count = self.staff_pack_lines as usize;
+        if count < 2 {
+            return;
+        }
+        let Some(page) = self.pages.get(page_idx) else {
+            return;
+        };
+        let mut ordered: Vec<(String, i32, i32, String)> = page
+            .regions
+            .values()
+            .map(|r| (r.id.clone(), r.y0, r.y1, r.kind.clone()))
+            .collect();
+        ordered.sort_by_key(|r| (r.1, r.2));
+        let system_idxs: Vec<usize> = ordered
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.3 == "system")
+            .map(|(i, _)| i)
+            .collect();
+        let mut dead = HashSet::new();
+        let mut expands = Vec::new();
+        let mut i = 0;
+        while i + count <= system_idxs.len() {
+            let chunk = &system_idxs[i..i + count];
+            let y0 = ordered[chunk[0]].1;
+            let y1 = ordered[*chunk.last().unwrap()].2;
+            expands.push((ordered[chunk[0]].0.clone(), y0, y1));
+            for &idx in &chunk[1..] {
+                dead.insert(ordered[idx].0.clone());
+            }
+            for item in &ordered {
+                if item.3 != "system" && item.1 >= y0 && item.2 <= y1 {
+                    dead.insert(item.0.clone());
+                }
+            }
+            i += count;
+        }
+        if expands.is_empty() {
+            return;
+        }
+        if let Some(page) = self.pages.get_mut(page_idx) {
+            for (id, y0, y1) in &expands {
+                if let Some(region) = page.regions.get_mut(id) {
+                    region.y0 = *y0;
+                    region.y1 = *y1;
+                }
+            }
+            for id in &dead {
+                page.regions.remove(id);
+            }
+        }
+        for (id, y0, y1) in &expands {
+            self.region_staff_anchors
+                .insert(id.clone(), Some((*y1 - *y0).max(0) / 2));
+            if let Some(gid) = self
+                .groups
+                .iter()
+                .find(|g| g.region_ids.iter().any(|rid| rid == id))
+                .map(|g| g.id.clone())
+            {
+                self.group_masks.remove(&gid);
+                self.group_block_layout.remove(&gid);
+                self.group_voff_shift.remove(&gid);
+                self.group_guides.remove(&gid);
+                self.group_guide_defaults.remove(&gid);
+            }
+        }
+        for id in &dead {
+            self.region_staff_anchors.remove(id);
+            self.region_edits.remove(id);
+        }
+        self.groups = std::mem::take(&mut self.groups)
+            .into_iter()
+            .filter_map(|mut g| {
+                g.region_ids.retain(|id| !dead.contains(id));
+                if g.region_ids.is_empty() {
+                    None
+                } else {
+                    Some(g)
+                }
+            })
+            .collect();
+        self.rebuild_rid_index();
+    }
+
+    /// 记下行数和模式, 并按当前分块重放. 不重新扫像素.
+    /// 页内合并过、又没有合并前谱行时, 只改设置, 返回 [`StaffPackApply::NeedRedetect`].
+    pub fn apply_staff_pack(&mut self, lines: u32, mode: StaffPackMode) -> StaffPackApply {
+        let lines = lines.clamp(1, 12);
+        if self.staff_pack_lines.max(1) == lines && self.staff_pack_mode == mode {
+            return StaffPackApply::Unchanged;
+        }
+        if self.is_spread() {
+            self.staff_pack_lines = lines;
+            self.staff_pack_mode = mode;
+            return StaffPackApply::Applied;
+        }
+        let was_merged =
+            self.staff_pack_mode == StaffPackMode::WithinPage && self.staff_pack_lines >= 2;
+        let was_across =
+            self.staff_pack_mode == StaffPackMode::AcrossPages && self.staff_pack_lines >= 2;
+        if was_merged {
+            if !self.line_atoms_ready() {
+                self.staff_pack_lines = lines;
+                self.staff_pack_mode = mode;
+                return StaffPackApply::NeedRedetect;
+            }
+            self.restore_pages_from_line_atoms();
+        } else if lines >= 2 || was_across {
+            self.capture_line_atoms_from_regions();
+        }
+        self.staff_pack_lines = lines;
+        self.staff_pack_mode = mode;
+        if lines < 2 {
+            if was_across {
+                self.explode_pure_system_groups();
+                self.seed_guide_defaults();
+            }
+            self.prune_missing_selection();
+            self.ensure_active_group();
+            return StaffPackApply::Applied;
+        }
+        self.explode_pure_system_groups();
+        if mode == StaffPackMode::WithinPage {
+            let n = self.pages.len();
+            for i in 0..n {
+                self.merge_systems_on_page(i);
+            }
+        } else {
+            self.pack_ungrouped_systems(lines);
+        }
+        self.prune_missing_selection();
+        self.ensure_active_group();
+        self.seed_guide_defaults();
+        StaffPackApply::Applied
     }
 }

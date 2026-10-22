@@ -595,6 +595,8 @@ pub fn pdf_pages_to_tmp_images_streaming(
     pdf_path: &Path,
     ink_threshold: i32,
     margin: i32,
+    pack_lines: u32,
+    pack_mode: crate::staff_detect::StaffPackMode,
     scales: &[(f32, f32)],
     pages: &[u32],
     mut should_continue: impl FnMut() -> bool,
@@ -680,7 +682,14 @@ pub fn pdf_pages_to_tmp_images_streaming(
                 .map_err(|e| crate::error::Error::msg(format!("写临时 PNG 失败: {e}")))?;
             let _ = crate::page_cache::write_org_thumb(&image, &out_path);
             crate::trace::log(&format!("pdf: 识别 {}/{total} …", done + 1));
-            crate::detect_cache::detect_and_save(&image, &out_path, ink_threshold, margin);
+            crate::detect_cache::detect_and_save(
+                &image,
+                &out_path,
+                ink_threshold,
+                margin,
+                pack_lines,
+                pack_mode,
+            );
             crate::trace::log(&format!("pdf: 已写+识别 {}/{total} → 回传 UI", done + 1));
             on_page(i, total, StreamedPdfPage::Raster(out_path));
         } else {
@@ -735,6 +744,8 @@ pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, crate::e
         pdf_path,
         crate::model::DEFAULT_INK_THRESHOLD,
         crate::model::DEFAULT_MARGIN,
+        1,
+        crate::staff_detect::StaffPackMode::WithinPage,
         &[],
         &[],
         || true,

@@ -89,6 +89,18 @@ impl ScoreSyncApp {
             .collect();
         let ink = self.doc.ink_threshold;
         let margin = self.doc.margin;
+        let pack_lines = self.doc.staff_pack_lines;
+        let pack_mode = self.doc.staff_pack_mode;
+        for i in 0..n {
+            if self.doc.pages[i].is_vector() && !self.doc.pages[i].blank {
+                self.doc.detect_vector_page(i, true);
+            }
+        }
+        let jobs: Vec<(usize, PathBuf)> = jobs
+            .into_iter()
+            .filter(|(i, _)| !self.doc.pages[*i].is_vector())
+            .collect();
+        let n_raster = jobs.len();
         self.status = format!("正在后台重新识别全部 {n} 页…").into();
         self.hint = self.status.clone();
         cx.notify();
@@ -98,7 +110,14 @@ impl ScoreSyncApp {
             for (idx, path) in jobs {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
-                        let file = crate::detect_cache::detect_and_save(&img, &path, ink, margin);
+                        let file = crate::detect_cache::detect_and_save(
+                            &img,
+                            &path,
+                            ink,
+                            margin,
+                            pack_lines,
+                            pack_mode,
+                        );
                         let _ = tx.send_blocking((idx, file));
                     }
                     Err(e) => {
@@ -115,7 +134,7 @@ impl ScoreSyncApp {
                 let d = done;
                 this.update(cx, |view, cx| {
                     view.doc.replace_page_detect(idx, &file);
-                    if d == n || d % 8 == 0 {
+                    if d == n_raster || d % 8 == 0 {
                         view.status = format!("识别进度 {d}/{n}…").into();
                         view.hint = view.status.clone();
                         crate::trace::log(&format!("ui: detect_all 进度 {d}/{n}"));

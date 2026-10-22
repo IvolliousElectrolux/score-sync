@@ -109,6 +109,33 @@ pub fn classify(scene: &VectorScene) -> PageClass {
     PageClass::Vector
 }
 
+/// `count < 2` 时不动. 否则每 `count` 条谱行收成一条: 上界取第一条, 下界取最后一条.
+/// 凑不满的保持原条.
+pub fn merge_staff_bands(bands: Vec<StaffBand>, count: u32) -> Vec<StaffBand> {
+    let count = count as usize;
+    if count < 2 || bands.len() < count {
+        return bands;
+    }
+    let mut out = Vec::with_capacity(bands.len());
+    let mut i = 0;
+    while i < bands.len() {
+        if i + count <= bands.len() {
+            let y0 = bands[i].y0;
+            let y1 = bands[i + count - 1].y1;
+            out.push(StaffBand {
+                y0,
+                y1,
+                anchor: Some((y1 - y0).max(0) / 2),
+            });
+            i += count;
+        } else {
+            out.extend(bands[i..].iter().cloned());
+            break;
+        }
+    }
+    out
+}
+
 /// 长水平线按 y 收成五线, 再按包围盒是否把相邻谱表连起来收成谱行.
 /// 认不出谱线时返回空, 调用方收成整页一块.
 pub fn detect_vector_bands(scene: &VectorScene, margin: i32) -> Vec<StaffBand> {
