@@ -143,7 +143,7 @@ pub fn detect_vector_bands(scene: &VectorScene, margin: i32) -> Vec<StaffBand> {
     let page_h = scene.h.max(1.0);
     let min_len = page_w * 0.30;
     let lines = coalesce_hlines(&scene.hlines, min_len);
-    let clusters = cluster_ys(&lines, 1.2);
+    let clusters = staff_line_ys(&lines);
     let staves = group_staves(&clusters);
     if staves.is_empty() {
         return Vec::new();
@@ -158,9 +158,13 @@ pub fn detect_vector_bands(scene: &VectorScene, margin: i32) -> Vec<StaffBand> {
                 .last()
                 .map(|s| s.bottom - s.top)
                 .unwrap_or(spacing * 4.0);
-            let limit = (spacing * 12.0).max(staff_h * 3.0);
-            let close = gap >= -1.0 && gap < staff_h * 2.6;
-            gap >= -1.0 && gap < limit && (close || gap_has_content(&content, *bot, staff.top))
+            // 几乎贴在一起才按距离收. 大谱表的高低音通常隔得更开,
+            // 必须有小节线或括号真正搭到上下两边, 不能靠行距本身:
+            // 行与行之间的空当经常和高低音之间一样宽.
+            let tight = gap >= -1.0 && gap < staff_h * 1.2;
+            let bridge_limit = (spacing * 16.0).max(staff_h * 5.0);
+            let bridged = gap_bridges(&content, *bot, staff.top);
+            tight || (bridged && gap < bridge_limit)
         });
         if join {
             let last = systems.last_mut().unwrap();
@@ -253,26 +257,90 @@ fn union_len(spans: &[(f32, f32)]) -> f32 {
     total
 }
 
-fn cluster_ys(lines: &[HLine], gap: f32) -> Vec<f32> {
-    let mut ys: Vec<f32> = lines.iter().map(|l| l.y).collect();
-    ys.sort_by(|a, b| a.total_cmp(b));
-    let mut out = Vec::new();
-    let mut acc: Vec<f32> = Vec::new();
-    for y in ys {
-        if acc.last().is_some_and(|p| y - *p > gap) {
-            out.push(mean(&acc));
-            acc.clear();
-        }
-        acc.push(y);
-    }
-    if !acc.is_empty() {
-        out.push(mean(&acc));
-    }
-    out
-}
-
 fn mean(xs: &[f32]) -> f32 {
     xs.iter().sum::<f32>() / xs.len().max(1) as f32
+}
+
+struct YLine {
+    y: f32,
+    w: f32,
+}
+
+/// 谱线 y. 先把几乎重合的线并成一条, 再丢掉夹在两条谱线中间的横线
+/// (连音梁、延音线). 那种线离上下两边都只有半个行距, 会把五线窗口挤乱.
+fn staff_line_ys(lines: &[HLine]) -> Vec<f32> {
+    let mut clusters: Vec<YLine> = Vec::new();
+    let mut ordered = lines.to_vec();
+    ordered.sort_by(|a, b| a.y.total_cmp(&b.y));
+    for line in ordered {
+        let w = (line.x1 - line.x0).abs();
+        if let Some(last) = clusters.last_mut() {
+            if line.y - last.y <= 1.2 {
+                last.y = (last.y + line.y) * 0.5;
+                last.w = last.w.max(w);
+                continue;
+            }
+        }
+        clusters.push(YLine { y: line.y, w });
+    }
+    let spacing = dominant_spacing(&clusters);
+    if let Some(spacing) = spacing {
+        let min_gap = spacing * 0.55;
+        let mut i = 0;
+        while i + 1 < clusters.len() {
+            if clusters[i + 1].y - clusters[i].y < min_gap {
+                let drop = interloper_index(&clusters, i, spacing);
+                clusters.remove(drop);
+                if drop > i {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+    clusters.into_iter().map(|c| c.y).collect()
+}
+
+fn dominant_spacing(lines: &[YLine]) -> Option<f32> {
+    let mut gaps: Vec<f32> = lines
+        .windows(2)
+        .map(|w| w[1].y - w[0].y)
+        .filter(|g| (2.8..=16.0).contains(g))
+        .collect();
+    if gaps.len() < 4 {
+        return None;
+    }
+    gaps.sort_by(|a, b| a.total_cmp(b));
+    Some(gaps[gaps.len() / 2])
+}
+
+/// 两条靠得过近的线里, 丢掉更不像谱线的那条.
+fn interloper_index(lines: &[YLine], i: usize, spacing: f32) -> usize {
+    let a = &lines[i];
+    let b = &lines[i + 1];
+    if a.w > b.w * 1.12 {
+        return i + 1;
+    }
+    if b.w > a.w * 1.12 {
+        return i;
+    }
+    let left = i.checked_sub(1).map(|j| lines[j].y);
+    let right = lines.get(i + 2).map(|l| l.y);
+    let err = |y: f32| {
+        let mut e = 0.0;
+        let mut n = 0.0;
+        if let Some(l) = left {
+            e += ((y - l) - spacing).abs();
+            n += 1.0;
+        }
+        if let Some(r) = right {
+            e += ((r - y) - spacing).abs();
+            n += 1.0;
+        }
+        if n == 0.0 { 0.0 } else { e / n }
+    };
+    if err(a.y) <= err(b.y) { i + 1 } else { i }
 }
 
 fn group_staves(ys: &[f32]) -> Vec<StaffCore> {
@@ -285,25 +353,13 @@ fn group_staves(ys: &[f32]) -> Vec<StaffCore> {
         let gmax = gaps.iter().copied().fold(0.0f32, f32::max);
         if (3.0..=16.0).contains(&gmin) && gmax <= gmin * 1.45 + 0.8 {
             let spacing = mean(&gaps);
-            let mut bottom = window[4];
-            let mut lines = window.to_vec();
-            let mut j = i + 5;
-            while j < ys.len() && lines.len() < 9 {
-                let step = ys[j] - *lines.last().unwrap();
-                if step < spacing * 0.75 || step > spacing * 1.45 {
-                    break;
-                }
-                lines.push(ys[j]);
-                bottom = ys[j];
-                j += 1;
-            }
             out.push(StaffCore {
                 top: window[0],
-                bottom,
+                bottom: window[4],
                 spacing,
-                lines,
+                lines: window.to_vec(),
             });
-            i = j;
+            i += 5;
         } else {
             i += 1;
         }
@@ -327,12 +383,21 @@ fn is_page_border(scene: &VectorScene, b: &ContentBox) -> bool {
     touch && (h > scene.h * 0.85 || w < 2.0 && h > scene.h * 0.5)
 }
 
-fn gap_has_content(boxes: &[ContentBox], bot: f32, top: f32) -> bool {
-    let y0 = bot - 2.0;
-    let y1 = top + 2.0;
-    boxes
-        .iter()
-        .any(|b| b.y1 >= y0 && b.y0 <= y1 && b.y1 > b.y0)
+/// 上下两排之间有没有一条够高的对象同时挨到两边.
+/// 大谱表的通栏小节线和括号算连通. 只探出谱线边缘的竖线, 或落在行间的
+/// 力度/连线, 不算.
+fn gap_bridges(boxes: &[ContentBox], bot: f32, top: f32) -> bool {
+    let gap = top - bot;
+    if gap <= 1.0 {
+        return true;
+    }
+    let slack = (gap * 0.12).clamp(3.0, 8.0);
+    boxes.iter().any(|b| {
+        let y0 = b.y0.min(b.y1);
+        let y1 = b.y0.max(b.y1);
+        let h = y1 - y0;
+        h >= gap * 0.55 && y0 <= bot + slack && y1 >= top - slack
+    })
 }
 
 fn separate_bands(bands: &mut Vec<(f32, f32, Vec<StaffCore>)>) {
@@ -1042,6 +1107,105 @@ mod tests {
             ..VectorScene::default()
         };
         (scene, core)
+    }
+
+    fn box_at(x0: f32, y0: f32, x1: f32, y1: f32) -> ContentBox {
+        ContentBox {
+            x0,
+            y0,
+            x1,
+            y1,
+            kind: BoxKind::Path,
+        }
+    }
+
+    /// 夹在两条谱线中间的连音梁不能把这一排五线弄丢.
+    #[test]
+    fn beam_between_staff_lines_keeps_the_grand_staff() {
+        let mut hlines = staff(100.0);
+        hlines.push(HLine {
+            x0: 80.0,
+            x1: 280.0,
+            y: 126.0,
+        });
+        hlines.extend(staff(180.0));
+        let scene = VectorScene {
+            w: 400.0,
+            h: 500.0,
+            hlines,
+            boxes: vec![box_at(36.0, 100.0, 40.0, 214.0)],
+            path_count: 8,
+            ..VectorScene::default()
+        };
+        let bands = detect_vector_bands(&scene, 8);
+        assert_eq!(bands.len(), 1, "{bands:?}");
+        assert!(bands[0].y0 < 100 && bands[0].y1 > 210, "{:?}", bands[0]);
+    }
+
+    /// 行距和高低音之间差不多宽时, 没有通栏小节线就不能把下一行粘进来.
+    #[test]
+    fn similar_system_gap_without_bridge_stays_split() {
+        let mut hlines = staff(100.0);
+        hlines.extend(staff(180.0));
+        hlines.extend(staff(270.0));
+        hlines.extend(staff(350.0));
+        let scene = VectorScene {
+            w: 400.0,
+            h: 600.0,
+            hlines,
+            boxes: vec![
+                box_at(36.0, 100.0, 40.0, 214.0),
+                box_at(36.0, 270.0, 40.0, 384.0),
+            ],
+            path_count: 12,
+            ..VectorScene::default()
+        };
+        let bands = detect_vector_bands(&scene, 8);
+        assert_eq!(bands.len(), 2, "{bands:?}");
+        assert!(bands[0].y1 < 270, "next system was glued {:?}", bands[0]);
+        assert!(bands[1].y0 > 212 && bands[1].y1 > 380, "{:?}", bands[1]);
+    }
+
+    /// 大谱表内部靠得近, 直接收成一行. 行与行之间更宽, 本行小节线
+    /// 只探出一两磅, 以及缝里的力度, 都不能把下一行粘进来.
+    /// 真有一条搭到上下两边的括号时, 仍然收成一行.
+    #[test]
+    fn barline_stub_does_not_glue_the_next_system() {
+        let mut hlines = staff(100.0);
+        hlines.extend(staff(180.0));
+        hlines.extend(staff(302.0));
+        hlines.extend(staff(380.0));
+        let scene = VectorScene {
+            w: 400.0,
+            h: 600.0,
+            hlines,
+            boxes: vec![
+                box_at(40.0, 100.0, 42.0, 214.0),
+                box_at(40.0, 240.0, 70.0, 255.0),
+                box_at(40.0, 302.0, 42.0, 414.0),
+            ],
+            path_count: 12,
+            ..VectorScene::default()
+        };
+        let bands = detect_vector_bands(&scene, 8);
+        assert_eq!(bands.len(), 2, "{bands:?}");
+        assert!(bands[0].y0 < 100 && bands[0].y1 > 210, "{:?}", bands[0]);
+        assert!(bands[0].y1 < 280, "stub barline glued the next system {:?}", bands[0]);
+        assert!(bands[1].y0 > 212 && bands[1].y1 > 410, "{:?}", bands[1]);
+
+        let mut braced = staff(100.0);
+        braced.extend(staff(222.0));
+        let scene = VectorScene {
+            w: 400.0,
+            h: 500.0,
+            hlines: braced,
+            boxes: vec![box_at(28.0, 128.0, 36.0, 226.0)],
+            path_count: 8,
+            ..VectorScene::default()
+        };
+        let bands = detect_vector_bands(&scene, 8);
+        assert_eq!(bands.len(), 1, "brace should join {bands:?}");
+        assert!(bands[0].y0 < 100 && bands[0].y1 > 250, "{:?}", bands[0]);
     }
 
     #[test]
