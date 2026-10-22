@@ -226,6 +226,8 @@ impl ScoreSyncApp {
                     } else {
                         cx.notify();
                     }
+                } else if !armed {
+                    self.activate_listed_member(from, cx);
                 } else {
                     cx.notify();
                 }
@@ -247,8 +249,17 @@ impl ScoreSyncApp {
                         cx.notify();
                     }
                 } else if let Some(gid) = self.doc.groups.get(from).map(|g| g.id.clone()) {
-                    self.doc.click_group(&gid, ctrl);
-                    self.refresh_render(cx);
+                    let jumped = self.doc.click_group(&gid, ctrl).is_some();
+                    if let Some(rid) = self.focused_member_id() {
+                        self.scroll_member_list_to(&rid);
+                    }
+                    if jumped {
+                        // click_group 已改 current_page_index; 这里补页签滚动和页图.
+                        self.switch_page(self.doc.current_page_index, cx);
+                    } else {
+                        self.reveal_page_tab_neighbors(self.doc.current_page_index);
+                        self.refresh_render(cx);
+                    }
                 } else {
                     cx.notify();
                 }
@@ -264,6 +275,25 @@ impl ScoreSyncApp {
             }
             _ => {}
         }
+    }
+
+    /// 点「当前组合内成员」且没有拖成调序: 只激活这一块, 页签跟到它所在页.
+    pub(super) fn activate_listed_member(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(rid) = self
+            .doc
+            .active_group()
+            .and_then(|g| g.region_ids.get(index).cloned())
+        else {
+            cx.notify();
+            return;
+        };
+        let pi = self.doc.find_region(&rid).map(|(pi, _)| pi);
+        self.doc.click_region(&rid, false);
+        self.scroll_group_list_to_active();
+        if let Some(pi) = pi {
+            self.follow_page_tab(pi, cx);
+        }
+        self.after_doc_change(cx);
     }
 
     pub(super) fn outside_window_drag_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {

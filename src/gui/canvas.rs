@@ -358,6 +358,8 @@ impl ScoreSyncApp {
         {
             self.doc.click_region(&rid, ctrl);
             self.scroll_group_list_to_active();
+            self.scroll_member_list_to(&rid);
+            self.follow_page_tab(self.doc.current_page_index, cx);
             self.drag = Some(DragKind::Edge {
                 region_id: rid,
                 edge,
@@ -369,6 +371,8 @@ impl ScoreSyncApp {
         if let Some(rid) = region_at(&regions, &self.doc.selected_region_ids, ix, iy, img_w) {
             self.doc.click_region(&rid, ctrl);
             self.scroll_group_list_to_active();
+            self.scroll_member_list_to(&rid);
+            self.follow_page_tab(self.doc.current_page_index, cx);
             self.after_doc_change(cx);
             // 仍可开始平移
             self.drag = Some(DragKind::PagePan {

@@ -150,6 +150,18 @@ impl ScoreSyncApp {
         self.set_mask_target(gid, true, cx);
     }
 
+    /// 选中落到 `index` 页时, 左侧页签跟着过去. 换页连画面一起切; 已在该页则只把页签滚进可视区.
+    pub(super) fn follow_page_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.doc.pages.len() {
+            return;
+        }
+        if index != self.doc.current_page_index {
+            self.switch_page(index, cx);
+        } else {
+            self.reveal_page_tab_neighbors(index);
+        }
+    }
+
     pub(super) fn switch_page(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.doc.pages.len() {
             return;

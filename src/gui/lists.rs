@@ -153,6 +153,32 @@ impl ScoreSyncApp {
         self.group_scroll.set_offset(point(px(0.), px(-target)));
     }
 
+    /// 当前组合里优先滚到的成员: 已选中的第一块, 否则组内第一块.
+    pub(super) fn focused_member_id(&self) -> Option<String> {
+        let doc = &self.doc;
+        let g = doc.active_group()?;
+        g.region_ids
+            .iter()
+            .find(|id| doc.selected_region_ids.contains(*id))
+            .cloned()
+            .or_else(|| g.region_ids.first().cloned())
+    }
+
+    /// 把「当前组合内成员」滚到这块. 点成员行本身时不要调.
+    pub(super) fn scroll_member_list_to(&self, rid: &str) {
+        const ROW: f32 = 30.0;
+        let Some(g) = self.doc.active_group() else {
+            return;
+        };
+        let Some(ix) = g.region_ids.iter().position(|id| id == rid) else {
+            return;
+        };
+        let list_h = f32::from(self.member_scroll.bounds().size.height).max(80.0);
+        let target = (ix as f32 * ROW - list_h * 0.35).max(0.0);
+        self.member_scroll
+            .set_offset(point(px(0.), px(-target)));
+    }
+
     pub(super) fn mask_active_group_index(&self) -> Option<usize> {
         let gid = self
             .mask_target
@@ -429,7 +455,7 @@ impl ScoreSyncApp {
                     id: rid.clone(),
                     label: r.label(Some(self.doc.page_no(&r.page_id))).into(),
                     color: parse_color_hex(&r.color),
-                    selected: false,
+                    selected: self.doc.selected_region_ids.contains(rid),
                     src_index: 0,
                 })
             })
@@ -1039,6 +1065,8 @@ impl ScoreSyncApp {
                                         this.doc
                                             .click_region(&rid_sel, is_primary_mod(&ev.modifiers));
                                         this.scroll_group_list_to_active();
+                                        this.scroll_member_list_to(&rid_sel);
+                                        this.follow_page_tab(this.doc.current_page_index, cx);
                                         this.after_doc_change(cx);
                                     }),
                                 ),
@@ -1087,6 +1115,8 @@ impl ScoreSyncApp {
                                         }
                                         this.doc.click_region(&rid, is_primary_mod(&ev.modifiers));
                                         this.scroll_group_list_to_active();
+                                        this.scroll_member_list_to(&rid);
+                                        this.follow_page_tab(this.doc.current_page_index, cx);
                                         this.after_doc_change(cx);
                                     }),
                                 ),
@@ -1275,7 +1305,7 @@ impl ScoreSyncApp {
                     .flex_shrink_0()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("当前组合内成员 (拖拽调序; 可含多页)"),
+                    .child("当前组合内成员 (点击激活分块; 拖拽调序; 可含多页)"),
             );
 
         let mut mlist = div()
@@ -1308,6 +1338,11 @@ impl ScoreSyncApp {
             let rid = row.id.clone();
             let dragging = drag_from == Some(idx);
             let show_line = line_at == Some(idx);
+            let bg = if row.selected {
+                ui_kit::chrome(0xdbeafe)
+            } else {
+                ui_kit::card()
+            };
             mlist = mlist.child(
                 div()
                     .id(SharedString::from(format!("mem-{rid}")))
@@ -1315,7 +1350,7 @@ impl ScoreSyncApp {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(ui_kit::card())
+                    .bg(bg)
                     .text_sm()
                     .text_color(rgb(row.color))
                     .cursor_pointer()
