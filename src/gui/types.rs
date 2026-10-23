@@ -127,7 +127,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留按视口缩小的预览代理 (默认当前页±4, 高清页自动收到 ±2/±1; 输出组合/蒙版页签仍列出全部); 放大超过预览密度时再按窗口裁切原图.\n\
 2. {m}S 保存为单个 .staffcrop 工程包 (zip), 下次可用 {ms}O 继续; {ms}N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
-   「组织页面」(P) 用缩略图网格排序/删除, 比拖页签轻松; 无叉号, {m}点击多选 / Shift 连选, Delete 删选中, {m}Z/Y 撤重.\n\
+   「组织页面」(P) 用缩略图网格排序/删除, 比拖页签轻松; 无叉号, {m}点击按点选顺序多选 / Shift 连选, Delete 删选中, {m}Z/Y 撤重. 「复制」把选中页收成一串, 紧贴在最后点中的那一页右侧. {m}C 只记入待贴内容, {m}V 贴到当时选中页的右侧. 右键可复制, 或粘贴到这一页的左侧或右侧.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
    识别先找五线谱表, 再看相邻谱表是否有墨迹像素直接 8 连通 (贴边分量、无内部孔洞或过窄的连通域不计).\n\
    矢量 PDF 不先光栅整页, 按长水平谱线收谱行; 没有这种谱线则收成整页一块.\n\
@@ -177,7 +177,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 \n\
 其他:\n\
   空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
-  P 组织页面: 缩略图后台并行加载 (关窗仍保留), 拖动排序, {m}点击多选 / Shift 连选, Delete 删除选中页.\n\
+  P 组织页面: 缩略图后台并行加载 (关窗仍保留), 拖动排序, {m}点击按点选顺序多选 / Shift 连选, Delete 删除选中页, {m}C / {m}V 复制粘贴, 右键可贴到左右.\n\
   右侧顶栏可切换「分块 / 底色 / 蒙版 / 视频」四个面板.\n\
   标题栏右侧图标: 新建 / 打开工程 / 保存 / 另存 / 操作说明 / 设置 ({ms}N / {ms}O / {m}S / {ms}S / H / {m},), 悬停显示名称.\n\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
@@ -249,7 +249,7 @@ const HELP_TEMPLATE_EN: &str = "\
 Steps:\n\
 1. Open or drop images or a PDF. Page images live in a session temp directory; memory keeps a preview proxy.\n\
 2. {m}S saves one .staffcrop package. {ms}O continues later. {ms}N starts empty. Closing with unsaved changes asks first.\n\
-3. Right-click a tab to duplicate the page. Organize pages (P) reorders and deletes with thumbnails.\n\
+3. Right-click a tab to duplicate the page. Organize pages (P) reorders and deletes with thumbnails. {m}click selects in click order, Shift extends, Delete removes. Duplicate gathers the selection just to the right of the last clicked page. {m}C copies, {m}V pastes to the right of the selection. Right-click can duplicate, or paste to the left or right.\n\
 4. Each page is detected on its own. Detect all pages runs in parallel within the memory budget. Vector PDFs stay vector and use long horizontal staff lines.\n\
    Settings, Project, Staff packing runs after that. 1 keeps one staff line per block.\n\
    Within page joins every N lines on the same page (top of the first through bottom of the last, including the gap; a short tail stays on that page).\n\

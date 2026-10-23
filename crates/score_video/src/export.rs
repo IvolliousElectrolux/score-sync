@@ -392,13 +392,7 @@ fn run_ffmpeg_in(
                     continue;
                 }
                 if let Ok(mut t) = tail.lock() {
-                    t.push_str(&text);
-                    t.push('\n');
-                    let len = t.len();
-                    if len > 6000 {
-                        let cut = len - 6000;
-                        t.drain(0..cut);
-                    }
+                    push_log_tail(&mut t, &text);
                 }
                 let should_send = last_sent
                     .map(|t| t.elapsed() >= Duration::from_millis(150))
@@ -435,6 +429,20 @@ fn run_ffmpeg_in(
         .to_string());
     }
     Ok(())
+}
+
+fn push_log_tail(tail: &mut String, text: &str) {
+    tail.push_str(text);
+    tail.push('\n');
+    const MAX: usize = 6000;
+    if tail.len() <= MAX {
+        return;
+    }
+    let mut cut = tail.len() - MAX;
+    while cut < tail.len() && !tail.is_char_boundary(cut) {
+        cut += 1;
+    }
+    tail.drain(0..cut);
 }
 
 fn os(s: impl Into<String>) -> std::ffi::OsString {
@@ -531,13 +539,7 @@ fn encode_raw_video(
                     continue;
                 }
                 if let Ok(mut t) = tail.lock() {
-                    t.push_str(&text);
-                    t.push('\n');
-                    let len = t.len();
-                    if len > 6000 {
-                        let cut = len - 6000;
-                        t.drain(0..cut);
-                    }
+                    push_log_tail(&mut t, &text);
                 }
                 let should_send = last_sent
                     .map(|t| t.elapsed() >= Duration::from_millis(150))

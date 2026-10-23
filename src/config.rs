@@ -223,7 +223,11 @@ pub fn remember_window(x: f32, y: f32, width: f32, height: f32, maximized: bool)
         maximized,
     };
     let mut cfg = load();
-    if cfg.window.as_ref().is_some_and(|old| same_placement(old, &next)) {
+    if cfg
+        .window
+        .as_ref()
+        .is_some_and(|old| same_placement(old, &next))
+    {
         return;
     }
     cfg.window = Some(next);
@@ -342,8 +346,7 @@ mod tests {
     #[test]
     fn shrinks_a_window_that_is_larger_than_the_screen() {
         let screens = [(0., 0., 1280., 800.)];
-        let (x, y, w, h, _) =
-            place_window(&placement(40., 30., 2000., 900.), &screens, 0).unwrap();
+        let (x, y, w, h, _) = place_window(&placement(40., 30., 2000., 900.), &screens, 0).unwrap();
         assert_eq!((x, y, w, h), (0., 0., 1280., 800.));
     }
 

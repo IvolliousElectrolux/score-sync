@@ -32,7 +32,7 @@ impl ScoreSyncApp {
     pub(super) fn has_modal_overlay(&self, cx: &App) -> bool {
         self.pdf_import.is_some()
             || self.page_organize.is_some()
-            ||         self.dialog.is_some()
+            || self.dialog.is_some()
             || self.settings_open
             || self.bg.pick_open
             || self.bg.batch_open
@@ -179,7 +179,12 @@ impl ScoreSyncApp {
         .detach();
     }
 
-    fn show_header_tooltip(&mut self, id: &'static str, text: SharedString, cx: &mut Context<Self>) {
+    fn show_header_tooltip(
+        &mut self,
+        id: &'static str,
+        text: SharedString,
+        cx: &mut Context<Self>,
+    ) {
         let (ax, ay, aw, ah) = self
             .header_btn_bounds
             .get(id)
@@ -215,9 +220,21 @@ impl ScoreSyncApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
-        let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
-        let hover = if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) };
+        let bg = if active {
+            ui_kit::chrome(0x2563eb)
+        } else {
+            ui_kit::chrome(0xe2e8f0)
+        };
+        let fg = if active {
+            rgb(0xffffff)
+        } else {
+            ui_kit::chrome(0x0f172a)
+        };
+        let hover = if active {
+            ui_kit::chrome(0x1d4ed8)
+        } else {
+            ui_kit::chrome(0xcbd5e1)
+        };
         let id: SharedString = id.into();
         let id_down = id.clone();
         let id_up = id.clone();
@@ -270,7 +287,11 @@ impl ScoreSyncApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x334155) };
+        let fg = if active {
+            ui_kit::chrome(0x0f172a)
+        } else {
+            ui_kit::chrome(0x334155)
+        };
         div()
             .id(id.into())
             .flex_shrink_0()
@@ -279,13 +300,20 @@ impl ScoreSyncApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(ui_kit::chrome(0xd8e0ea))
+                }
+            })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -488,9 +516,27 @@ impl ScoreSyncApp {
             .bg(ui_kit::chrome(0xe2e8f0))
             .border_b_1()
             .border_color(ui_kit::chrome(0xcbd5e1))
-            .child(self.tool_tab("tool_crop", ui_kit::t_src("分块"), crop_on, SideTool::Crop, cx))
-            .child(self.tool_tab("tool_proj", ui_kit::t_src("底色"), proj_on, SideTool::Project, cx))
-            .child(self.tool_tab("tool_mask", ui_kit::t_src("蒙版"), mask_on, SideTool::Mask, cx))
+            .child(self.tool_tab(
+                "tool_crop",
+                ui_kit::t_src("分块"),
+                crop_on,
+                SideTool::Crop,
+                cx,
+            ))
+            .child(self.tool_tab(
+                "tool_proj",
+                ui_kit::t_src("底色"),
+                proj_on,
+                SideTool::Project,
+                cx,
+            ))
+            .child(self.tool_tab(
+                "tool_mask",
+                ui_kit::t_src("蒙版"),
+                mask_on,
+                SideTool::Mask,
+                cx,
+            ))
             .child(self.tool_tab(
                 "tool_video",
                 ui_kit::t_src("视频"),
@@ -509,7 +555,11 @@ impl ScoreSyncApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let label = label.into();
-        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x475569) };
+        let fg = if active {
+            ui_kit::chrome(0x0f172a)
+        } else {
+            ui_kit::chrome(0x475569)
+        };
         div()
             .id(id)
             .flex_1()
@@ -519,14 +569,21 @@ impl ScoreSyncApp {
             .items_center()
             .justify_center()
             .when(active, |d| {
-                d.bg(ui_kit::chrome(0xf8fafc)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xf8fafc))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_sm()
             .whitespace_nowrap()
             .overflow_hidden()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(ui_kit::chrome(0xd8e0ea))
+                }
+            })
             .child(label)
             .on_mouse_up(
                 MouseButton::Left,
@@ -736,8 +793,16 @@ impl ScoreSyncApp {
         for row in &rows {
             let rid = row.id.clone();
             let active = row.selected;
-            let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
-            let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
+            let bg = if active {
+                ui_kit::chrome(0x2563eb)
+            } else {
+                ui_kit::chrome(0xe2e8f0)
+            };
+            let fg = if active {
+                rgb(0xffffff)
+            } else {
+                ui_kit::chrome(0x0f172a)
+            };
             list = list.child(
                 div()
                     .id(SharedString::from(format!("mask-blk-{rid}")))
@@ -1194,7 +1259,12 @@ impl ScoreSyncApp {
                                 ui_kit::t_src("切换为谱表分块")
                             }),
                     )
-                    .child(div().text_sm().text_color(ui_kit::chrome(0x334155)).child(body))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(ui_kit::chrome(0x334155))
+                            .child(body),
+                    )
                     .child(
                         div()
                             .flex()
@@ -1403,7 +1473,11 @@ impl ScoreSyncApp {
                         .child(ver.clone()),
                 );
                 if bullets.is_empty() {
-                    block = block.child(div().text_color(ui_kit::chrome(0x64748b)).child(ui_kit::t_src("见发布页说明.")));
+                    block = block.child(
+                        div()
+                            .text_color(ui_kit::chrome(0x64748b))
+                            .child(ui_kit::t_src("见发布页说明.")),
+                    );
                 } else {
                     for b in bullets {
                         block = block.child(div().whitespace_normal().child(format!("· {b}")));
@@ -1496,7 +1570,9 @@ impl ScoreSyncApp {
                                 ui_kit::Language::En => {
                                     format!("Installed {current}, latest on GitHub {latest}.")
                                 }
-                                ui_kit::Language::Zh => format!("当前 {current}, GitHub 最新 {latest}."),
+                                ui_kit::Language::Zh => {
+                                    format!("当前 {current}, GitHub 最新 {latest}.")
+                                }
                             }),
                     )
                     .child(

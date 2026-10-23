@@ -1,6 +1,6 @@
 //! 全局设置: 项目属性, 偏好, 快捷键.
 
-use gpui::{MouseButton, px, rgb};
+use gpui::{px, rgb, MouseButton};
 use ui_kit::t;
 
 use super::keymap::{self, Conflict, COMMANDS};
@@ -195,9 +195,15 @@ impl ScoreSyncApp {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(t("settings.title")),
                     )
-                    .child(self.settings_text_btn("settings-close", &t("settings.close"), false, cx, |this, _, cx| {
-                        this.close_settings(cx);
-                    })),
+                    .child(self.settings_text_btn(
+                        "settings-close",
+                        &t("settings.close"),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.close_settings(cx);
+                        },
+                    )),
             )
             .child(match self.settings_page {
                 SettingsPage::Project => self.settings_project(cx).into_any_element(),
@@ -231,12 +237,26 @@ impl ScoreSyncApp {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(t("settings.layout")),
             )
-            .child(self.settings_choice("layout-staff", &t("settings.layout_staff"), &t("settings.layout_staff_hint"), !spread, cx, |this, _, cx| {
-                this.request_sheet_layout(false, cx);
-            }))
-            .child(self.settings_choice("layout-spread", &t("settings.layout_spread"), &t("settings.layout_spread_hint"), spread, cx, |this, _, cx| {
-                this.request_sheet_layout(true, cx);
-            }))
+            .child(self.settings_choice(
+                "layout-staff",
+                &t("settings.layout_staff"),
+                &t("settings.layout_staff_hint"),
+                !spread,
+                cx,
+                |this, _, cx| {
+                    this.request_sheet_layout(false, cx);
+                },
+            ))
+            .child(self.settings_choice(
+                "layout-spread",
+                &t("settings.layout_spread"),
+                &t("settings.layout_spread_hint"),
+                spread,
+                cx,
+                |this, _, cx| {
+                    this.request_sheet_layout(true, cx);
+                },
+            ))
             .child(self.settings_heading(&t("settings.pack")))
             .child(
                 div()
@@ -293,34 +313,26 @@ impl ScoreSyncApp {
             .flex_row()
             .items_center()
             .gap_2()
-            .child(self.settings_text_btn(
-                "pack-dec",
-                &"-".into(),
-                false,
-                cx,
-                |this, _, cx| {
+            .child(
+                self.settings_text_btn("pack-dec", &"-".into(), false, cx, |this, _, cx| {
                     let lines = this.doc.staff_pack_lines.max(1);
                     let mode = this.doc.staff_pack_mode;
                     this.apply_staff_pack_choice(lines.saturating_sub(1).max(1), mode, cx);
-                },
-            ))
+                }),
+            )
             .child(
                 div()
                     .min_w(px(72.))
                     .text_sm()
                     .child(format!("{lines} {}", t("settings.pack_lines"))),
             )
-            .child(self.settings_text_btn(
-                "pack-inc",
-                &"+".into(),
-                false,
-                cx,
-                |this, _, cx| {
+            .child(
+                self.settings_text_btn("pack-inc", &"+".into(), false, cx, |this, _, cx| {
                     let lines = this.doc.staff_pack_lines.max(1);
                     let mode = this.doc.staff_pack_mode;
                     this.apply_staff_pack_choice((lines + 1).min(12), mode, cx);
-                },
-            ))
+                }),
+            )
             .child(
                 div()
                     .text_xs()
@@ -346,10 +358,10 @@ impl ScoreSyncApp {
         let mode = self.doc.staff_pack_mode;
         self.status = match result {
             crate::model::StaffPackApply::Unchanged => return,
-            crate::model::StaffPackApply::NeedRedetect => format!(
-                "已改为 {lines} 行. 眼下这些块是按页合并过的, 请重新识别才会按新行数切开."
-            )
-            .into(),
+            crate::model::StaffPackApply::NeedRedetect => {
+                format!("已改为 {lines} 行. 眼下这些块是按页合并过的, 请重新识别才会按新行数切开.")
+                    .into()
+            }
             crate::model::StaffPackApply::Applied if spread => {
                 "已记下谱行合并. 双页对开不识别谱表, 切回去之后重新识别才会用上.".into()
             }
@@ -383,11 +395,7 @@ impl ScoreSyncApp {
     fn settings_prefs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ui_kit::theme();
         let current = ui_kit::theme_id();
-        let mut themes = div()
-            .id("settings_themes")
-            .flex()
-            .flex_col()
-            .gap_1();
+        let mut themes = div().id("settings_themes").flex().flex_col().gap_1();
         for id in ui_kit::THEME_IDS {
             let selected = *id == current;
             let preset = ui_kit::preset(id);
@@ -502,9 +510,7 @@ impl ScoreSyncApp {
         match &self.update_probe {
             UpdateProbe::Idle | UpdateProbe::Checking => SharedString::default(),
             UpdateProbe::UpToDate => t("settings.up_to_date"),
-            UpdateProbe::Failed(err) => {
-                format!("{} ({err})", t("settings.update_failed")).into()
-            }
+            UpdateProbe::Failed(err) => format!("{} ({err})", t("settings.update_failed")).into(),
         }
     }
 
@@ -524,11 +530,7 @@ impl ScoreSyncApp {
 
     fn settings_keys(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ui_kit::theme();
-        let mut list = div()
-            .id("settings_key_list")
-            .flex()
-            .flex_col()
-            .gap(px(2.));
+        let mut list = div().id("settings_key_list").flex().flex_col().gap(px(2.));
         let mut last = None;
         for cmd in COMMANDS {
             if last != Some(cmd.group) {
@@ -615,17 +617,12 @@ impl ScoreSyncApp {
             .items_center()
             .gap_2()
             .py(px(2.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .text_sm()
-                    .child(t(cmd.id)),
-            );
+            .child(div().flex_1().min_w(px(0.)).text_sm().child(t(cmd.id)));
         for (slot, key) in keys.iter().enumerate() {
-            let capturing = self.settings_capture.as_ref().is_some_and(|(id, index)| {
-                id == cmd.id && *index == slot
-            });
+            let capturing = self
+                .settings_capture
+                .as_ref()
+                .is_some_and(|(id, index)| id == cmd.id && *index == slot);
             let label = if capturing {
                 t("settings.capture")
             } else if key.is_empty() {
@@ -808,7 +805,12 @@ impl ScoreSyncApp {
             )
     }
 
-    pub(super) fn begin_shortcut_capture(&mut self, id: String, slot: usize, cx: &mut Context<Self>) {
+    pub(super) fn begin_shortcut_capture(
+        &mut self,
+        id: String,
+        slot: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.end_shortcut_capture(cx);
         self.settings_capture = Some((id, slot));
         self.settings_conflict = SharedString::default();

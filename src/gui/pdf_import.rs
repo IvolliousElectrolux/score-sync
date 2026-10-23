@@ -1183,7 +1183,10 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .text_color(ui_kit::chrome(0x64748b))
-                            .hover(|s| s.bg(ui_kit::chrome(0xe2e8f0)).text_color(ui_kit::chrome(0x0f172a)))
+                            .hover(|s| {
+                                s.bg(ui_kit::chrome(0xe2e8f0))
+                                    .text_color(ui_kit::chrome(0x0f172a))
+                            })
                             .cursor_pointer()
                             .child("×")
                             .on_mouse_down(
@@ -1259,13 +1262,26 @@ impl ScoreSyncApp {
             drop = drop
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(ui_kit::chrome(0xf1f5f9)).border_color(ui_kit::chrome(0x64748b)))
+                .hover(|s| {
+                    s.bg(ui_kit::chrome(0xf1f5f9))
+                        .border_color(ui_kit::chrome(0x64748b))
+                })
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| this.import_dialog_pick_files(cx)),
                 )
-                .child(div().text_3xl().text_color(ui_kit::chrome(0x64748b)).child("📎"))
-                .child(div().text_sm().text_color(ui_kit::chrome(0x475569)).child(drop_hint));
+                .child(
+                    div()
+                        .text_3xl()
+                        .text_color(ui_kit::chrome(0x64748b))
+                        .child("📎"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(ui_kit::chrome(0x475569))
+                        .child(drop_hint),
+                );
         } else {
             drop = drop
                 .overflow_hidden()

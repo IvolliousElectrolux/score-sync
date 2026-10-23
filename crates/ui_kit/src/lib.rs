@@ -4,7 +4,7 @@ mod i18n;
 mod theme;
 
 pub use i18n::{language_code, parse_language, t, t_src, Language};
-pub use theme::{card, chrome, on_accent, overlay, preset, parse_theme_id, Theme, THEME_IDS};
+pub use theme::{card, chrome, on_accent, overlay, parse_theme_id, preset, Theme, THEME_IDS};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,9 +23,7 @@ struct State {
 }
 
 fn state() -> std::sync::RwLockWriteGuard<'static, State> {
-    STATE
-        .write()
-        .unwrap_or_else(|err| err.into_inner())
+    STATE.write().unwrap_or_else(|err| err.into_inner())
 }
 
 fn read_state() -> std::sync::RwLockReadGuard<'static, State> {

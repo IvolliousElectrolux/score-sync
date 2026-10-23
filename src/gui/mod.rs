@@ -22,12 +22,12 @@ mod history;
 mod host;
 mod io;
 mod keymap;
-mod settings;
 mod lists;
 mod mem;
 mod page_organize;
 mod pdf_import;
 mod photo;
+mod settings;
 mod spread_view;
 mod sync;
 mod tabs;
@@ -76,6 +76,8 @@ actions!(
         NextPage,
         CopySpreadPages,
         PasteSpreadPages,
+        CopyOrganizePages,
+        PasteOrganizePages,
         OpenSettings,
     ]
 );
@@ -94,8 +96,8 @@ pub(crate) use gpui::{
     canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
     DispatchPhase, DisplayId, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
+    RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 pub(crate) use mask_tool::gui::MaskToolApp;
 pub(crate) use mask_tool::mask::MaskRect;
@@ -242,6 +244,8 @@ pub(crate) struct ScoreSyncApp {
     spread_anchor: Option<String>,
     /// Ctrl+C 记下的页 id, 仍是点选顺序. Ctrl+V 再贴.
     spread_clip: Vec<String>,
+    /// 组织页面里 Ctrl+C 记下的页 id, 点选顺序.
+    organize_clip: Vec<String>,
     spread_drag: Option<spread_view::SpreadDrag>,
     spread_menu: Option<spread_view::SpreadMenu>,
     /// 蒙版组合页签独立滚动状态; 与分块页签的 `tab_scroll` 分开, 避免切换
@@ -505,6 +509,7 @@ impl ScoreSyncApp {
             spread_selected: Vec::new(),
             spread_anchor: None,
             spread_clip: Vec::new(),
+            organize_clip: Vec::new(),
             spread_drag: None,
             spread_menu: None,
             mask_tab_scroll: ScrollHandle::new(),
@@ -1151,6 +1156,12 @@ impl Render for ScoreSyncApp {
             .on_action(cx.listener(|this, _: &PasteSpreadPages, _, cx| {
                 this.paste_spread_clipboard(cx);
             }))
+            .on_action(cx.listener(|this, _: &CopyOrganizePages, _, cx| {
+                this.copy_organize_clipboard(cx);
+            }))
+            .on_action(cx.listener(|this, _: &PasteOrganizePages, _, cx| {
+                this.paste_organize_clipboard(cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectAllPageRegions, _, cx| {
                 if this.page_organize.is_some() {
                     this.select_all_organize_pages(cx);
@@ -1382,54 +1393,56 @@ impl gpui::AssetSource for HeaderIcons {
 }
 
 pub fn run_gui(initial: Vec<PathBuf>) {
-    Application::new().with_assets(HeaderIcons).run(move |cx: &mut App| {
-        ui_kit::load_prefs_from_disk();
-        keymap::install(cx);
-        let (bounds, display_id) = remembered_window_bounds(cx);
-        let initial = initial.clone();
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(bounds),
-                display_id,
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("曲谱同步 / Score Sync".into()),
+    Application::new()
+        .with_assets(HeaderIcons)
+        .run(move |cx: &mut App| {
+            ui_kit::load_prefs_from_disk();
+            keymap::install(cx);
+            let (bounds, display_id) = remembered_window_bounds(cx);
+            let initial = initial.clone();
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(bounds),
+                    display_id,
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: Some("曲谱同步 / Score Sync".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let entity = cx.new(|cx| {
-                    let app = ScoreSyncApp::new(cx, initial.clone());
-                    app.focus_handle.focus(window);
-                    app
-                });
-                entity.update(cx, |app, cx| app.watch_window_placement(window, cx));
-                let weak = entity.downgrade();
-                window.on_window_should_close(cx, move |window, cx| {
-                    let Some(entity) = weak.upgrade() else {
-                        return true;
-                    };
-                    entity.update(cx, |app, cx| {
-                        app.store_window_placement(window);
-                        if app.allow_close {
+                },
+                move |window, cx| {
+                    let entity = cx.new(|cx| {
+                        let app = ScoreSyncApp::new(cx, initial.clone());
+                        app.focus_handle.focus(window);
+                        app
+                    });
+                    entity.update(cx, |app, cx| app.watch_window_placement(window, cx));
+                    let weak = entity.downgrade();
+                    window.on_window_should_close(cx, move |window, cx| {
+                        let Some(entity) = weak.upgrade() else {
                             return true;
-                        }
-                        app.dismiss_error_overlays(cx);
-                        app.refresh_dirty_from_panels(cx);
-                        if !app.dirty {
-                            return true;
-                        }
-                        app.dialog = Some(DialogKind::UnsavedExit);
-                        cx.notify();
-                        false
-                    })
-                });
-                entity
-            },
-        )
-        .unwrap();
-        cx.activate(true);
-    });
+                        };
+                        entity.update(cx, |app, cx| {
+                            app.store_window_placement(window);
+                            if app.allow_close {
+                                return true;
+                            }
+                            app.dismiss_error_overlays(cx);
+                            app.refresh_dirty_from_panels(cx);
+                            if !app.dirty {
+                                return true;
+                            }
+                            app.dialog = Some(DialogKind::UnsavedExit);
+                            cx.notify();
+                            false
+                        })
+                    });
+                    entity
+                },
+            )
+            .unwrap();
+            cx.activate(true);
+        });
 }
 
 /// 标题栏保存中指示: 圆圈拖尾转圈 (非盲文点阵).

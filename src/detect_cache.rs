@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use crate::staff_detect::{
-    detect_bands, merge_system_bands, Band, StaffGrouping, StaffPackMode,
-};
+use crate::staff_detect::{detect_bands, merge_system_bands, Band, StaffGrouping, StaffPackMode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedStaffAnchor {
@@ -178,12 +176,5 @@ pub fn load_or_detect(
             return cached;
         }
     }
-    detect_and_save(
-        img,
-        png_path,
-        ink_threshold,
-        margin,
-        pack_lines,
-        pack_mode,
-    )
+    detect_and_save(img, png_path, ink_threshold, margin, pack_lines, pack_mode)
 }

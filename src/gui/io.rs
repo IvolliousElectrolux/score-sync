@@ -88,6 +88,10 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        if self.close_organize_menu() {
+            cx.notify();
+            return;
+        }
         if self.page_organize.is_some() {
             self.close_page_organize(cx);
             return;
@@ -619,6 +623,7 @@ impl ScoreSyncApp {
                         view.spread_selected.clear();
                         view.spread_anchor = None;
                         view.spread_clip.clear();
+                        view.organize_clip.clear();
                         view.spread_drag = None;
                         view.spread_menu = None;
                         view.refresh_render(cx);
@@ -719,6 +724,7 @@ impl ScoreSyncApp {
         self.spread_selected.clear();
         self.spread_anchor = None;
         self.spread_clip.clear();
+        self.organize_clip.clear();
         self.spread_drag = None;
         self.spread_menu = None;
         self.tab_menu = None;

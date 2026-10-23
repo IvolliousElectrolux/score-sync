@@ -104,6 +104,8 @@ pub(crate) const COMMANDS: &[Command] = &[
     cmd("organize.toggle", Group::Organize, &["p"]),
     cmd("organize.delete", Group::Organize, &["delete", "backspace"]),
     cmd("organize.select_all", Group::Organize, &["primary-a"]),
+    cmd("organize.copy", Group::Organize, &["primary-c"]),
+    cmd("organize.paste", Group::Organize, &["primary-v"]),
     cmd("mask.export", Group::Mask, &["e"]),
     cmd("mask.fit", Group::Mask, &["f"]),
     cmd("mask.delete", Group::Mask, &["delete", "backspace"]),
@@ -269,6 +271,8 @@ const INSTALL_ORDER: &[&str] = &[
     "app.redo",
     "crop.select_all",
     "organize.select_all",
+    "organize.copy",
+    "organize.paste",
     "mask.select_all",
     "crop.prev",
     "crop.next",
@@ -424,7 +428,10 @@ fn find_conflict_in(
             continue;
         }
         let keys = effective_in(overrides, cmd);
-        if keys.iter().any(|key| !key.is_empty() && normalize(key) == norm) {
+        if keys
+            .iter()
+            .any(|key| !key.is_empty() && normalize(key) == norm)
+        {
             return Some(Conflict::Command(cmd.id));
         }
     }
@@ -535,8 +542,15 @@ pub(crate) fn logical_from(ks: &Keystroke) -> Option<String> {
 }
 
 fn split_mods(logical: &str) -> (&str, &str) {
-    for prefix in ["primary-alt-", "primary-shift-", "primary-", "shift-", "alt-", "ctrl-", "fn-"]
-    {
+    for prefix in [
+        "primary-alt-",
+        "primary-shift-",
+        "primary-",
+        "shift-",
+        "alt-",
+        "ctrl-",
+        "fn-",
+    ] {
         if let Some(rest) = logical.strip_prefix(prefix) {
             let mods = prefix.trim_end_matches('-');
             return (mods, rest);
@@ -573,7 +587,7 @@ fn contexts(id: &str) -> &'static [Option<&'static str>] {
         "app.help" | "app.confirm" | "app.cancel" => HELP_CTX,
         "app.settings" | "app.dump" => NONE_ONLY,
         "organize.toggle" => ORGANIZE_TOGGLE,
-        "organize.delete" | "organize.select_all" => ORGANIZE,
+        "organize.delete" | "organize.select_all" | "organize.copy" | "organize.paste" => ORGANIZE,
         id if id.starts_with("crop.") || id.starts_with("spread.") => CROP,
         id if id.starts_with("mask.") => MASK,
         id if id.starts_with("photo.") => PHOTO,
@@ -638,6 +652,8 @@ fn bind_id(id: &str, keys: &[String], out: &mut Vec<KeyBinding>) {
         "crop.next" | "mask.next" => bind_same(out, id, keys, NextPage),
         "spread.copy" => bind_same(out, id, keys, CopySpreadPages),
         "spread.paste" => bind_same(out, id, keys, PasteSpreadPages),
+        "organize.copy" => bind_same(out, id, keys, CopyOrganizePages),
+        "organize.paste" => bind_same(out, id, keys, PasteOrganizePages),
         "organize.toggle" => bind_same(out, id, keys, OrganizePages),
         "mask.export" => bind_same(out, id, keys, mask_tool::gui::ExportImage),
         "mask.fit" => bind_same(out, id, keys, mask_tool::gui::FitView),

@@ -175,8 +175,7 @@ impl ScoreSyncApp {
         };
         let list_h = f32::from(self.member_scroll.bounds().size.height).max(80.0);
         let target = (ix as f32 * ROW - list_h * 0.35).max(0.0);
-        self.member_scroll
-            .set_offset(point(px(0.), px(-target)));
+        self.member_scroll.set_offset(point(px(0.), px(-target)));
     }
 
     pub(super) fn mask_active_group_index(&self) -> Option<usize> {

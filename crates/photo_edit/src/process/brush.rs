@@ -7,15 +7,17 @@ use image::{Rgba, RgbaImage};
 pub fn brush_weight(dx: i32, dy: i32, radius: i32, hardness: f32) -> f32 {
     let r = radius.max(1) as f32;
     let d = ((dx * dx + dy * dy) as f32).sqrt();
+    let hard = hardness.clamp(0.0, 1.0);
+    // 硬度 100% 是实心圆. 边缘再做半透明的话, 白笔盖在纸上会剩一圈灰.
+    if hard >= 1.0 - 1e-3 {
+        return if d <= r + 1e-3 { 1.0 } else { 0.0 };
+    }
     let cover = (r + 0.5 - d).clamp(0.0, 1.0);
     if cover <= 0.0 {
         return 0.0;
     }
-    let hard = hardness.clamp(0.0, 1.0);
     let inner = hard * r;
-    let profile = if inner >= r - 1e-3 {
-        1.0
-    } else if d <= inner {
+    let profile = if d <= inner {
         1.0
     } else {
         let span = (r - inner).max(1e-6);
@@ -53,20 +55,26 @@ pub fn sample_bilinear(img: &RgbaImage, x: f32, y: f32) -> Option<Rgba<u8>> {
     Some(Rgba(out))
 }
 
+/// 直通 alpha 叠色. 半透明像素的 RGB 保持笔色, 不预乘, 软边再铺到纸上才不会发灰.
 pub fn blend(dst: Rgba<u8>, src: Rgba<u8>, a: f32) -> Rgba<u8> {
-    if a <= 0.001 || src[3] == 0 {
+    let src_a = (src[3] as f32 / 255.0) * a.clamp(0.0, 1.0);
+    if src_a <= 0.001 || src[3] == 0 {
         return dst;
     }
-    let sa = (src[3] as f32 / 255.0) * a.clamp(0.0, 1.0);
-    if sa >= 0.999 {
+    if src_a >= 0.999 {
         return src;
     }
-    let inv = 1.0 - sa;
+    let da = dst[3] as f32 / 255.0;
+    let out_a = src_a + da * (1.0 - src_a);
+    if out_a <= 1e-6 {
+        return Rgba([0, 0, 0, 0]);
+    }
+    let inv_da = da * (1.0 - src_a);
     Rgba([
-        (dst[0] as f32 * inv + src[0] as f32 * sa).round() as u8,
-        (dst[1] as f32 * inv + src[1] as f32 * sa).round() as u8,
-        (dst[2] as f32 * inv + src[2] as f32 * sa).round() as u8,
-        (dst[3] as f32 * inv + 255.0 * sa).round().min(255.0) as u8,
+        ((src[0] as f32 * src_a + dst[0] as f32 * inv_da) / out_a).round() as u8,
+        ((src[1] as f32 * src_a + dst[1] as f32 * inv_da) / out_a).round() as u8,
+        ((src[2] as f32 * src_a + dst[2] as f32 * inv_da) / out_a).round() as u8,
+        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
     ])
 }
 
@@ -199,8 +207,8 @@ fn brush_kernel(radius: i32, hardness: f32) -> Arc<BrushKernel> {
     k
 }
 
-/// 在当前层盖实心色章 (硬度 + 边缘 AA).
-/// 笔尖权重按半径和硬度缓存, 已经盖实的像素直接跳过, 快速拖动时重叠部分不再重算.
+/// 在当前层盖实心色章. 硬度 100% 为实心圆, 更软时边缘衰减.
+/// 半透明处按直通 alpha 写入, 笔色不预乘. 笔尖权重按半径和硬度缓存, 已经盖实的像素直接跳过.
 pub fn stamp_color(
     dst: &mut RgbaImage,
     dst_x: i32,
@@ -230,34 +238,37 @@ pub fn stamp_color(
         let dy = y - dst_y;
         let row = &mut raw[(y as usize) * width * 4..(y as usize + 1) * width * 4];
         for x in x0..x1 {
-            let a = kernel.weight(x - dst_x, dy);
-            if a <= 0.001 {
+            let cover = kernel.weight(x - dst_x, dy);
+            if cover <= 0.001 {
+                continue;
+            }
+            let src_a = cover * (alpha as f32 / 255.0);
+            if src_a <= 0.001 {
                 continue;
             }
             let i = (x as usize) * 4;
             let px = &mut row[i..i + 4];
-            if alpha == 255 {
-                if a >= 0.999 {
-                    if px[0] == rgb[0] && px[1] == rgb[1] && px[2] == rgb[2] && px[3] == 255 {
-                        continue;
-                    }
-                    px[0] = rgb[0];
-                    px[1] = rgb[1];
-                    px[2] = rgb[2];
-                    px[3] = 255;
-                    continue;
-                }
-                let inv = 1.0 - a;
-                px[0] = (px[0] as f32 * inv + rgb[0] as f32 * a).round() as u8;
-                px[1] = (px[1] as f32 * inv + rgb[1] as f32 * a).round() as u8;
-                px[2] = (px[2] as f32 * inv + rgb[2] as f32 * a).round() as u8;
-                px[3] = (px[3] as f32 * inv + 255.0 * a).round().min(255.0) as u8;
-            } else {
-                let src = Rgba([rgb[0], rgb[1], rgb[2], alpha]);
-                let dst = Rgba([px[0], px[1], px[2], px[3]]);
-                let out = blend(dst, src, a);
-                px.copy_from_slice(&out.0);
+            if alpha == 255 && px[3] == 255 && px[0] == rgb[0] && px[1] == rgb[1] && px[2] == rgb[2]
+            {
+                continue;
             }
+            if src_a >= 0.999 {
+                px[0] = rgb[0];
+                px[1] = rgb[1];
+                px[2] = rgb[2];
+                px[3] = 255;
+                continue;
+            }
+            let da = px[3] as f32 / 255.0;
+            let out_a = src_a + da * (1.0 - src_a);
+            if out_a <= 1e-6 {
+                continue;
+            }
+            let inv_da = da * (1.0 - src_a);
+            px[0] = ((rgb[0] as f32 * src_a + px[0] as f32 * inv_da) / out_a).round() as u8;
+            px[1] = ((rgb[1] as f32 * src_a + px[1] as f32 * inv_da) / out_a).round() as u8;
+            px[2] = ((rgb[2] as f32 * src_a + px[2] as f32 * inv_da) / out_a).round() as u8;
+            px[3] = (out_a * 255.0).round().min(255.0) as u8;
         }
     }
 }
@@ -279,11 +290,27 @@ mod tests {
     }
 
     #[test]
-    fn hard_brush_still_has_aa() {
-        let inner = brush_weight(5, 0, 6, 1.0);
-        let rim = brush_weight(6, 0, 6, 1.0);
-        assert!(inner > 0.99, "inner {inner}");
-        assert!(rim > 0.0 && rim < 1.0, "AA rim {rim}");
+    fn hard_brush_is_a_solid_disk() {
+        assert_eq!(brush_weight(5, 0, 6, 1.0), 1.0);
+        assert_eq!(brush_weight(6, 0, 6, 1.0), 1.0);
+        assert_eq!(brush_weight(7, 0, 6, 1.0), 0.0);
+    }
+
+    #[test]
+    fn hard_white_brush_has_no_gray_rim() {
+        let mut ink = RgbaImage::from_pixel(24, 24, Rgba([0, 0, 0, 0]));
+        stamp_color(&mut ink, 12, 12, 6, 1.0, [255, 255, 255], 255);
+        assert_eq!(ink.get_pixel(18, 12).0, [255, 255, 255, 255]);
+        assert_eq!(ink.get_pixel(19, 12).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn soft_white_edge_keeps_brush_color() {
+        let mut ink = RgbaImage::from_pixel(24, 24, Rgba([0, 0, 0, 0]));
+        stamp_color(&mut ink, 12, 12, 6, 0.0, [255, 255, 255], 255);
+        let rim = ink.get_pixel(17, 12).0;
+        assert!(rim[3] > 0 && rim[3] < 255, "partial rim {rim:?}");
+        assert_eq!(&rim[..3], &[255, 255, 255]);
     }
 
     #[test]

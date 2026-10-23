@@ -338,9 +338,17 @@ fn interloper_index(lines: &[YLine], i: usize, spacing: f32) -> usize {
             e += ((r - y) - spacing).abs();
             n += 1.0;
         }
-        if n == 0.0 { 0.0 } else { e / n }
+        if n == 0.0 {
+            0.0
+        } else {
+            e / n
+        }
     };
-    if err(a.y) <= err(b.y) { i + 1 } else { i }
+    if err(a.y) <= err(b.y) {
+        i + 1
+    } else {
+        i
+    }
 }
 
 fn group_staves(ys: &[f32]) -> Vec<StaffCore> {
@@ -1190,7 +1198,11 @@ mod tests {
         let bands = detect_vector_bands(&scene, 8);
         assert_eq!(bands.len(), 2, "{bands:?}");
         assert!(bands[0].y0 < 100 && bands[0].y1 > 210, "{:?}", bands[0]);
-        assert!(bands[0].y1 < 280, "stub barline glued the next system {:?}", bands[0]);
+        assert!(
+            bands[0].y1 < 280,
+            "stub barline glued the next system {:?}",
+            bands[0]
+        );
         assert!(bands[1].y0 > 212 && bands[1].y1 > 410, "{:?}", bands[1]);
 
         let mut braced = staff(100.0);

@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, point, prelude::*, px, size, App, Application, Bounds, Context, CursorStyle,
-    Div, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding, ModifiersChangedEvent, Pixels,
+    actions, div, point, prelude::*, px, size, App, Application, Bounds, Context, CursorStyle, Div,
+    Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding, ModifiersChangedEvent, Pixels,
     Point, Render, RenderImage, SharedString, Window, WindowBounds, WindowOptions,
 };
 use image::{RgbImage, RgbaImage};
@@ -626,7 +626,8 @@ impl PhotoEditApp {
                 } else {
                     None
                 };
-                let mut tiles = tiles.unwrap_or_else(|| g.tiles.iter().flatten().cloned().collect());
+                let mut tiles =
+                    tiles.unwrap_or_else(|| g.tiles.iter().flatten().cloned().collect());
                 if g.tiles.iter().any(|t| t.is_none()) {
                     if let Some(preview) = &g.preview {
                         tiles.insert(0, preview.clone());

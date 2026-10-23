@@ -50,9 +50,14 @@ enum SpreadMenuCmd {
 }
 
 enum SpreadDropKind {
-    Move { anchor: usize, after: bool },
+    Move {
+        anchor: usize,
+        after: bool,
+    },
     /// 右页拖进下一对左页的左缘: 原位置补空白, 左页单独留下.
-    Isolate { at: usize },
+    Isolate {
+        at: usize,
+    },
 }
 
 fn glyph_px(c: char, em: f32) -> f32 {
@@ -363,7 +368,11 @@ impl ScoreSyncApp {
         let left = row * 2;
         let right = left + 1;
         let active = self.doc.current_page_index / 2 == row;
-        let border = if active { ui_kit::chrome(0x2563eb) } else { rgb(0xe7e5e4) };
+        let border = if active {
+            ui_kit::chrome(0x2563eb)
+        } else {
+            rgb(0xe7e5e4)
+        };
         div()
             .id(SharedString::from(format!("spread_book_{row}")))
             .flex_shrink_0()
@@ -385,7 +394,11 @@ impl ScoreSyncApp {
                     .h(px(16.0 * fit.scale))
                     .text_size(px(12.0 * fit.scale))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(if active { ui_kit::chrome(0x1d4ed8) } else { rgb(0x78716c) })
+                    .text_color(if active {
+                        ui_kit::chrome(0x1d4ed8)
+                    } else {
+                        rgb(0x78716c)
+                    })
                     .child(format!("第 {} 对", row + 1)),
             )
             .child(
@@ -521,37 +534,37 @@ impl ScoreSyncApp {
                     })
                     .when(!blank, |d| {
                         d.child(
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                let Some(img) = &thumb else {
-                                    return;
-                                };
-                                let sz = img.size(0);
-                                let iw = (sz.width.0 as f32).max(1.0);
-                                let ih = (sz.height.0 as f32).max(1.0);
-                                let vw = f32::from(bounds.size.width);
-                                let vh = f32::from(bounds.size.height);
-                                let fit = (vw / iw).min(vh / ih).max(0.0001);
-                                let dw = iw * fit;
-                                let dh = ih * fit;
-                                let ox = bounds.origin.x + px((vw - dw) * 0.5);
-                                let oy = bounds.origin.y + px((vh - dh) * 0.5);
-                                let img_bounds = Bounds {
-                                    origin: point(ox, oy),
-                                    size: size(px(dw), px(dh)),
-                                };
-                                let _ = window.paint_image(
-                                    img_bounds,
-                                    gpui::Corners::default(),
-                                    img.clone(),
-                                    0,
-                                    false,
-                                );
-                            },
+                            canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, _| {
+                                    let Some(img) = &thumb else {
+                                        return;
+                                    };
+                                    let sz = img.size(0);
+                                    let iw = (sz.width.0 as f32).max(1.0);
+                                    let ih = (sz.height.0 as f32).max(1.0);
+                                    let vw = f32::from(bounds.size.width);
+                                    let vh = f32::from(bounds.size.height);
+                                    let fit = (vw / iw).min(vh / ih).max(0.0001);
+                                    let dw = iw * fit;
+                                    let dh = ih * fit;
+                                    let ox = bounds.origin.x + px((vw - dw) * 0.5);
+                                    let oy = bounds.origin.y + px((vh - dh) * 0.5);
+                                    let img_bounds = Bounds {
+                                        origin: point(ox, oy),
+                                        size: size(px(dw), px(dh)),
+                                    };
+                                    let _ = window.paint_image(
+                                        img_bounds,
+                                        gpui::Corners::default(),
+                                        img.clone(),
+                                        0,
+                                        false,
+                                    );
+                                },
+                            )
+                            .size_full(),
                         )
-                        .size_full(),
-                    )
                     })
                     .when(waiting, |d| {
                         d.child(
@@ -966,10 +979,7 @@ impl ScoreSyncApp {
         } else {
             page.and_then(|p| self.org_thumbs.get(&p.id).cloned())
         };
-        let metrics = spread_fit(
-            self.spread_row_avail(),
-            self.doc.pages.len().div_ceil(2),
-        );
+        let metrics = spread_fit(self.spread_row_avail(), self.doc.pages.len().div_ceil(2));
         let title = page
             .map(|p| clip_spread_title(&p.spread_caption().0, spread_caption_px(metrics)))
             .unwrap_or_default();
@@ -1014,37 +1024,37 @@ impl ScoreSyncApp {
                     })
                     .when(!blank, |d| {
                         d.child({
-                        let paint = thumb;
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                let Some(img) = &paint else {
-                                    return;
-                                };
-                                let sz = img.size(0);
-                                let iw = (sz.width.0 as f32).max(1.0);
-                                let ih = (sz.height.0 as f32).max(1.0);
-                                let vw = f32::from(bounds.size.width);
-                                let vh = f32::from(bounds.size.height);
-                                let fit = (vw / iw).min(vh / ih).max(0.0001);
-                                let dw = iw * fit;
-                                let dh = ih * fit;
-                                let ox = bounds.origin.x + px((vw - dw) * 0.5);
-                                let oy = bounds.origin.y + px((vh - dh) * 0.5);
-                                let img_bounds = Bounds {
-                                    origin: point(ox, oy),
-                                    size: size(px(dw), px(dh)),
-                                };
-                                let _ = window.paint_image(
-                                    img_bounds,
-                                    gpui::Corners::default(),
-                                    img.clone(),
-                                    0,
-                                    false,
-                                );
-                            },
-                        )
-                        .size_full()
+                            let paint = thumb;
+                            canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, _| {
+                                    let Some(img) = &paint else {
+                                        return;
+                                    };
+                                    let sz = img.size(0);
+                                    let iw = (sz.width.0 as f32).max(1.0);
+                                    let ih = (sz.height.0 as f32).max(1.0);
+                                    let vw = f32::from(bounds.size.width);
+                                    let vh = f32::from(bounds.size.height);
+                                    let fit = (vw / iw).min(vh / ih).max(0.0001);
+                                    let dw = iw * fit;
+                                    let dh = ih * fit;
+                                    let ox = bounds.origin.x + px((vw - dw) * 0.5);
+                                    let oy = bounds.origin.y + px((vh - dh) * 0.5);
+                                    let img_bounds = Bounds {
+                                        origin: point(ox, oy),
+                                        size: size(px(dw), px(dh)),
+                                    };
+                                    let _ = window.paint_image(
+                                        img_bounds,
+                                        gpui::Corners::default(),
+                                        img.clone(),
+                                        0,
+                                        false,
+                                    );
+                                },
+                            )
+                            .size_full()
                         })
                     })
                     .when(count > 1, |d| {
@@ -1362,12 +1372,9 @@ impl ScoreSyncApp {
         if self.org_thumb_busy || self.spread_thumb_queued {
             return;
         }
-        let missing =
-            self.doc.pages.iter().any(|p| {
-                !p.blank
-                    && !self.org_thumbs.contains_key(&p.id)
-                    && !self.org_thumb_miss.contains(&p.id)
-            });
+        let missing = self.doc.pages.iter().any(|p| {
+            !p.blank && !self.org_thumbs.contains_key(&p.id) && !self.org_thumb_miss.contains(&p.id)
+        });
         if !missing {
             return;
         }
@@ -1513,9 +1520,10 @@ impl ScoreSyncApp {
                         cx,
                     )),
             )
-            .when_some(fly.zip(main_bounds).zip(row_bounds), |d, ((fly, main), row)| {
-                d.child(self.spread_submenu(fly, main, row, cx))
-            })
+            .when_some(
+                fly.zip(main_bounds).zip(row_bounds),
+                |d, ((fly, main), row)| d.child(self.spread_submenu(fly, main, row, cx)),
+            )
             .into_any_element()
     }
 
@@ -1638,7 +1646,10 @@ impl ScoreSyncApp {
         fly: SpreadMenuFly,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let open = self.spread_menu.as_ref().is_some_and(|m| m.fly == Some(fly));
+        let open = self
+            .spread_menu
+            .as_ref()
+            .is_some_and(|m| m.fly == Some(fly));
         let fly_hover = fly;
         let slot = match fly {
             SpreadMenuFly::Paste => SpreadMenuSlot::Paste,
@@ -1853,7 +1864,10 @@ mod tests {
         assert!(classify_spread_drop(4, 2, &[2], 1, true).is_none());
         assert!(matches!(
             classify_spread_drop(4, 3, &[3], 0, false),
-            Some(SpreadDropKind::Move { anchor: 0, after: false })
+            Some(SpreadDropKind::Move {
+                anchor: 0,
+                after: false
+            })
         ));
     }
 }

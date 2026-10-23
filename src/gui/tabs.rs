@@ -535,8 +535,16 @@ impl ScoreSyncApp {
             let gid = g.id.clone();
             let active = active_gid.as_ref() == Some(&gid);
             let label = self.doc.group_crop_label(i);
-            let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
-            let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
+            let bg = if active {
+                ui_kit::chrome(0x2563eb)
+            } else {
+                ui_kit::chrome(0xe2e8f0)
+            };
+            let fg = if active {
+                rgb(0xffffff)
+            } else {
+                ui_kit::chrome(0x0f172a)
+            };
             row = row.child(
                 div()
                     .id(SharedString::from(format!("mask-tab-{gid}")))
@@ -701,8 +709,16 @@ impl ScoreSyncApp {
             let idx = tab.index;
             let active = tab.active;
             let dragging = drag_from == Some(idx);
-            let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
-            let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
+            let bg = if active {
+                ui_kit::chrome(0x2563eb)
+            } else {
+                ui_kit::chrome(0xe2e8f0)
+            };
+            let fg = if active {
+                rgb(0xffffff)
+            } else {
+                ui_kit::chrome(0x0f172a)
+            };
             row = row.child(
                 div()
                     .id(SharedString::from(format!("tab-{idx}")))
@@ -739,7 +755,8 @@ impl ScoreSyncApp {
                             .px_1()
                             .rounded_sm()
                             .when(!tab_reordering, |d| {
-                                d.hover(|s| s.bg(ui_kit::chrome(0x94a3b8))).block_mouse_except_scroll()
+                                d.hover(|s| s.bg(ui_kit::chrome(0x94a3b8)))
+                                    .block_mouse_except_scroll()
                             })
                             .child("×")
                             .on_mouse_down(
@@ -1521,19 +1538,18 @@ mod tests {
         // 中间: 提示左上角在锚点右下角
         let new_text = "新建工程 (Ctrl+Shift+N)";
         let (nw, nh) = estimate_hover_tooltip_size(new_text);
-        let (x_mid, y_mid) =
-            hover_tooltip_pos(
-                800.0,
-                8.0,
-                22.0,
-                22.0,
-                new_text,
-                nw,
-                nh,
-                1200.0,
-                800.0,
-                HoverTipAlign::After,
-            );
+        let (x_mid, y_mid) = hover_tooltip_pos(
+            800.0,
+            8.0,
+            22.0,
+            22.0,
+            new_text,
+            nw,
+            nh,
+            1200.0,
+            800.0,
+            HoverTipAlign::After,
+        );
         assert!((x_mid - 822.0).abs() < 0.6);
         assert!((y_mid - (8.0 + 22.0 + 2.0)).abs() < 0.6);
         // 底部贴边时翻到锚点上方

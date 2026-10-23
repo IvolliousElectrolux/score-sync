@@ -1277,7 +1277,13 @@ impl ScoreSyncApp {
                                     ),
                             ),
                     )
-                    .child(div().flex_shrink_0().h(px(1.)).w_full().bg(ui_kit::chrome(0xcbd5e1)))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .h(px(1.))
+                            .w_full()
+                            .bg(ui_kit::chrome(0xcbd5e1)),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1351,7 +1357,13 @@ impl ScoreSyncApp {
                 let id_up = id;
                 let id_out = id;
                 d.cursor_pointer()
-                    .hover(move |s| s.bg(if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) }))
+                    .hover(move |s| {
+                        s.bg(if active {
+                            ui_kit::chrome(0x1d4ed8)
+                        } else {
+                            ui_kit::chrome(0xcbd5e1)
+                        })
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -1718,7 +1730,12 @@ impl ScoreSyncApp {
                                 }),
                             ),
                     )
-                    .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("R"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(ui_kit::chrome(0x94a3b8))
+                            .child("R"),
+                    )
                     .child(
                         div()
                             .id("bg_rgb_r")
@@ -1727,7 +1744,12 @@ impl ScoreSyncApp {
                             .h(px(20.))
                             .child(r_in),
                     )
-                    .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("G"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(ui_kit::chrome(0x94a3b8))
+                            .child("G"),
+                    )
                     .child(
                         div()
                             .id("bg_rgb_g")
@@ -1736,7 +1758,12 @@ impl ScoreSyncApp {
                             .h(px(20.))
                             .child(g_in),
                     )
-                    .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("B"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(ui_kit::chrome(0x94a3b8))
+                            .child("B"),
+                    )
                     .child(
                         div()
                             .id("bg_rgb_b")
@@ -1847,7 +1874,10 @@ impl ScoreSyncApp {
                             .relative()
                             .overflow_hidden()
                             .cursor_pointer()
-                            .hover(|s| s.bg(ui_kit::chrome(0xf1f5f9)).border_color(ui_kit::chrome(0x64748b)))
+                            .hover(|s| {
+                                s.bg(ui_kit::chrome(0xf1f5f9))
+                                    .border_color(ui_kit::chrome(0x64748b))
+                            })
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| this.pick_bg_file_dialog(cx)),
@@ -1868,7 +1898,10 @@ impl ScoreSyncApp {
                                         .justify_center()
                                         .gap_2()
                                         .child(
-                                            div().text_3xl().text_color(ui_kit::chrome(0x64748b)).child("🖼"),
+                                            div()
+                                                .text_3xl()
+                                                .text_color(ui_kit::chrome(0x64748b))
+                                                .child("🖼"),
                                         )
                                         .child(
                                             div()
@@ -1890,7 +1923,10 @@ impl ScoreSyncApp {
                                         .flex()
                                         .justify_center()
                                         .child(
-                                            div().text_xs().text_color(ui_kit::chrome(0xf8fafc)).child(hint),
+                                            div()
+                                                .text_xs()
+                                                .text_color(ui_kit::chrome(0xf8fafc))
+                                                .child(hint),
                                         ),
                                 )
                             }),

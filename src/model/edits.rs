@@ -1,7 +1,7 @@
 //! 分块 P 图覆盖: 元数据 + 会话目录 + 蒙版 y 平移.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use image::RgbImage;
 use photo_edit::{EditDocument, SourceFingerprint};
@@ -155,6 +155,41 @@ impl DocState {
         vector_edit::VecDocument::load_from_dir(&Self::region_edit_dir(region_id)).ok()
     }
 
+    /// 把一块上的修图目录和元数据复制到新块, 并把指纹里的页 id 改成新页.
+    /// 源目录不在或写失败时跳过, 不让页复制本身失败.
+    pub fn clone_region_edit_to(&mut self, old_rid: &str, new_rid: &str, new_page_id: &str) {
+        let Some(mut meta) = self.region_edits.get(old_rid).cloned() else {
+            return;
+        };
+        let src = Self::region_edit_dir(old_rid);
+        let dst = Self::region_edit_dir(new_rid);
+        if copy_tree(&src, &dst).is_err() {
+            return;
+        }
+        match meta.kind {
+            EditKind::Raster => {
+                if let Ok(mut doc) = EditDocument::load_from_dir(&dst) {
+                    if let Some(fp) = doc.source.as_mut() {
+                        fp.page_id = new_page_id.to_string();
+                    }
+                    let _ = doc.save_to_dir(&dst);
+                }
+            }
+            EditKind::Vector => {
+                if let Ok(mut doc) = vector_edit::VecDocument::load_from_dir(&dst) {
+                    if let Some(fp) = doc.source.as_mut() {
+                        fp.page_id = new_page_id.to_string();
+                    }
+                    let _ = doc.save_to_dir(&dst);
+                }
+            }
+        }
+        if let Some(fp) = meta.source.as_mut() {
+            fp.page_id = new_page_id.to_string();
+        }
+        self.region_edits.insert(new_rid.to_string(), meta);
+    }
+
     pub fn prune_orphan_edits(&mut self) {
         let valid: std::collections::HashSet<String> = self
             .pages
@@ -191,6 +226,26 @@ pub fn remap_masks_after_height_change(
             m.translate(0, dh as i32);
         }
     }
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if !src.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "edit dir missing",
+        ));
+    }
+    std::fs::create_dir_all(dst)?;
+    for ent in std::fs::read_dir(src)? {
+        let ent = ent?;
+        let to = dst.join(ent.file_name());
+        if ent.file_type()?.is_dir() {
+            copy_tree(&ent.path(), &to)?;
+        } else {
+            std::fs::copy(ent.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 fn photo_fp_from_vector(s: &vector_edit::SourceFingerprint) -> SourceFingerprint {

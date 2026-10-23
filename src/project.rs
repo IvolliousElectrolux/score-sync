@@ -317,14 +317,7 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
                 src.h_pt,
             )
         } else if page.blank {
-            (
-                String::new(),
-                String::new(),
-                String::new(),
-                0,
-                0.0,
-                0.0,
-            )
+            (String::new(), String::new(), String::new(), 0, 0.0, 0.0)
         } else {
             if !page.disk_path.is_file() && page.image.is_none() {
                 return Err(format!("页 {} 既无磁盘备份也无内存图", page.id));

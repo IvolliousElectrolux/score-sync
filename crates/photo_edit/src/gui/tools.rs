@@ -1359,7 +1359,10 @@ impl PhotoEditApp {
         let w = pixels.width();
         let h = pixels.height();
         let base = match self.canvas_pointer(window) {
-            Some((px, py)) => ((px - w as f32 * 0.5).round() as i32, (py - h as f32 * 0.5).round() as i32),
+            Some((px, py)) => (
+                (px - w as f32 * 0.5).round() as i32,
+                (py - h as f32 * 0.5).round() as i32,
+            ),
             None => (x + 8, y + 8),
         };
         let (nx, ny) = self
@@ -1372,7 +1375,10 @@ impl PhotoEditApp {
             self.undo_stack.pop();
             return;
         };
-        let mut neu = Layer::new(unique_layer_name(&doc.layers, "选区副本"), (*pixels).clone());
+        let mut neu = Layer::new(
+            unique_layer_name(&doc.layers, "选区副本"),
+            (*pixels).clone(),
+        );
         neu.x = nx;
         neu.y = ny;
         doc.layers.push(neu);
@@ -1750,9 +1756,9 @@ fn trace_wand_loops(mask: &[u8], w: u32, h: u32) -> Vec<Vec<(f32, f32)>> {
 
 fn clear_slot(layers: &[Layer], w: u32, h: u32, mut x: i32, mut y: i32) -> (i32, i32) {
     for _ in 0..64 {
-        let taken = layers.iter().any(|layer| {
-            layer.x == x && layer.y == y && layer.width() == w && layer.height() == h
-        });
+        let taken = layers
+            .iter()
+            .any(|layer| layer.x == x && layer.y == y && layer.width() == w && layer.height() == h);
         if !taken {
             return (x, y);
         }

@@ -1266,7 +1266,9 @@ impl PhotoEditApp {
         let (ix, iy) = self.image_pos_move(ev);
         let snap_tol = (EDGE_SNAP_SCREEN_PX / self.view_xform().scale.max(0.0001)).max(1.0);
         if self.eyedropper_armed {
-            if let Some((rgb, alpha)) = self.sample_canvas_rgba(ix.round() as i32, iy.round() as i32) {
+            if let Some((rgb, alpha)) =
+                self.sample_canvas_rgba(ix.round() as i32, iy.round() as i32)
+            {
                 self.preview_eyedropper_rgb(rgb, alpha, cx);
             }
             return;

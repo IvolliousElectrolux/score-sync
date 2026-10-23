@@ -1,6 +1,6 @@
 //! 界面语义色. 谱纸, 墨色, 蒙版用户色不在这里.
 
-use gpui::{Rgba, rgb, rgba};
+use gpui::{rgb, rgba, Rgba};
 
 #[derive(Clone, Copy)]
 pub struct Theme {

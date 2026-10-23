@@ -12,7 +12,11 @@ use smallvec::smallvec;
 use super::*;
 
 pub(crate) fn eyedropper_icon(active: bool) -> impl IntoElement {
-    let stroke = if active { ui_kit::chrome(0xf8fafc) } else { ui_kit::chrome(0xe2e8f0) };
+    let stroke = if active {
+        ui_kit::chrome(0xf8fafc)
+    } else {
+        ui_kit::chrome(0xe2e8f0)
+    };
     div().size(px(14.)).flex_shrink_0().child(
         canvas(|_, _, _| {}, {
             move |bounds, _, window, _| {
@@ -326,27 +330,33 @@ impl PhotoEditApp {
                     }
                 }),
             )
-            .child(div().w_full().flex().flex_row().justify_between().items_center().children(
-                recent.into_iter().enumerate().map(|(i, color)| {
-                    let color_u32 = color_rgb_u32(color);
-                    div()
-                        .id(SharedString::from(format!("photo-recent-{i}")))
-                        .size(px(22.))
-                        .rounded_sm()
-                        .bg(rgb(color_u32))
-                        .border_1()
-                        .border_color(ui_kit::chrome(0x64748b))
-                        .cursor_pointer()
-                        .hover(|s| s.border_color(ui_kit::chrome(0x94a3b8)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.pick_recent_color(color, cx);
-                            }),
-                        )
-                }),
-            ))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .items_center()
+                    .children(recent.into_iter().enumerate().map(|(i, color)| {
+                        let color_u32 = color_rgb_u32(color);
+                        div()
+                            .id(SharedString::from(format!("photo-recent-{i}")))
+                            .size(px(22.))
+                            .rounded_sm()
+                            .bg(rgb(color_u32))
+                            .border_1()
+                            .border_color(ui_kit::chrome(0x64748b))
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(ui_kit::chrome(0x94a3b8)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.pick_recent_color(color, cx);
+                                }),
+                            )
+                    })),
+            )
             .child(
                 div()
                     .w_full()
@@ -493,7 +503,12 @@ impl PhotoEditApp {
                             .items_center()
                             .gap_1()
                             .flex_shrink_0()
-                            .child(div().text_xs().text_color(ui_kit::chrome(0xcbd5e1)).child("RGB"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(ui_kit::chrome(0xcbd5e1))
+                                    .child("RGB"),
+                            )
                             .child(
                                 div()
                                     .id("photo_eyedropper_btn")
@@ -587,9 +602,8 @@ impl PhotoEditApp {
     fn paint_alpha_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.paint_alpha as f32 / 255.0;
         let [r, g, b] = self.paint_color;
-        let fill = gpui::rgba(
-            (u32::from(r) << 24) | (u32::from(g) << 16) | (u32::from(b) << 8) | 255,
-        );
+        let fill =
+            gpui::rgba((u32::from(r) << 24) | (u32::from(g) << 16) | (u32::from(b) << 8) | 255);
         let a_in = self.rgb_a_input.clone();
         let entity = cx.entity().clone();
         div()
@@ -597,7 +611,12 @@ impl PhotoEditApp {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child("A"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(ui_kit::chrome(0x94a3b8))
+                    .child("A"),
+            )
             .child(
                 div()
                     .id("photo_alpha_track")
@@ -648,13 +667,7 @@ impl PhotoEditApp {
                         }),
                     ),
             )
-            .child(
-                div()
-                    .w(px(40.))
-                    .h(px(20.))
-                    .flex_shrink_0()
-                    .child(a_in),
-            )
+            .child(div().w(px(40.)).h(px(20.)).flex_shrink_0().child(a_in))
     }
 
     pub(super) fn rebuild_hue_image(&mut self) {
@@ -755,7 +768,12 @@ impl PhotoEditApp {
         cx.notify();
     }
 
-    pub(super) fn preview_eyedropper_rgb(&mut self, rgb: [u8; 3], alpha: u8, cx: &mut Context<Self>) {
+    pub(super) fn preview_eyedropper_rgb(
+        &mut self,
+        rgb: [u8; 3],
+        alpha: u8,
+        cx: &mut Context<Self>,
+    ) {
         let (h, s, v) = rgb_to_hsv(rgb);
         self.picker_h = h;
         self.picker_s = s;
@@ -776,7 +794,13 @@ impl PhotoEditApp {
             return;
         }
         let c = self.picker_rgb();
-        self.eyedropper_backup = Some((self.picker_h, self.picker_s, self.picker_v, c, self.paint_alpha));
+        self.eyedropper_backup = Some((
+            self.picker_h,
+            self.picker_s,
+            self.picker_v,
+            c,
+            self.paint_alpha,
+        ));
         self.eyedropper_armed = true;
         self.status = "取色: 在画布上移动预览, 单击确认, Esc/右键取消".into();
         self.notify_chrome(cx);

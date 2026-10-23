@@ -21,11 +21,34 @@ pub(super) struct OrganizeDrag {
     collapse: bool,
 }
 
+pub(super) struct OrganizeMenu {
+    page_index: usize,
+    x: f32,
+    y: f32,
+    fly: bool,
+    main_bounds: Option<Bounds<Pixels>>,
+    paste_row: Option<Bounds<Pixels>>,
+}
+
+#[derive(Clone, Copy)]
+enum OrgMenuSlot {
+    Main,
+    Paste,
+}
+
+#[derive(Clone, Copy)]
+enum OrgMenuCmd {
+    Duplicate,
+    Paste { after: bool },
+}
+
 pub(super) struct PageOrganizeState {
-    selected: HashSet<String>,
+    /// 点选顺序. 复制时按这个顺序收成一串, 不按页序.
+    selected: Vec<String>,
     anchor: Option<String>,
     cell_bounds: HashMap<usize, Bounds<Pixels>>,
     drag: Option<OrganizeDrag>,
+    menu: Option<OrganizeMenu>,
 }
 
 fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
@@ -86,6 +109,40 @@ fn truncate_name(name: &str, max_chars: usize) -> SharedString {
     format!("{s}…").into()
 }
 
+fn org_menu_width(labels: &[&str], arrow: bool) -> f32 {
+    const EM: f32 = 14.0;
+    let text = labels
+        .iter()
+        .map(|s| {
+            s.chars()
+                .map(|c| if (c as u32) > 0x7f { EM } else { EM * 0.55 })
+                .sum::<f32>()
+        })
+        .fold(0.0_f32, f32::max);
+    let mark = if arrow { 18.0 } else { 0.0 };
+    (text + 36.0 + mark).ceil()
+}
+
+fn track_org_menu(entity: Entity<ScoreSyncApp>, slot: OrgMenuSlot) -> impl IntoElement {
+    canvas(
+        move |bounds, _, cx| {
+            entity.update(cx, |this, _| {
+                let Some(menu) = this.page_organize.as_mut().and_then(|st| st.menu.as_mut()) else {
+                    return;
+                };
+                match slot {
+                    OrgMenuSlot::Main => menu.main_bounds = Some(bounds),
+                    OrgMenuSlot::Paste => menu.paste_row = Some(bounds),
+                }
+            });
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
 impl ScoreSyncApp {
     pub(super) fn toggle_page_organize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pdf_import.is_some() {
@@ -110,9 +167,9 @@ impl ScoreSyncApp {
         self.dialog = None;
         self.tab_menu = None;
         let cur = self.doc.current_page().map(|p| p.id.clone());
-        let mut selected = HashSet::new();
+        let mut selected = Vec::new();
         if let Some(id) = cur.clone() {
-            selected.insert(id);
+            selected.push(id);
         }
         self.page_organize_scroll.set_offset(point(px(0.), px(0.)));
         self.page_organize = Some(PageOrganizeState {
@@ -120,10 +177,13 @@ impl ScoreSyncApp {
             anchor: cur,
             cell_bounds: HashMap::new(),
             drag: None,
+            menu: None,
         });
         self.focus_handle.focus(window);
         self.status = format!(
-            "组织页面: 拖动排序, {}点击多选 / Shift 连选, Delete 删除.",
+            "组织页面: 拖动排序, {}点击多选 / Shift 连选, {}C 复制, {}V 粘贴, Delete 删除.",
+            apply_bg::primary_mod(),
+            apply_bg::primary_mod(),
             apply_bg::primary_mod()
         )
         .into();
@@ -148,6 +208,18 @@ impl ScoreSyncApp {
         cx.notify();
     }
 
+    /// Esc 先关右键菜单, 再关组织页面.
+    pub(super) fn close_organize_menu(&mut self) -> bool {
+        let Some(st) = self.page_organize.as_mut() else {
+            return false;
+        };
+        if st.menu.is_none() {
+            return false;
+        }
+        st.menu = None;
+        true
+    }
+
     pub(super) fn clear_org_thumbs(&mut self) {
         self.org_thumb_gen = self.org_thumb_gen.wrapping_add(1);
         self.org_thumb_busy = false;
@@ -159,9 +231,10 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn select_all_organize_pages(&mut self, cx: &mut Context<Self>) {
-        let ids: HashSet<String> = self.doc.pages.iter().map(|p| p.id.clone()).collect();
+        let ids: Vec<String> = self.doc.pages.iter().map(|p| p.id.clone()).collect();
         if let Some(st) = self.page_organize.as_mut() {
             st.selected = ids;
+            st.menu = None;
             if st.anchor.is_none() {
                 st.anchor = self.doc.current_page().map(|p| p.id.clone());
             }
@@ -178,7 +251,7 @@ impl ScoreSyncApp {
                 .pages
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| st.selected.contains(&p.id))
+                .filter(|(_, p)| st.selected.iter().any(|id| id == &p.id))
                 .map(|(i, _)| i)
                 .collect()
         };
@@ -194,8 +267,10 @@ impl ScoreSyncApp {
                 self.gpu_drop.push(img);
             }
             if let Some(st) = self.page_organize.as_mut() {
-                st.selected.remove(id);
+                st.selected.retain(|x| x != id);
+                st.menu = None;
             }
+            self.organize_clip.retain(|x| x != id);
         }
         self.status = format!("已删除 {n} 页 ({}Z 可撤回).", apply_bg::primary_mod()).into();
         self.hint = self.status.clone();
@@ -238,19 +313,21 @@ impl ScoreSyncApp {
 
     fn sync_organize_after_doc(&mut self, cx: &mut Context<Self>) {
         let live: HashSet<String> = self.doc.pages.iter().map(|p| p.id.clone()).collect();
+        self.organize_clip.retain(|id| live.contains(id));
         let fallback = self.doc.current_page().map(|p| p.id.clone());
         if let Some(st) = self.page_organize.as_mut() {
             st.selected.retain(|id| live.contains(id));
             if st.selected.is_empty() {
                 if let Some(id) = fallback.clone() {
-                    st.selected.insert(id.clone());
+                    st.selected.push(id.clone());
                     st.anchor = Some(id);
                 }
             } else if st.anchor.as_ref().is_some_and(|id| !live.contains(id)) {
-                st.anchor = st.selected.iter().next().cloned().or(fallback);
+                st.anchor = st.selected.last().cloned().or(fallback);
             }
             st.cell_bounds.clear();
             st.drag = None;
+            st.menu = None;
         }
         self.request_organize_thumbs(cx);
         cx.notify();
@@ -415,7 +492,7 @@ impl ScoreSyncApp {
             .pages
             .iter()
             .enumerate()
-            .filter(|(_, p)| st.selected.contains(&p.id))
+            .filter(|(_, p)| st.selected.iter().any(|id| id == &p.id))
             .map(|(i, _)| i)
             .collect();
         if idxs.contains(&from) {
@@ -434,28 +511,39 @@ impl ScoreSyncApp {
         let Some(st) = self.page_organize.as_mut() else {
             return;
         };
+        let has = |selected: &[String], id: &str| selected.iter().any(|x| x == id);
         if shift {
             let anchor_idx = st
                 .anchor
                 .as_ref()
                 .and_then(|aid| ids.iter().position(|x| x == aid))
                 .unwrap_or(idx);
-            let lo = anchor_idx.min(idx);
-            let hi = anchor_idx.max(idx);
-            let range: HashSet<String> = ids[lo..=hi].iter().cloned().collect();
+            let range: Vec<String> = if anchor_idx <= idx {
+                ids[anchor_idx..=idx].to_vec()
+            } else {
+                let mut v = ids[idx..=anchor_idx].to_vec();
+                v.reverse();
+                v
+            };
             if ctrl {
-                st.selected.extend(range);
+                for rid in range {
+                    if !has(&st.selected, &rid) {
+                        st.selected.push(rid);
+                    }
+                }
             } else {
                 st.selected = range;
             }
         } else if ctrl {
-            if !st.selected.remove(&id) {
-                st.selected.insert(id.clone());
+            if let Some(at) = st.selected.iter().position(|x| x == &id) {
+                st.selected.remove(at);
+            } else {
+                st.selected.push(id.clone());
             }
             st.anchor = Some(id);
         } else {
             st.selected.clear();
-            st.selected.insert(id.clone());
+            st.selected.push(id.clone());
             st.anchor = Some(id);
         }
     }
@@ -555,6 +643,7 @@ impl ScoreSyncApp {
                 return;
             }
             st.drag = None;
+            st.menu = None;
             st.selected.clear();
         }
         cx.notify();
@@ -587,6 +676,10 @@ impl ScoreSyncApp {
         let n = self.doc.pages.len();
         let n_sel = st.selected.len();
         let drag_armed = st.drag.as_ref().is_some_and(|d| d.armed);
+        let show_org_paste_sub = st
+            .menu
+            .as_ref()
+            .is_some_and(|m| m.fly && m.main_bounds.is_some() && m.paste_row.is_some());
         let drag_from = st.drag.as_ref().and_then(|d| d.armed.then_some(d.from));
         let (line_at, line_after) = match &st.drag {
             Some(d) if d.armed => (d.line_at, d.line_after),
@@ -693,7 +786,13 @@ impl ScoreSyncApp {
                     .when(show_line && line_after, |d| {
                         d.border_r_4().border_color(ui_kit::chrome(0xf59e0b))
                     })
-                    .hover(|s| if selected { s } else { s.bg(ui_kit::chrome(0xf8fafc)) })
+                    .hover(|s| {
+                        if selected {
+                            s
+                        } else {
+                            s.bg(ui_kit::chrome(0xf8fafc))
+                        }
+                    })
                     .child(Self::measure_org_cell(entity.clone(), idx))
                     .child(
                         div()
@@ -808,6 +907,9 @@ impl ScoreSyncApp {
                             if !(already && !ctrl && !shift) {
                                 this.organize_click(idx, ctrl, shift);
                             }
+                            if let Some(st) = this.page_organize.as_mut() {
+                                st.menu = None;
+                            }
                             let mx = f32::from(ev.position.x);
                             let my = f32::from(ev.position.y);
                             let (ox, oy) = Self::item_origin(
@@ -835,6 +937,32 @@ impl ScoreSyncApp {
                             let _ = window;
                             cx.notify();
                         }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            let picked = this.doc.pages.get(idx).is_some_and(|p| {
+                                this.page_organize
+                                    .as_ref()
+                                    .is_some_and(|st| st.selected.iter().any(|id| id == &p.id))
+                            });
+                            if !picked {
+                                this.organize_click(idx, false, false);
+                            }
+                            if let Some(st) = this.page_organize.as_mut() {
+                                st.drag = None;
+                                st.menu = Some(OrganizeMenu {
+                                    page_index: idx,
+                                    x: f32::from(ev.position.x),
+                                    y: f32::from(ev.position.y),
+                                    fly: false,
+                                    main_bounds: None,
+                                    paste_row: None,
+                                });
+                            }
+                            cx.notify();
+                        }),
                     ),
             );
         }
@@ -845,7 +973,7 @@ impl ScoreSyncApp {
             format!("组织页面  ·  共 {n} 页")
         };
         let hint = format!(
-            "拖动排序 · {}点击多选 · Shift 连选 · Delete 删除 · {}Z/Y 撤重 · 双击跳转",
+            "拖动排序 · {}点击多选 · Shift 连选 · {}C/V 复制粘贴 · 右键可贴到左右 · Delete 删除 · 双击跳转",
             apply_bg::primary_mod(),
             apply_bg::primary_mod()
         );
@@ -882,14 +1010,22 @@ impl ScoreSyncApp {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
+                cx.listener(|this, _, _, cx| {
+                    if let Some(st) = this.page_organize.as_mut() {
+                        st.menu = None;
+                    }
                     cx.stop_propagation();
+                    cx.notify();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|_, _, _, cx| {
+                cx.listener(|this, _, _, cx| {
+                    if let Some(st) = this.page_organize.as_mut() {
+                        st.menu = None;
+                    }
                     cx.stop_propagation();
+                    cx.notify();
                 }),
             )
             .child(
@@ -1005,7 +1141,381 @@ impl ScoreSyncApp {
                     ),
             )
             .when(drag_armed, |d| d.child(ghost))
+            .child(self.organize_menu_overlay(cx))
+            .when(show_org_paste_sub, |d| {
+                d.child(self.org_menu_paste_sub_overlay(cx))
+            })
             .into_any_element()
+    }
+
+    /// 点选顺序上的页下标. 已经不在的 id 略过.
+    fn organize_selection_indices(&self) -> Vec<usize> {
+        let Some(st) = self.page_organize.as_ref() else {
+            return Vec::new();
+        };
+        st.selected
+            .iter()
+            .filter_map(|id| self.doc.pages.iter().position(|p| &p.id == id))
+            .collect()
+    }
+
+    /// 右键「复制选中」: 立刻把选中页按点选顺序收成一串, 贴在最后一页的右侧.
+    pub(super) fn duplicate_organize_selected(&mut self, cx: &mut Context<Self>) {
+        if self.page_organize.is_none() {
+            return;
+        }
+        let order = self.organize_selection_indices();
+        if order.is_empty() {
+            self.status = "请先选中要复制的页面.".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        let after = *order.last().unwrap();
+        self.insert_organize_copies(&order, after, true, false, cx);
+    }
+
+    pub(super) fn copy_organize_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.page_organize.is_none() {
+            return;
+        }
+        let order = self.organize_selection_indices();
+        if order.is_empty() {
+            self.status = "请先选中要复制的页面.".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        self.organize_clip = order
+            .iter()
+            .map(|&i| self.doc.pages[i].id.clone())
+            .collect();
+        if let Some(st) = self.page_organize.as_mut() {
+            st.menu = None;
+        }
+        self.status = format!(
+            "已复制 {} 页. {}V 贴到当时选中页的右侧.",
+            order.len(),
+            apply_bg::primary_mod()
+        )
+        .into();
+        self.hint = self.status.clone();
+        cx.notify();
+    }
+
+    pub(super) fn paste_organize_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.page_organize.is_none() {
+            return;
+        }
+        let order = self.organize_clip_indices();
+        if order.is_empty() {
+            self.status = if self.organize_clip.is_empty() {
+                format!("还没有复制页面. 先按 {}C.", apply_bg::primary_mod()).into()
+            } else {
+                "复制的页面已经不在了.".into()
+            };
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        let sel = self.organize_selection_indices();
+        let Some(&after) = sel.last() else {
+            self.status = "请先选中要贴在其右侧的页面.".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        };
+        self.insert_organize_copies(&order, after, true, true, cx);
+    }
+
+    fn organize_clip_indices(&self) -> Vec<usize> {
+        self.organize_clip
+            .iter()
+            .filter_map(|id| self.doc.pages.iter().position(|p| &p.id == id))
+            .collect()
+    }
+
+    fn paste_organize_at(&mut self, anchor: usize, after: bool, cx: &mut Context<Self>) {
+        let order = self.organize_clip_indices();
+        if order.is_empty() {
+            if let Some(st) = self.page_organize.as_mut() {
+                st.menu = None;
+            }
+            self.status = if self.organize_clip.is_empty() {
+                format!("还没有复制页面. 先按 {}C.", apply_bg::primary_mod()).into()
+            } else {
+                "复制的页面已经不在了.".into()
+            };
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        }
+        if anchor >= self.doc.pages.len() {
+            return;
+        }
+        self.insert_organize_copies(&order, anchor, after, true, cx);
+    }
+
+    fn insert_organize_copies(
+        &mut self,
+        order: &[usize],
+        anchor: usize,
+        place_after: bool,
+        from_clip: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor_name = self
+            .doc
+            .pages
+            .get(anchor)
+            .map(|p| p.title())
+            .unwrap_or_else(|| "这一页".into());
+        self.push_crop_undo_page_structure();
+        let Some(new_ids) = self.doc.copy_pages_beside(order, anchor, place_after) else {
+            self.page_struct_history.undo.pop();
+            self.status = "复制页面失败.".into();
+            self.hint = self.status.clone();
+            cx.notify();
+            return;
+        };
+        if let Some(st) = self.page_organize.as_mut() {
+            st.anchor = new_ids.last().cloned();
+            st.selected = new_ids;
+            st.menu = None;
+            st.drag = None;
+        }
+        let n = self
+            .page_organize
+            .as_ref()
+            .map(|st| st.selected.len())
+            .unwrap_or(0);
+        let verb = if from_clip { "已粘贴" } else { "已复制" };
+        let side = if place_after { "右侧" } else { "左侧" };
+        self.status = format!("{verb} {n} 页, 紧贴在「{anchor_name}」{side}.").into();
+        self.hint = self.status.clone();
+        self.after_doc_change(cx);
+        self.sync_organize_after_doc(cx);
+        self.refresh_render(cx);
+    }
+
+    fn organize_menu_act(&mut self, cmd: OrgMenuCmd, cx: &mut Context<Self>) {
+        let Some(idx) = self
+            .page_organize
+            .as_ref()
+            .and_then(|st| st.menu.as_ref().map(|m| m.page_index))
+        else {
+            return;
+        };
+        match cmd {
+            OrgMenuCmd::Duplicate => self.duplicate_organize_selected(cx),
+            OrgMenuCmd::Paste { after } => self.paste_organize_at(idx, after, cx),
+        }
+    }
+
+    fn organize_set_fly(&mut self, fly: bool, cx: &mut Context<Self>) {
+        let Some(menu) = self.page_organize.as_mut().and_then(|st| st.menu.as_mut()) else {
+            return;
+        };
+        if menu.fly == fly {
+            return;
+        }
+        menu.fly = fly;
+        cx.notify();
+    }
+
+    fn organize_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = self.page_organize.as_ref().and_then(|st| st.menu.as_ref()) else {
+            return div().into_any_element();
+        };
+        let x = menu.x;
+        let y = menu.y;
+        let labels = ["复制选中", "粘贴到"];
+        div()
+            .id("org-ctx-menu")
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(org_menu_width(&labels, true)))
+            .occlude()
+            .flex()
+            .flex_col()
+            .p_1()
+            .rounded_md()
+            .bg(ui_kit::card())
+            .border_1()
+            .border_color(rgb(0xe7e5e4))
+            .shadow_md()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(track_org_menu(cx.entity().clone(), OrgMenuSlot::Main))
+            .child(self.org_menu_leaf("org_menu_dup", "复制选中", OrgMenuCmd::Duplicate, cx))
+            .child(self.org_menu_paste_row(cx))
+            .into_any_element()
+    }
+
+    fn org_menu_leaf(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        cmd: OrgMenuCmd,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .text_sm()
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(0xf5f5f4)))
+            .child(label)
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                if *hovered {
+                    this.organize_set_fly(false, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.organize_menu_act(cmd, cx);
+                }),
+            )
+    }
+
+    fn org_menu_paste_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self
+            .page_organize
+            .as_ref()
+            .and_then(|st| st.menu.as_ref())
+            .is_some_and(|m| m.fly);
+        div()
+            .id("org_menu_paste")
+            .relative()
+            .w_full()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .text_sm()
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .when(open, |d| d.bg(rgb(0xf5f5f4)))
+            .hover(|s| s.bg(rgb(0xf5f5f4)))
+            .child(track_org_menu(cx.entity().clone(), OrgMenuSlot::Paste))
+            .child("粘贴到")
+            .child(
+                div()
+                    .ml_3()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(rgb(0x78716c))
+                    .child("▸"),
+            )
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                if *hovered {
+                    this.organize_set_fly(true, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+    }
+
+    fn org_menu_paste_sub(
+        &self,
+        main: Bounds<Pixels>,
+        row: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let labels = ["左侧", "右侧"];
+        let sub_w = org_menu_width(&labels, false);
+        let gap = 2.0;
+        let mut left = f32::from(main.origin.x) + f32::from(main.size.width) + gap;
+        if left + sub_w > self.viewport_w - 4.0 {
+            left = (f32::from(main.origin.x) - sub_w - gap).max(4.0);
+        }
+        let top = f32::from(row.origin.y);
+        div()
+            .id("org_menu_paste_sub")
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(sub_w))
+            .occlude()
+            .flex()
+            .flex_col()
+            .p_1()
+            .rounded_md()
+            .bg(ui_kit::card())
+            .border_1()
+            .border_color(rgb(0xe7e5e4))
+            .shadow_md()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .children(labels.into_iter().enumerate().map(|(i, label)| {
+                let after = i == 1;
+                div()
+                    .id(SharedString::from(format!("org_menu_paste_{i}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_sm()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0xf5f5f4)))
+                    .child(label)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.organize_menu_act(OrgMenuCmd::Paste { after }, cx);
+                        }),
+                    )
+            }))
+    }
+
+    fn org_menu_paste_sub_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = self.page_organize.as_ref().and_then(|st| st.menu.as_ref()) else {
+            return div().into_any_element();
+        };
+        let (Some(main), Some(row)) = (menu.main_bounds, menu.paste_row) else {
+            return div().into_any_element();
+        };
+        self.org_menu_paste_sub(main, row, cx).into_any_element()
     }
 
     fn organize_drag_ghost(&self, cx: &mut Context<Self>) -> impl IntoElement {

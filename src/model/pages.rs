@@ -384,7 +384,8 @@ impl DocState {
     }
 
     /// 复制一页的文件与区域, 不插入. 位图会另写一份会话 PNG.
-    fn duplicate_page(src: &Page) -> Option<Page> {
+    /// 返回新页, 以及 `(旧区域 id, 新区域 id)`, 按 y 排序.
+    fn duplicate_page(src: &Page) -> Option<(Page, Vec<(String, String)>)> {
         let new_page_id = new_id();
         let stem = src
             .path
@@ -406,17 +407,20 @@ impl DocState {
         };
         let new_path = src.path.with_file_name(copy_name);
         if src.blank {
-            return Some(Page {
-                id: new_page_id,
-                path: new_path,
-                disk_path: std::path::PathBuf::new(),
-                image: None,
-                img_w: src.img_w,
-                img_h: src.img_h,
-                regions: HashMap::new(),
-                vector: None,
-                blank: true,
-            });
+            return Some((
+                Page {
+                    id: new_page_id,
+                    path: new_path,
+                    disk_path: std::path::PathBuf::new(),
+                    image: None,
+                    img_w: src.img_w,
+                    img_h: src.img_h,
+                    regions: HashMap::new(),
+                    vector: None,
+                    blank: true,
+                },
+                Vec::new(),
+            ));
         }
         let disk_path = if src.vector.is_some() {
             src.disk_path.clone()
@@ -437,8 +441,11 @@ impl DocState {
             vector: src.vector.clone(),
             blank: false,
         };
+        let mut region_map = Vec::with_capacity(ordered.len());
         for r in ordered {
+            let old_rid = r.id.clone();
             let rid = new_id();
+            region_map.push((old_rid, rid.clone()));
             page.regions.insert(
                 rid.clone(),
                 Region {
@@ -451,60 +458,13 @@ impl DocState {
                 },
             );
         }
-        Some(page)
+        Some((page, region_map))
     }
 
     pub fn copy_page_at(&mut self, index: usize) -> Option<usize> {
-        if index >= self.pages.len() {
-            return None;
-        }
-        let page = Self::duplicate_page(&self.pages[index])?;
-        let mut ordered: Vec<Region> = page.regions.values().cloned().collect();
-        ordered.sort_by_key(|r| (r.y0, r.y1));
-        let new_region_ids: Vec<String> = ordered.into_iter().map(|r| r.id).collect();
-        let src_page_id = self.pages[index].id.clone();
-        let insert_at = index + 1;
-        self.pages.insert(insert_at, page);
-
-        // 插到「原页最后一个组合」之后、「下一页组合」之前 (含手动调序时也不丢到末尾)
-        let mut insert_group_at = None;
-        for (i, g) in self.groups.iter().enumerate() {
-            let belongs_src = g.region_ids.iter().any(|rid| {
-                self.get_region(rid)
-                    .is_some_and(|r| r.page_id == src_page_id)
-            });
-            if belongs_src {
-                insert_group_at = Some(i + 1);
-            }
-        }
-        let insert_group_at = insert_group_at.unwrap_or_else(|| {
-            self.groups
-                .iter()
-                .enumerate()
-                .find(|(_, g)| self.group_sort_key(g).0 > index)
-                .map(|(i, _)| i)
-                .unwrap_or(self.groups.len())
-        });
-        for (j, rid) in new_region_ids.iter().enumerate() {
-            self.groups.insert(
-                insert_group_at + j,
-                Group {
-                    id: new_id(),
-                    region_ids: vec![rid.clone()],
-                    name: String::new(),
-                },
-            );
-        }
-        if !self.groups_manual_order {
-            self.sort_groups();
-        }
-        self.current_page_index = insert_at;
-        self.retain_memory_window();
-        self.rebuild_rid_index();
-        if self.is_spread() {
-            self.rebuild_spreads();
-        }
-        Some(insert_at)
+        let ids = self.copy_pages_beside(&[index], index, true)?;
+        let id = ids.into_iter().next()?;
+        self.pages.iter().position(|p| p.id == id)
     }
 
     /// 按 `order` 的顺序复制这些页, 紧贴插在 `anchor` 左侧 (`after == false`) 或右侧.
@@ -521,8 +481,16 @@ impl DocState {
         }
         let anchor_id = self.pages[anchor].id.clone();
         let mut copies = Vec::with_capacity(order.len());
+        let mut dups = Vec::with_capacity(order.len());
         for &i in order {
-            copies.push(Self::duplicate_page(&self.pages[i])?);
+            let src_id = self.pages[i].id.clone();
+            let (page, regions) = Self::duplicate_page(&self.pages[i])?;
+            dups.push(PageDup {
+                src_id,
+                new_id: page.id.clone(),
+                regions,
+            });
+            copies.push(page);
         }
         let new_ids: Vec<String> = copies.iter().map(|p| p.id.clone()).collect();
         let mut insert_at = self.pages.iter().position(|p| p.id == anchor_id)?;
@@ -542,6 +510,244 @@ impl DocState {
                 self.active_group_id = Some(g.id.clone());
             }
         }
+        self.adopt_copied_pages(&dups, &anchor_id, after);
         Some(new_ids)
     }
+
+    /// 新页带走原块上的修图, 谱表锚点和识别行. 谱表模式再按组合复制分块操作.
+    fn adopt_copied_pages(&mut self, copies: &[PageDup], anchor_id: &str, after: bool) {
+        for copy in copies {
+            if let Some(atoms) = self.staff_line_atoms.get(&copy.src_id).cloned() {
+                self.staff_line_atoms.insert(copy.new_id.clone(), atoms);
+            }
+            for (old_rid, new_rid) in &copy.regions {
+                if let Some(anchor) = self.region_staff_anchors.get(old_rid).cloned() {
+                    self.region_staff_anchors.insert(new_rid.clone(), anchor);
+                }
+                self.clone_region_edit_to(old_rid, new_rid, &copy.new_id);
+            }
+        }
+        if !self.is_spread() {
+            self.clone_staff_copy_groups(copies, anchor_id, after);
+        }
+    }
+
+    /// 整组都在被复制的页里时, 组合连同蒙版, 微调, 辅助线和名称一起复制.
+    /// 组里还有没被复制的页上的块时, 被复制的那些块各自单独成组, 只带走这块自己的微调和绑定蒙版.
+    fn clone_staff_copy_groups(&mut self, copies: &[PageDup], anchor_id: &str, after: bool) {
+        let mut rid_map: HashMap<String, String> = HashMap::new();
+        for copy in copies {
+            for (old_rid, new_rid) in &copy.regions {
+                rid_map.insert(old_rid.clone(), new_rid.clone());
+            }
+        }
+        let src_groups: Vec<(String, String, Vec<String>)> = self
+            .groups
+            .iter()
+            .map(|g| (g.id.clone(), g.name.clone(), g.region_ids.clone()))
+            .collect();
+        let mut placed: HashSet<String> = HashSet::new();
+        let mut pending: Vec<PendingGroup> = Vec::new();
+        for (gid, name, rids) in &src_groups {
+            let inside: Vec<String> = rids
+                .iter()
+                .filter(|rid| rid_map.contains_key(*rid))
+                .cloned()
+                .collect();
+            if inside.is_empty() {
+                continue;
+            }
+            let complete = rids.iter().all(|rid| rid_map.contains_key(rid));
+            if complete && rids.iter().all(|rid| !placed.contains(rid)) {
+                let masks = self.group_masks.get(gid).cloned().unwrap_or_default();
+                let layout = self
+                    .group_block_layout
+                    .get(gid)
+                    .cloned()
+                    .unwrap_or_default();
+                pending.push(PendingGroup {
+                    name: name.clone(),
+                    region_ids: rids
+                        .iter()
+                        .filter_map(|rid| rid_map.get(rid).cloned())
+                        .collect(),
+                    masks: mapped_masks(&masks, &rid_map, None),
+                    layout: mapped_layout(&layout, rids, &rid_map),
+                    voff: self.group_voff_shift.get(gid).copied().unwrap_or(0),
+                    guides: self.group_guides.get(gid).cloned(),
+                    guide_defaults: self.group_guide_defaults.get(gid).cloned(),
+                });
+                placed.extend(rids.iter().cloned());
+                continue;
+            }
+            for old_rid in inside {
+                if !placed.insert(old_rid.clone()) {
+                    continue;
+                }
+                let masks = self.group_masks.get(gid).cloned().unwrap_or_default();
+                let layout = self
+                    .group_block_layout
+                    .get(gid)
+                    .cloned()
+                    .unwrap_or_default();
+                let old_rids = vec![old_rid.clone()];
+                pending.push(PendingGroup {
+                    name: String::new(),
+                    region_ids: rid_map.get(&old_rid).cloned().into_iter().collect(),
+                    masks: mapped_masks(&masks, &rid_map, Some(&old_rid)),
+                    layout: mapped_layout(&layout, &old_rids, &rid_map),
+                    voff: 0,
+                    guides: None,
+                    guide_defaults: None,
+                });
+            }
+        }
+        for copy in copies {
+            for (old_rid, new_rid) in &copy.regions {
+                if !placed.insert(old_rid.clone()) {
+                    continue;
+                }
+                pending.push(PendingGroup {
+                    name: String::new(),
+                    region_ids: vec![new_rid.clone()],
+                    masks: Vec::new(),
+                    layout: Vec::new(),
+                    voff: 0,
+                    guides: None,
+                    guide_defaults: None,
+                });
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let insert_at = self.staff_copy_insert_at(anchor_id, after);
+        let mut cursor = insert_at;
+        for group in pending {
+            let gid = new_id();
+            self.groups.insert(
+                cursor,
+                Group {
+                    id: gid.clone(),
+                    region_ids: group.region_ids,
+                    name: group.name,
+                },
+            );
+            cursor += 1;
+            self.set_group_masks(&gid, group.masks);
+            self.set_block_layout(&gid, group.layout);
+            if group.voff != 0 {
+                self.set_group_voff_shift(&gid, group.voff);
+            }
+            if let Some(guides) = group.guides {
+                self.set_group_guides(&gid, guides);
+            }
+            if let Some(defaults) = group.guide_defaults {
+                self.group_guide_defaults.insert(gid, defaults);
+            }
+        }
+        if !self.groups_manual_order {
+            self.sort_groups();
+        }
+    }
+
+    fn staff_copy_insert_at(&self, anchor_id: &str, after: bool) -> usize {
+        let belongs = |g: &Group| {
+            g.region_ids
+                .iter()
+                .any(|rid| self.get_region(rid).is_some_and(|r| r.page_id == anchor_id))
+        };
+        let anchor_index = self
+            .pages
+            .iter()
+            .position(|p| p.id == anchor_id)
+            .unwrap_or(0);
+        if after {
+            let mut at = None;
+            for (i, g) in self.groups.iter().enumerate() {
+                if belongs(g) {
+                    at = Some(i + 1);
+                }
+            }
+            at.unwrap_or_else(|| {
+                self.groups
+                    .iter()
+                    .enumerate()
+                    .find(|(_, g)| self.group_sort_key(g).0 > anchor_index)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.groups.len())
+            })
+        } else {
+            self.groups.iter().position(belongs).unwrap_or_else(|| {
+                self.groups
+                    .iter()
+                    .enumerate()
+                    .find(|(_, g)| self.group_sort_key(g).0 >= anchor_index)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.groups.len())
+            })
+        }
+    }
+}
+
+struct PageDup {
+    src_id: String,
+    new_id: String,
+    regions: Vec<(String, String)>,
+}
+
+struct PendingGroup {
+    name: String,
+    region_ids: Vec<String>,
+    masks: Vec<MaskRect>,
+    layout: Vec<BlockAdjust>,
+    voff: i64,
+    guides: Option<GuideState>,
+    guide_defaults: Option<GuideState>,
+}
+
+fn mapped_masks(
+    masks: &[MaskRect],
+    rid_map: &HashMap<String, String>,
+    only_bound: Option<&str>,
+) -> Vec<MaskRect> {
+    let mut out = Vec::new();
+    for src in masks {
+        if let Some(old) = only_bound {
+            if src.bound_block.as_deref() != Some(old) {
+                continue;
+            }
+        }
+        let mut mask = src.clone();
+        mask.id = new_id();
+        if let Some(bound) = mask.bound_block.as_ref() {
+            match rid_map.get(bound) {
+                Some(next) => mask.bound_block = Some(next.clone()),
+                None => continue,
+            }
+        }
+        out.push(mask);
+    }
+    out
+}
+
+fn mapped_layout(
+    layout: &[BlockAdjust],
+    old_rids: &[String],
+    rid_map: &HashMap<String, String>,
+) -> Vec<BlockAdjust> {
+    let mut out = Vec::new();
+    for old in old_rids {
+        let Some(next) = rid_map.get(old) else {
+            continue;
+        };
+        let mut adj = layout
+            .iter()
+            .find(|a| a.region_id == *old)
+            .cloned()
+            .unwrap_or_default();
+        adj.region_id = next.clone();
+        out.push(adj);
+    }
+    out
 }

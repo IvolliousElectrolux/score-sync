@@ -97,13 +97,18 @@ impl PhotoEditApp {
                     |t, _, cx| t.request_apply(cx),
                     cx,
                 ))
-                    .child(self.action_btn(
-                        "cancel",
-                        ui_kit::menu_label(ui_kit::t("photo.cancel"), "photo.cancel"),
-                        |t, _, cx| t.request_cancel(cx),
-                        cx,
-                    ))
-                    .child(self.action_btn("rest", ui_kit::t_src("还原"), |t, _, cx| t.request_restore(cx), cx))
+                .child(self.action_btn(
+                    "cancel",
+                    ui_kit::menu_label(ui_kit::t("photo.cancel"), "photo.cancel"),
+                    |t, _, cx| t.request_cancel(cx),
+                    cx,
+                ))
+                .child(self.action_btn(
+                    "rest",
+                    ui_kit::t_src("还原"),
+                    |t, _, cx| t.request_restore(cx),
+                    cx,
+                ))
             })
             .when(!self.status.is_empty(), |d| {
                 d.child(div().flex_1()).child(
@@ -166,7 +171,8 @@ impl PhotoEditApp {
             .text_xs()
             .cursor_pointer()
             .when(on, |d| {
-                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
             .child(label.into())
@@ -350,7 +356,11 @@ impl PhotoEditApp {
                 let vis = layer.visible;
                 let name = layer.name.clone();
                 let thumb = self.layer_thumbs.get(&layer.id).map(|t| t.tex.clone());
-                let fade = if vis { layer.opacity.clamp(0.15, 1.0) } else { 0.35 };
+                let fade = if vis {
+                    layer.opacity.clamp(0.15, 1.0)
+                } else {
+                    0.35
+                };
                 let dragging = drag_from == Some(display);
                 let show_line = line_at == Some(display);
                 list = list.child(
@@ -363,8 +373,16 @@ impl PhotoEditApp {
                         .px_2()
                         .py_1()
                         .rounded_sm()
-                        .bg(if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) })
-                        .text_color(if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) })
+                        .bg(if active {
+                            ui_kit::chrome(0x2563eb)
+                        } else {
+                            ui_kit::chrome(0xe2e8f0)
+                        })
+                        .text_color(if active {
+                            rgb(0xffffff)
+                        } else {
+                            ui_kit::chrome(0x0f172a)
+                        })
                         .text_xs()
                         .cursor_pointer()
                         .flex_shrink_0()
@@ -388,7 +406,11 @@ impl PhotoEditApp {
                                 .cursor_pointer()
                                 .child(apply_bg::palette::eye_icon(
                                     vis,
-                                    if active { rgb(0xffffff) } else { ui_kit::chrome(0x334155) },
+                                    if active {
+                                        rgb(0xffffff)
+                                    } else {
+                                        ui_kit::chrome(0x334155)
+                                    },
                                 ))
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -461,10 +483,7 @@ impl PhotoEditApp {
     }
 }
 
-fn layer_thumb_slot(
-    tex: Option<std::sync::Arc<gpui::RenderImage>>,
-    fade: f32,
-) -> gpui::Div {
+fn layer_thumb_slot(tex: Option<std::sync::Arc<gpui::RenderImage>>, fade: f32) -> gpui::Div {
     let mut slot = div()
         .w(px(36.))
         .h(px(28.))
@@ -648,34 +667,32 @@ impl PhotoEditApp {
                 }
             }
             ToolMode::Wand => {
-                box_ = box_
-                    .child(self.wand_tol_slider(cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_1()
-                            .child(self.chip(
-                                "wand_contig",
-                                "连续",
-                                self.wand_contiguous,
-                                |this, _, cx| {
-                                    this.wand_contiguous = !this.wand_contiguous;
-                                    this.notify_chrome(cx);
-                                },
-                                cx,
-                            ))
-                            .child(self.chip(
-                                "wand_aa",
-                                "抗锯齿",
-                                self.wand_antialias,
-                                |this, _, cx| {
-                                    this.wand_antialias = !this.wand_antialias;
-                                    this.notify_chrome(cx);
-                                },
-                                cx,
-                            )),
-                    );
+                box_ = box_.child(self.wand_tol_slider(cx)).child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_1()
+                        .child(self.chip(
+                            "wand_contig",
+                            "连续",
+                            self.wand_contiguous,
+                            |this, _, cx| {
+                                this.wand_contiguous = !this.wand_contiguous;
+                                this.notify_chrome(cx);
+                            },
+                            cx,
+                        ))
+                        .child(self.chip(
+                            "wand_aa",
+                            "抗锯齿",
+                            self.wand_antialias,
+                            |this, _, cx| {
+                                this.wand_antialias = !this.wand_antialias;
+                                this.notify_chrome(cx);
+                            },
+                            cx,
+                        )),
+                );
             }
             _ => {}
         }
@@ -736,17 +753,12 @@ impl PhotoEditApp {
                     .cursor_pointer()
                     .hover(|s| s.border_color(ui_kit::chrome(0x334155)))
                     .child(apply_bg::palette::checkerboard(4.0))
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .bg(gpui::rgba(
-                                (u32::from(c[0]) << 24)
-                                    | (u32::from(c[1]) << 16)
-                                    | (u32::from(c[2]) << 8)
-                                    | u32::from(self.paint_alpha),
-                            )),
-                    )
+                    .child(div().absolute().inset_0().bg(gpui::rgba(
+                        (u32::from(c[0]) << 24)
+                            | (u32::from(c[1]) << 16)
+                            | (u32::from(c[2]) << 8)
+                            | u32::from(self.paint_alpha),
+                    )))
                     .child(
                         canvas(
                             {
@@ -981,12 +993,7 @@ impl PhotoEditApp {
         for kind in FilterSlider::ALL {
             col = col.child(self.filter_slider(kind, cx));
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(row)
-            .child(col)
+        div().flex().flex_col().gap_1().child(row).child(col)
     }
 
     fn filter_slider(&self, kind: FilterSlider, cx: &mut Context<Self>) -> impl IntoElement {

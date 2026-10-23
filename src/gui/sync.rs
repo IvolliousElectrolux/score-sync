@@ -1113,16 +1113,9 @@ impl ScoreSyncApp {
                 if need_detect {
                     let r = crate::page_cache::load_rgb(&path);
                     let detect = match &r {
-                        Ok(img) => {
-                            Some(crate::detect_cache::load_or_detect(
-                                img,
-                                &path,
-                                ink,
-                                margin,
-                                pack_lines,
-                                pack_mode,
-                            ))
-                        }
+                        Ok(img) => Some(crate::detect_cache::load_or_detect(
+                            img, &path, ink, margin, pack_lines, pack_mode,
+                        )),
                         Err(_) => crate::detect_cache::load(&path),
                     };
                     let display = r.map(|full| {
@@ -1318,12 +1311,7 @@ impl ScoreSyncApp {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
                         let file = crate::detect_cache::detect_and_save(
-                            &img,
-                            &path,
-                            ink,
-                            margin,
-                            pack_lines,
-                            pack_mode,
+                            &img, &path, ink, margin, pack_lines, pack_mode,
                         );
                         let _ = tx.send_blocking((idx, file));
                     }

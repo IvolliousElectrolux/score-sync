@@ -111,12 +111,7 @@ impl ScoreSyncApp {
                 match crate::page_cache::load_rgb(&path) {
                     Ok(img) => {
                         let file = crate::detect_cache::detect_and_save(
-                            &img,
-                            &path,
-                            ink,
-                            margin,
-                            pack_lines,
-                            pack_mode,
+                            &img, &path, ink, margin, pack_lines, pack_mode,
                         );
                         let _ = tx.send_blocking((idx, file));
                     }

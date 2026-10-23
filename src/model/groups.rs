@@ -409,10 +409,9 @@ impl DocState {
         let mut new_groups = Vec::new();
         for g in std::mem::take(&mut self.groups) {
             let pure = g.region_ids.len() > 1
-                && g.region_ids.iter().all(|id| {
-                    self.get_region(id)
-                        .is_some_and(|r| r.kind == "system")
-                });
+                && g.region_ids
+                    .iter()
+                    .all(|id| self.get_region(id).is_some_and(|r| r.kind == "system"));
             if !pure {
                 new_groups.push(g);
                 continue;
@@ -470,17 +469,18 @@ impl DocState {
             let Some(first) = chunk.first() else {
                 continue;
             };
-            let Some(idx) = self.groups.iter().position(|g| {
-                g.region_ids.len() == 1 && g.region_ids[0] == *first
-            }) else {
+            let Some(idx) = self
+                .groups
+                .iter()
+                .position(|g| g.region_ids.len() == 1 && g.region_ids[0] == *first)
+            else {
                 continue;
             };
             let gid = self.groups[idx].id.clone();
             self.groups[idx].region_ids = chunk.clone();
             let drop: HashSet<String> = chunk[1..].iter().cloned().collect();
             self.groups.retain(|g| {
-                g.id == gid
-                    || !(g.region_ids.len() == 1 && drop.contains(&g.region_ids[0]))
+                g.id == gid || !(g.region_ids.len() == 1 && drop.contains(&g.region_ids[0]))
             });
             self.group_masks.remove(&gid);
             self.group_block_layout.remove(&gid);

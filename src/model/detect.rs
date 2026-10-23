@@ -3,9 +3,7 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::staff_detect::{
-    detect_bands, merge_system_bands, Band, LineBand, StaffPackMode,
-};
+use crate::staff_detect::{detect_bands, merge_system_bands, Band, LineBand, StaffPackMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StaffPackApply {
@@ -17,11 +15,7 @@ pub enum StaffPackApply {
 
 impl DocState {
     pub fn detect_page(&mut self, page_idx: usize, reset_groups: bool) {
-        if self
-            .pages
-            .get(page_idx)
-            .is_some_and(|p| p.blank)
-        {
+        if self.pages.get(page_idx).is_some_and(|p| p.blank) {
             return;
         }
         if self
@@ -75,12 +69,7 @@ impl DocState {
                 y0: b.y0,
                 y1: b.y1,
                 kind: b.kind.clone(),
-                anchor: mask_tool::staff::band_staff_anchor(
-                    &full,
-                    b.y0,
-                    b.y1,
-                    self.ink_threshold,
-                ),
+                anchor: mask_tool::staff::band_staff_anchor(&full, b.y0, b.y1, self.ink_threshold),
             })
             .collect();
         self.staff_line_atoms.insert(page_id.clone(), atoms);
