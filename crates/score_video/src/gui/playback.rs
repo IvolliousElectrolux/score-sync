@@ -120,6 +120,12 @@ impl ScoreVideoApp {
                 if view.play_gen != gen || !view.audio.is_playing() {
                     return None;
                 }
+                view.audio.pump();
+                if view.audio.is_scrubbing() {
+                    let delay = view.playhead_tick_ms();
+                    cx.notify();
+                    return Some(delay);
+                }
                 let t = view.audio.current_time();
                 let end = view.timeline.timeline_end();
                 if t >= end {
@@ -351,7 +357,11 @@ impl ScoreVideoApp {
     pub fn seek(&mut self, t: f64, cx: &mut Context<Self>) {
         let t = t.clamp(0.0, self.timeline.timeline_end());
         self.timeline.playhead = t;
-        self.audio.seek(t);
+        if matches!(self.drag, Some(VideoDrag::Seek)) {
+            self.audio.preview_seek(t);
+        } else {
+            self.audio.seek(t);
+        }
         self.prefetch_preview_pages(t, cx);
         cx.notify();
     }

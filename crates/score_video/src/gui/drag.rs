@@ -233,6 +233,7 @@ impl ScoreVideoApp {
     }
 
     pub(super) fn end_left_drag(&mut self, x: f32, cx: &mut Context<Self>) {
+        let finish_scrub = matches!(self.drag, Some(VideoDrag::Seek));
         match &self.drag {
             None
             | Some(VideoDrag::PoolDrop { .. })
@@ -260,6 +261,9 @@ impl ScoreVideoApp {
             return;
         }
         self.drag = None;
+        if finish_scrub {
+            self.audio.finish_scrub();
+        }
         cx.notify();
     }
 

@@ -1,11 +1,17 @@
 //! 预览音频播放引擎: 按 `AudioClip` 顺序拼接播放, 支持跳转到任意时刻.
 //!
 //! rodio 的 `Sink` 只能从头顺序播放已 append 的音源, 不支持中途寻址; 因此每次
-//! 跳转 (播放/暂停/拖动播放头) 都重新创建 `Sink`, 定位到覆盖目标时刻的那条
-//! `AudioClip`. 1x 对 16-bit WAV (含 m4a 转出来的预览 WAV) 按采样点 `seek`,
-//! 不要用 `skip_duration` 从头解码 (长文件暂停再播会卡, 墙钟却继续走, 出声时
-//! 播放头已经往后漂). 其它格式和倍速预览走 ffmpeg, 输出 `-f wav` 再喂 rodio
-//! (裁剪 sidecar 的 configure 名是 `pcm_s16le`, 旧的 `-f s16le` 编不进去).
+//! 跳转 (播放/暂停后重新播放/松开进度条) 都重新创建 `Sink`, 定位到覆盖目标时刻
+//! 的那条 `AudioClip`. 1x 对 16-bit WAV (含 m4a 转出来的预览 WAV) 按采样点
+//! `seek`, 不要用 `skip_duration` 从头解码 (长文件暂停再播会卡, 墙钟却继续走,
+//! 出声时播放头已经往后漂). 其它格式和倍速预览走 ffmpeg, 输出 `-f wav` 再喂
+//! rodio (裁剪 sidecar 的 configure 名是 `pcm_s16le`, 旧的 `-f s16le` 编不进去).
+//!
+//! `Sink::append` 之后音频线程会立刻出声, 而墙钟要等 `restart_from` 返回才走.
+//! 若在第一次 append 之后继续同步打开后面每一段 (每段一次 ffmpeg, 十几段就要
+//! 一两秒), 这段时间里声音已经在走、计时和播放头还停着. 导出按时间轴对准文件,
+//! 预览里标的切点就会整段偏早. 所以出声前只同步打开眼前这一小段, sink 先暂停,
+//! 全部 append 完再 `play` 并启动墙钟; 更后面的段落在后台逐段准备好再排进队列.
 
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -13,6 +19,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -33,6 +40,12 @@ pub struct AudioEngine {
     base_time: f64,
     /// 预览倍速 (仅播放引擎, 不影响导出).
     speed: f32,
+    /// 进度条拖动中: 先停声并冻结墙钟, 松开再按落点重建解码.
+    scrubbing: bool,
+    /// 尚未 append 的后续片段, 按播放顺序.
+    pending: Vec<SliceJob>,
+    prep_gen: u64,
+    prep_rx: Option<Receiver<PrepMsg>>,
 }
 
 impl AudioEngine {
@@ -47,6 +60,10 @@ impl AudioEngine {
                 started_at: None,
                 base_time: 0.0,
                 speed: 1.0,
+                scrubbing: false,
+                pending: Vec::new(),
+                prep_gen: 0,
+                prep_rx: None,
             },
             Err(_) => Self {
                 _stream: None,
@@ -57,6 +74,10 @@ impl AudioEngine {
                 started_at: None,
                 base_time: 0.0,
                 speed: 1.0,
+                scrubbing: false,
+                pending: Vec::new(),
+                prep_gen: 0,
+                prep_rx: None,
             },
         }
     }
@@ -109,79 +130,282 @@ impl AudioEngine {
     pub fn pause(&mut self) {
         self.base_time = self.current_time();
         self.playing = false;
+        self.scrubbing = false;
         self.started_at = None;
-        if let Some(sink) = self.sink.take() {
-            sink.stop();
-        }
+        self.stop_output();
     }
 
-    /// 拖动播放头 (无论播放/暂停中都调用).
+    /// 拖动播放头 (播放中会立刻重建解码; 进度条拖动走 `preview_seek`).
     pub fn seek(&mut self, t: f64) {
         let t = t.max(0.0);
+        self.scrubbing = false;
         if self.playing {
             self.begin_playback_at(t);
         } else {
             self.base_time = t;
             self.started_at = None;
+            self.stop_output();
         }
     }
 
-    /// 先完成寻址再开墙钟, 避免拉起解码的时间被算进播放头.
+    pub fn is_scrubbing(&self) -> bool {
+        self.scrubbing
+    }
+
+    /// 进度条按下/拖动. 播放中先停声并冻结墙钟, 不在每次移动时重开解码.
+    pub fn preview_seek(&mut self, t: f64) {
+        let t = t.max(0.0);
+        if !self.playing {
+            self.base_time = t;
+            self.started_at = None;
+            return;
+        }
+        if !self.scrubbing {
+            self.scrubbing = true;
+            self.started_at = None;
+            self.stop_output();
+        }
+        self.base_time = t;
+    }
+
+    /// 松开进度条: 若这次拖动打断了播放, 从落点重新出声.
+    pub fn finish_scrub(&mut self) {
+        if !self.scrubbing {
+            return;
+        }
+        self.scrubbing = false;
+        if self.playing {
+            self.begin_playback_at(self.base_time);
+        }
+    }
+
+    /// 把后台准备好的下一段排进当前 sink. 播放 ticker 里调用.
+    pub fn pump(&mut self) {
+        if !self.playing || self.scrubbing {
+            return;
+        }
+        let Some(rx) = self.prep_rx.take() else {
+            return;
+        };
+        let msg = match rx.try_recv() {
+            Ok(msg) => msg,
+            Err(TryRecvError::Empty) => {
+                self.prep_rx = Some(rx);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => return,
+        };
+        if msg.gen != self.prep_gen {
+            return;
+        }
+        if self.pending.first().map(|j| j.index) != Some(msg.index) {
+            return;
+        }
+        self.pending.remove(0);
+        if let Some(src) = msg.source {
+            if let Some(sink) = &self.sink {
+                sink.append(src);
+            }
+        }
+        self.spawn_next_prep();
+    }
+
+    /// 先把要出声的源打开, 再暂停 sink, append 完立刻 play, 然后才开墙钟.
+    /// 打开解码的时间不算进播放头, 出声也不会跑在墙钟前面.
     fn begin_playback_at(&mut self, t: f64) {
         self.base_time = t.max(0.0);
         self.playing = true;
+        self.scrubbing = false;
         self.started_at = None;
         self.restart_from(self.base_time);
         self.started_at = Some(Instant::now());
     }
 
     fn restart_from(&mut self, t: f64) {
-        let Some(handle) = self.handle.as_ref() else {
-            return;
-        };
+        self.cancel_prep();
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
+        if self.handle.is_none() {
+            return;
+        }
+        let jobs = playback_slices(&self.clips, t);
+        let n = sync_prefix_len(&jobs);
+        let mut opened = Vec::with_capacity(n);
+        for job in jobs.iter().take(n) {
+            if let Some(src) = open_play_source(&job.path, job.start, job.duration, self.speed) {
+                opened.push(src);
+            }
+        }
+        self.pending = jobs.into_iter().skip(n).collect();
+        let Some(handle) = self.handle.as_ref() else {
+            return;
+        };
         let Ok(sink) = Sink::try_new(handle) else {
             return;
         };
-        let stretch = (self.speed - 1.0).abs() > 1e-3;
-        let mut cum = 0.0;
-        for clip in &self.clips {
-            let end = cum + clip.duration;
-            if end > t {
-                let local_offset = (t - cum).max(0.0);
-                let remain = (clip.duration - local_offset).max(0.0);
-                let src_t = clip.offset + local_offset;
-                if remain >= 1e-4 {
-                    // `clip.offset` 是该段在源文件里的起始时刻 (分割音频
-                    // 产生的后半段 > 0), `local_offset` 是本次寻址点相对
-                    // 这一段自己起点的偏移, 两者相加才是源文件里真正要
-                    // 跳到的位置.
-                    if stretch {
-                        if let Some(src) =
-                            open_atempo_source(&clip.path, src_t, remain, self.speed)
-                        {
-                            sink.append(src);
-                        }
-                    } else if let Some(src) = open_wav_slice(&clip.path, src_t, remain) {
-                        sink.append(src);
-                    } else if let Some(src) = open_atempo_source(&clip.path, src_t, remain, 1.0)
-                    {
-                        sink.append(src);
-                    }
-                }
-            }
-            cum = end;
+        // append 会立刻被音频线程拉取. 先暂停, 避免前面几段还在打开时
+        // 第一段已经出声, 墙钟却还停在调用方设置 `started_at` 之前.
+        sink.pause();
+        for src in opened {
+            sink.append(src);
         }
         sink.play();
         self.sink = Some(sink);
+        self.spawn_next_prep();
+    }
+
+    fn stop_output(&mut self) {
+        self.cancel_prep();
+        if let Some(sink) = self.sink.take() {
+            sink.stop();
+        }
+    }
+
+    fn cancel_prep(&mut self) {
+        self.prep_gen = self.prep_gen.wrapping_add(1);
+        self.prep_rx = None;
+        self.pending.clear();
+    }
+
+    fn spawn_next_prep(&mut self) {
+        if self.prep_rx.is_some() {
+            return;
+        }
+        let Some(job) = self.pending.first() else {
+            return;
+        };
+        let path = job.path.clone();
+        let start = job.start;
+        let duration = job.duration;
+        let index = job.index;
+        let speed = self.speed;
+        let gen = self.prep_gen;
+        let (tx, rx) = mpsc::channel();
+        self.prep_rx = Some(rx);
+        std::thread::spawn(move || {
+            let source = open_play_source(&path, start, duration, speed);
+            let _ = tx.send(PrepMsg { gen, index, source });
+        });
     }
 }
 
 impl Default for AudioEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 出声前同步打开的音频至少盖住这么久, 给下一段 ffmpeg 启动留余量.
+const SYNC_QUEUE_SECS: f64 = 1.5;
+/// 片段再短, 出声前也不要同步拉起太多路 ffmpeg.
+const SYNC_QUEUE_MAX: usize = 4;
+
+struct SliceJob {
+    index: usize,
+    path: PathBuf,
+    /// 源文件内的起点 (秒). `clip.offset + 本次寻址的段内偏移`.
+    start: f64,
+    duration: f64,
+}
+
+struct PrepMsg {
+    gen: u64,
+    index: usize,
+    source: Option<PlaySource>,
+}
+
+enum PlaySource {
+    Wav(WavSliceSource),
+    Atempo(AtempoSource),
+}
+
+impl Iterator for PlaySource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PlaySource::Wav(src) => src.next(),
+            PlaySource::Atempo(src) => src.next(),
+        }
+    }
+}
+
+impl Source for PlaySource {
+    fn current_frame_len(&self) -> Option<usize> {
+        match self {
+            PlaySource::Wav(src) => src.current_frame_len(),
+            PlaySource::Atempo(src) => src.current_frame_len(),
+        }
+    }
+
+    fn channels(&self) -> u16 {
+        match self {
+            PlaySource::Wav(src) => src.channels(),
+            PlaySource::Atempo(src) => src.channels(),
+        }
+    }
+
+    fn sample_rate(&self) -> u32 {
+        match self {
+            PlaySource::Wav(src) => src.sample_rate(),
+            PlaySource::Atempo(src) => src.sample_rate(),
+        }
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        match self {
+            PlaySource::Wav(src) => src.total_duration(),
+            PlaySource::Atempo(src) => src.total_duration(),
+        }
+    }
+}
+
+/// 从时间轴时刻 `t` 起, 后面每一段要读的源文件区间. 第一段可能从段中间开始,
+/// 其后各段从自己的 `offset` 起读完整 `duration`.
+fn playback_slices(clips: &[AudioClip], t: f64) -> Vec<SliceJob> {
+    let mut jobs = Vec::new();
+    let mut cum = 0.0;
+    for (index, clip) in clips.iter().enumerate() {
+        let end = cum + clip.duration;
+        if end > t {
+            let local_offset = (t - cum).max(0.0);
+            let remain = (clip.duration - local_offset).max(0.0);
+            if remain >= 1e-4 {
+                jobs.push(SliceJob {
+                    index,
+                    path: clip.path.clone(),
+                    start: clip.offset + local_offset,
+                    duration: remain,
+                });
+            }
+        }
+        cum = end;
+    }
+    jobs
+}
+
+fn sync_prefix_len(jobs: &[SliceJob]) -> usize {
+    let mut dur = 0.0;
+    let mut n = 0;
+    for job in jobs {
+        if n >= SYNC_QUEUE_MAX || (n > 0 && dur >= SYNC_QUEUE_SECS) {
+            break;
+        }
+        dur += job.duration;
+        n += 1;
+    }
+    n
+}
+
+fn open_play_source(path: &Path, start: f64, duration: f64, speed: f32) -> Option<PlaySource> {
+    let stretch = (speed - 1.0).abs() > 1e-3;
+    if stretch {
+        open_atempo_source(path, start, duration, speed).map(PlaySource::Atempo)
+    } else if let Some(src) = open_wav_slice(path, start, duration) {
+        Some(PlaySource::Wav(src))
+    } else {
+        open_atempo_source(path, start, duration, 1.0).map(PlaySource::Atempo)
     }
 }
 
@@ -233,19 +457,13 @@ pub fn ensure_preview_wav(src: &Path) -> Option<PathBuf> {
     std::fs::create_dir_all(out.parent()?).ok()?;
     let tmp = out.with_extension("wav.part");
     let mut cmd = Command::new(crate::export::ffmpeg_path());
-    cmd.args([
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-    ])
-    .arg(src)
-    .args(["-vn", "-map", "0:a:0", "-acodec", "pcm_s16le", "-f", "wav"])
-    .arg(&tmp)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(src)
+        .args(["-vn", "-map", "0:a:0", "-acodec", "pcm_s16le", "-f", "wav"])
+        .arg(&tmp)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -887,6 +1105,37 @@ fn parse_ffmpeg_duration(stderr: &str) -> Option<f64> {
 mod tests {
     use super::{parse_ffmpeg_duration, parse_ffmpeg_progress_seconds};
 
+    fn clip(dur: f64, offset: f64) -> crate::model::AudioClip {
+        crate::model::AudioClip {
+            id: uuid::Uuid::new_v4(),
+            path: std::path::PathBuf::from("a.flac"),
+            label: "a".into(),
+            duration: dur,
+            offset,
+        }
+    }
+
+    #[test]
+    fn long_multiclip_opens_only_the_current_file_before_the_clock() {
+        let clips: Vec<_> = (0..12).map(|_| clip(120.0, 0.0)).collect();
+        let jobs = super::playback_slices(&clips, 0.0);
+        assert_eq!(jobs.len(), 12);
+        assert_eq!(super::sync_prefix_len(&jobs), 1);
+        assert!((jobs[0].duration - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn short_tail_also_opens_the_following_clip() {
+        let clips = vec![clip(100.0, 0.0), clip(80.0, 3.5), clip(50.0, 0.0)];
+        let jobs = super::playback_slices(&clips, 99.8);
+        assert_eq!(jobs.len(), 3);
+        assert!((jobs[0].duration - 0.2).abs() < 1e-9);
+        assert!((jobs[0].start - 99.8).abs() < 1e-9);
+        assert!((jobs[1].start - 3.5).abs() < 1e-9);
+        assert!((jobs[1].duration - 80.0).abs() < 1e-9);
+        assert_eq!(super::sync_prefix_len(&jobs), 2);
+    }
+
     #[test]
     fn parse_ffmpeg_m4a_duration_line() {
         let log = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.m4a':\n  Duration: 00:03:24.56, start: 0.000000, bitrate: 256 kb/s\n";
@@ -1075,10 +1324,16 @@ mod tests {
         // 必须真的合成 mp3 再走预览管道; 编不出来就失败, 不要 silently skip.
         let mp3 = dir.join("t.mp3");
         let full_ffmpeg = [
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/ffmpeg.full.bak"),
-            std::path::PathBuf::from(r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vendor/ffmpeg.full.bak"),
+            std::path::PathBuf::from(
+                r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe",
+            ),
         ];
-        let encoder = full_ffmpeg.iter().find(|ff| ff.is_file()).expect("need full ffmpeg to encode mp3");
+        let encoder = full_ffmpeg
+            .iter()
+            .find(|ff| ff.is_file())
+            .expect("need full ffmpeg to encode mp3");
         let status = std::process::Command::new(encoder)
             .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
             .arg(&path)
@@ -1088,11 +1343,17 @@ mod tests {
             .expect("spawn full ffmpeg");
         assert!(status.success(), "libmp3lame encode failed: {encoder:?}");
         assert!(mp3.is_file(), "mp3 not written");
-        eprintln!("encoded mp3 {} bytes via {encoder:?}", mp3.metadata().unwrap().len());
+        eprintln!(
+            "encoded mp3 {} bytes via {encoder:?}",
+            mp3.metadata().unwrap().len()
+        );
         let mut src = super::open_atempo_source(&mp3, 0.0, 0.8, 1.0).expect("mp3 pipe");
         let n = src.by_ref().take(8000).count();
         eprintln!("slim ffmpeg decoded {n} pcm samples from synthesized mp3");
-        assert!(n >= 2000, "slim ffmpeg must decode synthesized mp3, got {n} samples");
+        assert!(
+            n >= 2000,
+            "slim ffmpeg must decode synthesized mp3, got {n} samples"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1157,7 +1418,10 @@ mod tests {
     #[test]
     fn user_flac_tails_are_not_truncated_to_whole_seconds() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = root.parent().and_then(|p| p.parent()).and_then(|p| p.parent());
+        let root = root
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent());
         let Some(root) = root else {
             return;
         };
