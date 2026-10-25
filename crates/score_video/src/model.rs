@@ -390,6 +390,37 @@ impl Timeline {
         Ok(())
     }
 
+    /// `insert_next` 即将用到的素材, 从播放头所在组合的下一张算起, 最多 `n` 张.
+    /// 时间轴还没有片段时, n 会插入池中第一张, 因此从池首开始.
+    pub fn upcoming_pool_ids(&self, pool: &[MaterialItem], t: f64, n: usize) -> Vec<String> {
+        if n == 0 || pool.is_empty() {
+            return Vec::new();
+        }
+        let start = if self.video_clips.is_empty() {
+            0
+        } else {
+            let gid = self
+                .covering_clip(t)
+                .map(|c| c.group_id.as_str())
+                .or_else(|| {
+                    self.video_clips
+                        .iter()
+                        .rev()
+                        .find(|c| t >= c.start)
+                        .map(|c| c.group_id.as_str())
+                });
+            match gid.and_then(|g| pool.iter().position(|m| m.group_id == g)) {
+                Some(i) => i + 1,
+                None => return Vec::new(),
+            }
+        };
+        pool.iter()
+            .skip(start)
+            .take(n)
+            .map(|m| m.group_id.clone())
+            .collect()
+    }
+
     /// 在播放头切到下一张组合, 并在翻页边界挂上默认 1 秒的左→右刷入转场.
     /// 刷入不能落在第一页之前, 也不能和已有淡入淡出叠置.
     pub fn insert_next_with_wipe(&mut self, pool: &[MaterialItem]) -> Result<(), String> {
@@ -1112,6 +1143,25 @@ mod tests {
             height: 1,
         };
         assert_eq!(item.preview_path(), PathBuf::from("pool/abc.prev.jpg"));
+    }
+
+    #[test]
+    fn upcoming_pool_ids_follow_the_page_n_would_insert() {
+        let pool = vec![item("a"), item("b"), item("c"), item("d")];
+        let tl = Timeline::new();
+        assert_eq!(tl.upcoming_pool_ids(&pool, 0.0, 2), ["a", "b"]);
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 4.0;
+        assert_eq!(tl.upcoming_pool_ids(&pool, 4.0, 2), ["b", "c"]);
+
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 7.0;
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 9.0;
+        tl.insert_next(&pool).unwrap();
+        assert!(tl.upcoming_pool_ids(&pool, tl.playhead, 2).is_empty());
     }
 
     #[test]

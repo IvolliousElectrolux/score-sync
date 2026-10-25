@@ -410,6 +410,11 @@ impl ScoreVideoApp {
         };
         let cur_group = self.timeline.covering_clip(t).map(|c| c.group_id.clone());
         let img = cur_group.as_deref().and_then(|g| self.image_for(g, cx));
+        let img = if wipe_p.is_none() {
+            img.or_else(|| self.cached_previous_page(t))
+        } else {
+            img
+        };
         let prev_img = prev_group.as_deref().and_then(|g| self.image_for(g, cx));
         let fade = self.timeline.covering_fade(t);
         let fade_alpha = fade

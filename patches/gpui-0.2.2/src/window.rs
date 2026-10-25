@@ -3750,6 +3750,9 @@ impl Window {
     }
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
+        let _key_repeat = event
+            .downcast_ref::<KeyDownEvent>()
+            .map(|ev| crate::interactive::KeyRepeatGuard::arm(ev.is_held));
         if self.invalidator.is_dirty() {
             self.draw(cx).clear();
         }

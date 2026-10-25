@@ -59,6 +59,7 @@ impl ScoreVideoApp {
                 self.expanded_pool = None;
             }
         }
+        self.prefetch_preview_pages(self.timeline.playhead, cx);
         cx.notify();
     }
 
@@ -93,6 +94,7 @@ impl ScoreVideoApp {
                 self.expanded_pool = None;
             }
         }
+        self.prefetch_preview_pages(self.timeline.playhead, cx);
         cx.notify();
     }
 
@@ -151,27 +153,53 @@ impl ScoreVideoApp {
         .detach();
     }
 
-    /// 预热当前页及左右邻页的预览贴图, 刷入开始时才解码下一页会卡一拍.
+    /// 预热当前页, 左右邻页, 以及素材池里 n 接下来会用到的两张.
+    /// 只预热轨道邻页的话, 下一张要等按下之后才开始解码, 画面会空一拍.
     pub(super) fn prefetch_preview_pages(&mut self, t: f64, cx: &mut Context<Self>) {
-        let idx = self.timeline.covering_clip_index(t).or_else(|| {
+        let mut gids = Vec::new();
+        if let Some(idx) = self.timeline.covering_clip_index(t).or_else(|| {
             self.timeline
                 .video_clips
                 .iter()
                 .rposition(|c| t >= c.start)
-        });
-        let Some(idx) = idx else {
-            return;
-        };
-        let last = self.timeline.video_clips.len().saturating_sub(1);
-        let lo = idx.saturating_sub(1);
-        let hi = (idx + 1).min(last);
-        let gids: Vec<String> = self.timeline.video_clips[lo..=hi]
-            .iter()
-            .map(|c| c.group_id.clone())
-            .collect();
+        }) {
+            let last = self.timeline.video_clips.len().saturating_sub(1);
+            let lo = idx.saturating_sub(1);
+            let hi = (idx + 1).min(last);
+            gids.extend(
+                self.timeline.video_clips[lo..=hi]
+                    .iter()
+                    .map(|c| c.group_id.clone()),
+            );
+        }
+        gids.extend(self.timeline.upcoming_pool_ids(&self.pool, t, 2));
+        let mut seen = Vec::new();
         for gid in gids {
+            if seen.iter().any(|s: &String| s == &gid) {
+                continue;
+            }
+            seen.push(gid);
+        }
+        for gid in seen {
             let _ = self.image_for(&gid, cx);
         }
+    }
+
+    /// 当前页贴图还没回来时, 先用上一页顶着, 避免按下 n 后预览闪成空底.
+    pub(super) fn cached_previous_page(&self, t: f64) -> Option<Arc<RenderImage>> {
+        let idx = self.timeline.covering_clip_index(t)?;
+        let prev = idx.checked_sub(1)?;
+        let gid = &self.timeline.video_clips[prev].group_id;
+        self.render_cache.get(gid).cloned()
+    }
+
+    /// 播放中按下标记键时, 用音频时钟覆盖 ticker 里最多一拍之前的播放头.
+    fn latch_playhead(&mut self) {
+        if !self.audio.is_playing() || self.audio.is_scrubbing() {
+            return;
+        }
+        let end = self.timeline.timeline_end();
+        self.timeline.playhead = self.audio.current_time().clamp(0.0, end);
     }
 
     /// 素材缩略图 (预览窗当前帧 / 素材池展开预览用): 命中缓存直接返回;
@@ -381,9 +409,16 @@ impl ScoreVideoApp {
     }
 
     pub fn insert_next(&mut self, cx: &mut Context<Self>) {
+        // 按住 n 时系统会连发 KeyDown. 连发不切页, 也不弹「间隔过近」.
+        if gpui::is_key_repeat() {
+            return;
+        }
+        self.latch_playhead();
         self.push_undo();
         match self.timeline.insert_next(&self.pool) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.prefetch_preview_pages(self.timeline.playhead, cx);
+            }
             Err(e) => {
                 self.undo_stack.pop();
                 self.show_error("无法插入下一张组合", e, cx);
@@ -393,6 +428,10 @@ impl ScoreVideoApp {
     }
 
     pub fn insert_next_wipe(&mut self, cx: &mut Context<Self>) {
+        if gpui::is_key_repeat() {
+            return;
+        }
+        self.latch_playhead();
         self.push_undo();
         match self.timeline.insert_next_with_wipe(&self.pool) {
             Ok(()) => {

@@ -4,8 +4,9 @@
 //! 跳转 (播放/暂停后重新播放/松开进度条) 都重新创建 `Sink`, 定位到覆盖目标时刻
 //! 的那条 `AudioClip`. 1x 对 16-bit WAV (含 m4a 转出来的预览 WAV) 按采样点
 //! `seek`, 不要用 `skip_duration` 从头解码 (长文件暂停再播会卡, 墙钟却继续走,
-//! 出声时播放头已经往后漂). 其它格式和倍速预览走 ffmpeg, 输出 `-f wav` 再喂
-//! rodio (裁剪 sidecar 的 configure 名是 `pcm_s16le`, 旧的 `-f s16le` 编不进去).
+//! 出声时播放头已经往后漂). FLAC 等不能按采样点寻址的格式, 以及倍速预览, 走
+//! ffmpeg 管道. 解码在单独的线程里往队列填, 出声回调只取已经解好的采样,
+//! 避免音频线程堵在管道读上, 墙钟照走、听到的声音却一顿一顿.
 //!
 //! `Sink::append` 之后音频线程会立刻出声, 而墙钟要等 `restart_from` 返回才走.
 //! 若在第一次 append 之后继续同步打开后面每一段 (每段一次 ffmpeg, 十几段就要
@@ -13,14 +14,16 @@
 //! 预览里标的切点就会整段偏早. 所以出声前只同步打开眼前这一小段, sink 先暂停,
 //! 全部 append 完再 `play` 并启动墙钟; 更后面的段落在后台逐段准备好再排进队列.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rodio::decoder::Mp4Type;
@@ -614,15 +617,30 @@ fn skip_to_wav_data<R: Read>(reader: &mut R) -> bool {
     }
 }
 
+/// 出声前至少备好这么多采样 (立体声交错), 大约 200ms.
+const ATEMPO_PREBUFFER: usize = 44100 * 2 / 5;
+/// 队列上限, 大约 1 秒. 满了就让解码线程等, 不把整段 PCM 堆在内存里.
+const ATEMPO_QUEUE_CAP: usize = 44100 * 2;
+
 /// 按需启动 ffmpeg atempo, 把 WAV 管道喂给 rodio (变速不变调).
 /// 必须用 `-f wav`: 裁剪 sidecar 没有 `s16le` muxer (configure 名是 `pcm_s16le`).
+///
+/// ffmpeg 在独立线程里解码. 出声回调只从队列取采样, 最多等 2ms;
+/// 管道暂时没数据时不把音频线程堵死.
 struct AtempoSource {
-    path: PathBuf,
-    start: f64,
     duration: f64,
     speed: f32,
-    child: Option<Child>,
-    stdout: Option<BufReader<ChildStdout>>,
+    pipe: Arc<AtempoPipe>,
+    local: Vec<i16>,
+    local_i: usize,
+}
+
+struct AtempoPipe {
+    queue: Mutex<VecDeque<i16>>,
+    cv: Condvar,
+    eof: AtomicBool,
+    cancel: AtomicBool,
+    child: Mutex<Option<Child>>,
 }
 
 fn open_atempo_source(path: &Path, start: f64, duration: f64, speed: f32) -> Option<AtempoSource> {
@@ -630,77 +648,154 @@ fn open_atempo_source(path: &Path, start: f64, duration: f64, speed: f32) -> Opt
     if duration < 1e-3 {
         return None;
     }
-    let mut src = AtempoSource {
-        path: decode,
-        start: start.max(0.0),
-        duration,
-        speed,
-        child: None,
-        stdout: None,
-    };
-    // 先拉起 ffmpeg 并越过 WAV 头, 失败就不要 append 空源 (否则播放头走、没声).
-    src.ensure_started().then_some(src)
-}
-
-impl AtempoSource {
-    fn ensure_started(&mut self) -> bool {
-        if self.stdout.is_some() {
-            return true;
-        }
-        let mut cmd = Command::new(crate::export::ffmpeg_path());
-        cmd.arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-ss")
-            .arg(format!("{:.6}", self.start))
-            .arg("-t")
-            .arg(format!("{:.6}", self.duration))
-            .arg("-i")
-            .arg(&self.path)
-            .arg("-vn")
-            .arg("-map")
-            .arg("0:a:0");
-        if (self.speed - 1.0).abs() > 1e-3 {
-            cmd.arg("-af").arg(atempo_filter(self.speed));
-        }
-        cmd.arg("-f")
-            .arg("wav")
-            .arg("-acodec")
-            .arg("pcm_s16le")
-            .arg("-ac")
-            .arg(ATEMPO_CH.to_string())
-            .arg("-ar")
-            .arg(ATEMPO_RATE.to_string())
-            .arg("-")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let mut stdout = match child.stdout.take() {
-            Some(s) => BufReader::new(s),
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-        };
-        if !skip_to_wav_data(&mut stdout) {
+    let start = start.max(0.0);
+    let mut cmd = Command::new(crate::export::ffmpeg_path());
+    cmd.arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-ss")
+        .arg(format!("{start:.6}"))
+        .arg("-t")
+        .arg(format!("{duration:.6}"))
+        .arg("-i")
+        .arg(&decode)
+        .arg("-vn")
+        .arg("-map")
+        .arg("0:a:0");
+    if (speed - 1.0).abs() > 1e-3 {
+        cmd.arg("-af").arg(atempo_filter(speed));
+    }
+    cmd.arg("-f")
+        .arg("wav")
+        .arg("-acodec")
+        .arg("pcm_s16le")
+        .arg("-ac")
+        .arg(ATEMPO_CH.to_string())
+        .arg("-ar")
+        .arg(ATEMPO_RATE.to_string())
+        .arg("-")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = match child.stdout.take() {
+        Some(s) => BufReader::new(s),
+        None => {
             let _ = child.kill();
             let _ = child.wait();
-            return false;
+            return None;
         }
-        self.child = Some(child);
-        self.stdout = Some(stdout);
-        true
+    };
+    // 越过 WAV 头仍在调用线程上做: 头没出来就不要 append 空源, 否则播放头走、没声.
+    if !skip_to_wav_data(&mut stdout) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let pipe = Arc::new(AtempoPipe {
+        queue: Mutex::new(VecDeque::new()),
+        cv: Condvar::new(),
+        eof: AtomicBool::new(false),
+        cancel: AtomicBool::new(false),
+        child: Mutex::new(Some(child)),
+    });
+    let reader = Arc::clone(&pipe);
+    std::thread::spawn(move || pump_atempo_pipe(stdout, reader));
+    if !wait_atempo_prebuffer(&pipe) {
+        pipe.cancel.store(true, Ordering::Relaxed);
+        reap_atempo_child(&pipe);
+        pipe.cv.notify_all();
+        return None;
+    }
+    Some(AtempoSource {
+        duration,
+        speed,
+        pipe,
+        local: Vec::new(),
+        local_i: 0,
+    })
+}
+
+fn pump_atempo_pipe(mut stdout: BufReader<ChildStdout>, pipe: Arc<AtempoPipe>) {
+    let mut buf = [0u8; 8192];
+    let mut leftover = None;
+    while !pipe.cancel.load(Ordering::Relaxed) {
+        let n = match stdout.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let mut bytes = &buf[..n];
+        let mut samples = Vec::with_capacity(n / 2 + 1);
+        if let Some(prev) = leftover.take() {
+            if let Some((&b, rest)) = bytes.split_first() {
+                samples.push(i16::from_le_bytes([prev, b]));
+                bytes = rest;
+            } else {
+                leftover = Some(prev);
+                continue;
+            }
+        }
+        let pairs = bytes.len() / 2;
+        for i in 0..pairs {
+            samples.push(i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]));
+        }
+        if bytes.len() % 2 == 1 {
+            leftover = Some(bytes[bytes.len() - 1]);
+        }
+        let mut queue = pipe.queue.lock().unwrap_or_else(|err| err.into_inner());
+        while queue.len() + samples.len() > ATEMPO_QUEUE_CAP && !pipe.cancel.load(Ordering::Relaxed)
+        {
+            queue = pipe
+                .cv
+                .wait(queue)
+                .unwrap_or_else(|err| err.into_inner());
+        }
+        if pipe.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        queue.extend(samples);
+        drop(queue);
+        pipe.cv.notify_all();
+    }
+    pipe.eof.store(true, Ordering::Relaxed);
+    pipe.cv.notify_all();
+    reap_atempo_child(&pipe);
+}
+
+fn wait_atempo_prebuffer(pipe: &AtempoPipe) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(2000);
+    let mut queue = pipe.queue.lock().unwrap_or_else(|err| err.into_inner());
+    loop {
+        if queue.len() >= ATEMPO_PREBUFFER || pipe.eof.load(Ordering::Relaxed) {
+            return !queue.is_empty() || pipe.eof.load(Ordering::Relaxed);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return !queue.is_empty();
+        }
+        let (guard, _) = pipe
+            .cv
+            .wait_timeout(queue, left.min(Duration::from_millis(50)))
+            .unwrap_or_else(|err| err.into_inner());
+        queue = guard;
+    }
+}
+
+fn reap_atempo_child(pipe: &AtempoPipe) {
+    if let Some(mut child) = pipe
+        .child
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -708,13 +803,37 @@ impl Iterator for AtempoSource {
     type Item = i16;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.ensure_started() {
-            return None;
+        if self.local_i >= self.local.len() {
+            let mut queue = self
+                .pipe
+                .queue
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if queue.is_empty() && !self.pipe.eof.load(Ordering::Relaxed) {
+                let (guard, _) = self
+                    .pipe
+                    .cv
+                    .wait_timeout(queue, Duration::from_millis(2))
+                    .unwrap_or_else(|err| err.into_inner());
+                queue = guard;
+            }
+            if queue.is_empty() {
+                if self.pipe.eof.load(Ordering::Relaxed) {
+                    return None;
+                }
+                // 解码一时没跟上: 补一个静音采样, 不把出声回调堵在管道上.
+                return Some(0);
+            }
+            let n = queue.len().min(2048);
+            self.local.clear();
+            self.local.extend(queue.drain(..n));
+            self.local_i = 0;
+            drop(queue);
+            self.pipe.cv.notify_all();
         }
-        let stdout = self.stdout.as_mut()?;
-        let mut buf = [0u8; 2];
-        stdout.read_exact(&mut buf).ok()?;
-        Some(i16::from_le_bytes(buf))
+        let sample = self.local[self.local_i];
+        self.local_i += 1;
+        Some(sample)
     }
 }
 
@@ -739,11 +858,9 @@ impl Source for AtempoSource {
 
 impl Drop for AtempoSource {
     fn drop(&mut self) {
-        self.stdout.take();
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.pipe.cancel.store(true, Ordering::Relaxed);
+        reap_atempo_child(&self.pipe);
+        self.pipe.cv.notify_all();
     }
 }
 
@@ -1355,6 +1472,108 @@ mod tests {
             "slim ffmpeg must decode synthesized mp3, got {n} samples"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// FLAC 1x 不走 WAV 寻址, 而是 ffmpeg 实时解码. 出声线程不应堵在管道上:
+    /// 预缓冲之后, 连续取 1 秒采样的每一小段都该马上返回.
+    #[test]
+    fn flac_pipe_does_not_block_after_prebuffer() {
+        let ffmpeg_ok = std::process::Command::new(crate::export::ffmpeg_path())
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ffmpeg_ok {
+            eprintln!("skip: ffmpeg missing");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sv_flac_play_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("tone.wav");
+        let flac = dir.join("tone.flac");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+            for i in 0..44100 * 3 {
+                let s = ((i as f32 * 0.02).sin() * 8000.0) as i16;
+                w.write_sample(s).unwrap();
+                w.write_sample(s).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let encoders = [
+            crate::export::ffmpeg_path(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/ffmpeg.full.bak"),
+            std::path::PathBuf::from(
+                r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe",
+            ),
+        ];
+        let mut encoded = false;
+        for encoder in &encoders {
+            if !encoder.is_file() && encoder != &crate::export::ffmpeg_path() {
+                continue;
+            }
+            let status = std::process::Command::new(encoder)
+                .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&wav)
+                .args(["-c:a", "flac"])
+                .arg(&flac)
+                .status();
+            if status.map(|s| s.success()).unwrap_or(false) && flac.is_file() {
+                encoded = true;
+                eprintln!("encoded flac via {encoder:?}");
+                break;
+            }
+        }
+        if !encoded {
+            let _ = std::fs::remove_dir_all(&dir);
+            eprintln!("skip: no flac encoder");
+            return;
+        }
+        let started = std::time::Instant::now();
+        let mut src = super::open_atempo_source(&flac, 0.5, 2.0, 1.0).expect("flac pipe");
+        let open_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut nonzero = 0usize;
+        let mut slowest_ms = 0.0f64;
+        let want = 44100 * 2;
+        let mut got = 0usize;
+        let mut ended = false;
+        while got < want && !ended {
+            let batch = (want - got).min(2048);
+            let t0 = std::time::Instant::now();
+            for _ in 0..batch {
+                match src.next() {
+                    Some(s) => {
+                        if s != 0 {
+                            nonzero += 1;
+                        }
+                        got += 1;
+                    }
+                    None => {
+                        ended = true;
+                        break;
+                    }
+                }
+            }
+            slowest_ms = slowest_ms.max(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        eprintln!(
+            "flac open {open_ms:.1} ms, read {got} samples ({nonzero} nonzero), slowest 2048-batch {slowest_ms:.2} ms"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(got >= want, "flac pipe ended early: {got}");
+        assert!(nonzero > want / 2, "flac pipe was mostly silence: {nonzero}");
+        assert!(
+            slowest_ms < 40.0,
+            "reading decoded flac blocked the consumer for {slowest_ms:.1} ms"
+        );
     }
 
     #[test]

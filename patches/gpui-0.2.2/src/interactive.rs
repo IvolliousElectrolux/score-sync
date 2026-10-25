@@ -3,7 +3,33 @@ use crate::{
     Window, point, seal::Sealed,
 };
 use smallvec::SmallVec;
+use std::cell::Cell;
 use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
+
+thread_local! {
+    static KEY_IS_REPEAT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 当前这次按键分发是不是系统连发 (按住不放之后的重复 KeyDown).
+/// 只在该次按键动作的同步回调里为真, 回调返回后即清掉.
+pub fn is_key_repeat() -> bool {
+    KEY_IS_REPEAT.with(|cell| cell.get())
+}
+
+pub(crate) struct KeyRepeatGuard;
+
+impl KeyRepeatGuard {
+    pub(crate) fn arm(is_held: bool) -> Self {
+        KEY_IS_REPEAT.with(|cell| cell.set(is_held));
+        Self
+    }
+}
+
+impl Drop for KeyRepeatGuard {
+    fn drop(&mut self) {
+        KEY_IS_REPEAT.with(|cell| cell.set(false));
+    }
+}
 
 /// An event from a platform input source.
 pub trait InputEvent: Sealed + 'static {
