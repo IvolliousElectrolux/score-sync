@@ -224,10 +224,11 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn copy_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        let shown = self.shown_page_token();
         if let Some(at) = self.doc.copy_page_at(index) {
             self.status = format!("已复制第 {} 页 → 新标签 {}", index + 1, at + 1).into();
             self.hint = self.status.clone();
-            self.refresh_render(cx);
+            self.finish_page_structure_edit(shown, cx);
         }
     }
     pub(super) fn tab_infos(&self) -> Vec<TabInfo> {

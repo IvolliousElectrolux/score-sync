@@ -1425,6 +1425,7 @@ impl ScoreSyncApp {
         from_clip: bool,
         cx: &mut Context<Self>,
     ) {
+        let shown = self.shown_page_token();
         let anchor_name = self
             .doc
             .pages
@@ -1454,9 +1455,7 @@ impl ScoreSyncApp {
         let side = if place_after { "右侧" } else { "左侧" };
         self.status = format!("{verb} {n} 页, 紧贴在「{anchor_name}」{side}.").into();
         self.hint = self.status.clone();
-        self.after_doc_change(cx);
-        self.sync_organize_after_doc(cx);
-        self.refresh_render(cx);
+        self.finish_page_structure_edit(shown, cx);
     }
 
     fn organize_menu_act(&mut self, cmd: OrgMenuCmd, cx: &mut Context<Self>) {

@@ -1253,6 +1253,7 @@ impl ScoreSyncApp {
         from_clip: bool,
         cx: &mut Context<Self>,
     ) {
+        let shown = self.shown_page_token();
         let anchor_name = self
             .doc
             .pages
@@ -1270,8 +1271,6 @@ impl ScoreSyncApp {
         self.spread_selected = new_ids;
         self.spread_anchor = self.spread_selected.last().cloned();
         self.spread_menu = None;
-        self.mark_dirty();
-        self.mark_video_pool_dirty_all();
         self.request_organize_thumbs(cx);
         let verb = if from_clip { "已粘贴" } else { "已复制" };
         let side = if place_after { "右侧" } else { "左侧" };
@@ -1281,7 +1280,7 @@ impl ScoreSyncApp {
         )
         .into();
         self.hint = self.status.clone();
-        self.refresh_render(cx);
+        self.finish_page_structure_edit(shown, cx);
     }
 
     pub(super) fn insert_spread_blank(&mut self, index: usize, cx: &mut Context<Self>) {

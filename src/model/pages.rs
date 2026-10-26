@@ -456,7 +456,8 @@ impl DocState {
             id: new_page_id.clone(),
             path: new_path,
             disk_path,
-            image: None,
+            // 显示代理和源页共用一份. 粘贴不必再解码原图才能把画面接上.
+            image: src.image.clone(),
             img_w,
             img_h,
             regions: HashMap::new(),
@@ -523,7 +524,7 @@ impl DocState {
             self.pages.insert(insert_at + j, page);
         }
         self.current_page_index = insert_at.min(self.pages.len().saturating_sub(1));
-        self.retain_memory_window();
+        self.release_outside_memory_window();
         self.rebuild_rid_index();
         if self.is_spread() {
             self.rebuild_spreads();

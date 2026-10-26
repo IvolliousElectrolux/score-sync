@@ -1051,6 +1051,25 @@ fn copy_pages_beside_in_staff_mode_adds_one_group_per_region() {
     assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{keys:?}");
 }
 
+#[test]
+fn copy_pages_beside_shares_the_loaded_image() {
+    let mut doc = DocState::new();
+    let mut page = stub_page(40);
+    let image = image::RgbImage::from_pixel(page.img_w, page.img_h, image::Rgb([255, 255, 255]));
+    page.disk_path = crate::page_cache::write_rgb_png(&image, "share-src.png").unwrap();
+    let _ = crate::page_cache::write_org_thumb(&image, &page.disk_path);
+    page.image = Some(Arc::new(image));
+    page.path = PathBuf::from("scan.png");
+    doc.pages.push(page);
+    let src_ptr = Arc::as_ptr(doc.pages[0].image.as_ref().unwrap());
+    doc.copy_pages_beside(&[0], 0, true).unwrap();
+    let copy = &doc.pages[1];
+    assert!(copy.image.as_ref().is_some_and(|img| Arc::as_ptr(img) == src_ptr));
+    assert!(doc.pages[0].image.as_ref().is_some_and(|img| Arc::as_ptr(img) == src_ptr));
+    assert!(copy.disk_path.is_file());
+    assert!(crate::page_cache::org_thumb_path(&copy.disk_path).is_file());
+}
+
 fn group_holding<'a>(doc: &'a DocState, rid: &str) -> &'a Group {
     doc.groups
         .iter()

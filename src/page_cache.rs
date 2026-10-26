@@ -361,6 +361,7 @@ pub fn write_org_thumb(rgb: &RgbImage, disk_png: &Path) -> Result<(), String> {
 }
 
 /// 复制一份会话内页图文件 (用于「复制本页」).
+/// 同一卷上先做硬链接, 不把整页 PNG 再读进界面线程. 链接失败再退回拷贝.
 pub fn duplicate_disk_png(src: &Path) -> Result<PathBuf, String> {
     let name = src
         .file_name()
@@ -370,11 +371,47 @@ pub fn duplicate_disk_png(src: &Path) -> Result<PathBuf, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("page");
-    let dest = ingest_file(src, &format!("{stem}_copy.png"))?;
+    let dest = link_or_copy_into_session(src, &format!("{stem}_copy.png"))?;
     let src_thumb = org_thumb_path(src);
     if src_thumb.is_file() {
-        let _ = std::fs::copy(&src_thumb, org_thumb_path(&dest));
+        let dest_thumb = org_thumb_path(&dest);
+        if std::fs::hard_link(&src_thumb, &dest_thumb).is_err() {
+            let _ = std::fs::copy(&src_thumb, &dest_thumb);
+        }
     }
+    Ok(dest)
+}
+
+fn link_or_copy_into_session(src: &Path, preferred_name: &str) -> Result<PathBuf, String> {
+    let dir = session_dir();
+    let safe = preferred_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let stem = Path::new(&safe)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("page");
+    let ext = Path::new(&safe)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png");
+    let mut dest = dir.join(format!("{stem}.{ext}"));
+    let mut n = 0u32;
+    while dest.exists() {
+        n += 1;
+        dest = dir.join(format!("{stem}_{n}.{ext}"));
+    }
+    if std::fs::hard_link(src, &dest).is_ok() {
+        return Ok(dest);
+    }
+    std::fs::copy(src, &dest).map_err(|e| format!("拷贝页图到会话目录失败: {e}"))?;
     Ok(dest)
 }
 
