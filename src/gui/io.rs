@@ -622,6 +622,7 @@ impl ScoreSyncApp {
                         });
                         view.spread_selected.clear();
                         view.spread_anchor = None;
+                        view.spread_seam = None;
                         view.spread_clip.clear();
                         view.organize_clip.clear();
                         view.spread_drag = None;
@@ -723,6 +724,7 @@ impl ScoreSyncApp {
         self.dialog = None;
         self.spread_selected.clear();
         self.spread_anchor = None;
+        self.spread_seam = None;
         self.spread_clip.clear();
         self.organize_clip.clear();
         self.spread_drag = None;

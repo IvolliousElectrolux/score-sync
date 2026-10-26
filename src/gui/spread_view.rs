@@ -14,6 +14,8 @@ pub(super) struct SpreadDrag {
     collapse: bool,
     line_at: Option<usize>,
     line_after: bool,
+    /// 指针在两页之间的节上. 书脊或册间竖线跟着亮.
+    seam_drop: Option<usize>,
 }
 
 pub(super) struct SpreadMenu {
@@ -418,7 +420,8 @@ impl ScoreSyncApp {
         for row in book0..book1 {
             books = books.child(self.spread_book(row, &moving, fit, suppress_pointer, cx));
         }
-        if let Some(h) = stride.and_then(|s| spread_spacer_after(visual_rows.saturating_sub(row1), s))
+        if let Some(h) =
+            stride.and_then(|s| spread_spacer_after(visual_rows.saturating_sub(row1), s))
         {
             books = books.child(
                 div()
@@ -517,7 +520,7 @@ impl ScoreSyncApp {
                         suppress_pointer,
                         cx,
                     ))
-                    .child(self.spread_spine(fit))
+                    .child(self.spread_spine(row, fit, suppress_pointer, cx))
                     .when(right < n, |d| {
                         d.child(self.spread_page_half(
                             right,
@@ -531,17 +534,59 @@ impl ScoreSyncApp {
             )
     }
 
-    fn spread_spine(&self, fit: SpreadFit) -> impl IntoElement {
+    fn spread_spine(
+        &self,
+        row: usize,
+        fit: SpreadFit,
+        suppress_pointer: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let left = row * 2;
+        let active = self.spread_seam_anchor() == Some(left)
+            || self
+                .spread_drag
+                .as_ref()
+                .is_some_and(|d| d.armed && d.seam_drop == Some(left));
+        let group = SharedString::from(format!("spread_spine_{left}"));
         div()
+            .id(SharedString::from(format!("spread_spine_{left}")))
+            .group(group.clone())
             .w(px(fit.spine_w))
             .h(px(fit.thumb_h))
             .flex_shrink_0()
             .flex()
             .flex_row()
             .bg(rgb(0xe7e5e4))
+            .when(!suppress_pointer, |d| d.cursor_pointer())
             .child(div().flex_1())
-            .child(div().w(px(2.0 * fit.scale)).h_full().bg(rgb(0xa8a29e)))
+            .child(
+                div()
+                    .w(px((if active { 3.0 } else { 2.0 }) * fit.scale))
+                    .h_full()
+                    .when(active, |d| d.bg(ui_kit::chrome(0x2563eb)))
+                    .when(!active, |d| d.bg(rgb(0xa8a29e)))
+                    .when(!active && !suppress_pointer, move |d| {
+                        d.group_hover(group, |s| s.bg(ui_kit::chrome(0x2563eb)))
+                    }),
+            )
             .child(div().flex_1())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.spread_menu = None;
+                    this.spread_pick_seam(left, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                this.spread_drag_move(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+                    this.spread_drag_up(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+                }),
+            )
     }
 
     fn spread_empty_half(&self, fit: SpreadFit) -> impl IntoElement {
@@ -601,14 +646,12 @@ impl ScoreSyncApp {
         } else {
             rgb(0xe7e5e4)
         };
-        let line_before = self
-            .spread_drag
-            .as_ref()
-            .is_some_and(|d| d.armed && d.line_at == Some(idx) && !d.line_after);
-        let line_after = self
-            .spread_drag
-            .as_ref()
-            .is_some_and(|d| d.armed && d.line_at == Some(idx) && d.line_after);
+        let line_before = self.spread_drag.as_ref().is_some_and(|d| {
+            d.armed && d.seam_drop.is_none() && d.line_at == Some(idx) && !d.line_after
+        });
+        let line_after = self.spread_drag.as_ref().is_some_and(|d| {
+            d.armed && d.seam_drop.is_none() && d.line_at == Some(idx) && d.line_after
+        });
         let entity = cx.entity().clone();
         div()
             .id(SharedString::from(format!("spread_card_{idx}")))
@@ -760,6 +803,7 @@ impl ScoreSyncApp {
                     cx.stop_propagation();
                     this.clear_tab_hover(cx);
                     this.spread_menu = None;
+                    this.spread_seam = None;
                     let ctrl = is_primary_mod(&ev.modifiers);
                     let shift = ev.modifiers.shift;
                     let already = this
@@ -790,6 +834,7 @@ impl ScoreSyncApp {
                         collapse: !ctrl && !shift,
                         line_at: None,
                         line_after: false,
+                        seam_drop: None,
                     });
                     cx.notify();
                 }),
@@ -798,6 +843,7 @@ impl ScoreSyncApp {
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
+                    this.spread_seam = None;
                     this.focus_spread_page(idx);
                     if !this
                         .doc
@@ -965,6 +1011,111 @@ impl ScoreSyncApp {
         self.spread_selected.iter().any(|x| x == id)
     }
 
+    fn spread_seam_anchor(&self) -> Option<usize> {
+        let id = self.spread_seam.as_ref()?;
+        self.doc.pages.iter().position(|p| &p.id == id)
+    }
+
+    fn spread_pick_seam(&mut self, after_idx: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.doc.pages.get(after_idx).map(|p| p.id.clone()) else {
+            return;
+        };
+        let has_next = after_idx + 1 < self.doc.pages.len();
+        self.spread_seam = Some(id);
+        self.spread_menu = None;
+        self.spread_drag = None;
+        self.status = super::page_organize::seam_picked_status(after_idx, has_next).into();
+        self.hint = self.status.clone();
+        cx.notify();
+    }
+
+    fn spread_seam_hit(
+        &self,
+        idx: usize,
+        slot: super::page_organize::SeamSlot,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        super::page_organize::seam_hit(
+            SharedString::from(format!("spread_seam_{idx}")),
+            slot,
+            active,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.spread_menu = None;
+                this.spread_pick_seam(idx, cx);
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+            this.spread_drag_move(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+                this.spread_drag_up(f32::from(ev.position.x), f32::from(ev.position.y), cx);
+            }),
+        )
+    }
+
+    /// 册与册之间的节. 一对里面的书脊单独画, 这里不重复.
+    pub(super) fn spread_seam_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.doc.is_spread() || self.page_organize.is_some() {
+            return div().into_any_element();
+        }
+        if let Some(seam) = self
+            .spread_drag
+            .as_ref()
+            .filter(|d| d.armed)
+            .and_then(|d| d.seam_drop)
+        {
+            return self.spread_drag_seam_line(seam);
+        }
+        let n = self.doc.pages.len();
+        let fit = spread_fit(self.spread_row_avail(), n.div_ceil(2));
+        let seam_at = self.spread_seam_anchor();
+        let mut nodes = Vec::new();
+        for i in (1..n.saturating_sub(1)).step_by(2) {
+            let Some(prev) = self.spread_cells.get(&i).copied() else {
+                continue;
+            };
+            let Some(next) = self.spread_cells.get(&(i + 1)).copied() else {
+                continue;
+            };
+            let Some(slot) = super::page_organize::seam_slot(prev, next, 0.0, fit.thumb_h) else {
+                continue;
+            };
+            nodes.push(
+                self.spread_seam_hit(i, slot, seam_at == Some(i), cx)
+                    .into_any_element(),
+            );
+        }
+        if let Some(idx) = seam_at {
+            if idx + 1 == n && idx % 2 == 1 {
+                if let Some(bounds) = self.spread_cells.get(&idx).copied() {
+                    let right = f32::from(bounds.origin.x) + f32::from(bounds.size.width);
+                    let slot = super::page_organize::SeamSlot {
+                        x: right + 8.0,
+                        y: f32::from(bounds.origin.y),
+                        h: fit.thumb_h,
+                        hit_w: 14.0,
+                    };
+                    nodes.push(self.spread_seam_hit(idx, slot, true, cx).into_any_element());
+                }
+            }
+        }
+        if nodes.is_empty() {
+            return div().into_any_element();
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .children(nodes)
+            .into_any_element()
+    }
+
     /// 点选顺序上的页下标. 已经不在的 id 略过.
     fn spread_selection_indices(&self) -> Vec<usize> {
         self.spread_selected
@@ -1014,6 +1165,7 @@ impl ScoreSyncApp {
             self.spread_selected.push(id.clone());
             self.spread_anchor = Some(id);
         }
+        self.spread_seam = None;
     }
 
     fn focus_spread_page(&mut self, idx: usize) {
@@ -1033,6 +1185,7 @@ impl ScoreSyncApp {
         let was_armed = drag.armed;
         let prev_line = drag.line_at;
         let prev_after = drag.line_after;
+        let prev_seam = drag.seam_drop;
         let prev_x = drag.x;
         let prev_y = drag.y;
         if !drag.armed && Self::reorder_slop_exceeded(x - drag.start_x, y - drag.start_y) {
@@ -1042,23 +1195,27 @@ impl ScoreSyncApp {
         drag.y = y;
         if drag.armed {
             match self.spread_hit_drop(drag.from, x, y) {
-                Some(SpreadDropKind::Move { anchor, after }) => {
+                Some((SpreadDropKind::Move { anchor, after }, seam)) => {
                     drag.line_at = Some(anchor);
                     drag.line_after = after;
+                    drag.seam_drop = seam;
                 }
-                Some(SpreadDropKind::Isolate { at }) => {
+                Some((SpreadDropKind::Isolate { at }, seam)) => {
                     drag.line_at = Some(at + 1);
                     drag.line_after = false;
+                    drag.seam_drop = seam;
                 }
                 None => {
                     drag.line_at = None;
                     drag.line_after = false;
+                    drag.seam_drop = None;
                 }
             }
         }
         let unchanged = drag.armed == was_armed
             && drag.line_at == prev_line
             && drag.line_after == prev_after
+            && drag.seam_drop == prev_seam
             && (drag.x - prev_x).abs() < 0.5
             && (drag.y - prev_y).abs() < 0.5;
         self.spread_drag = Some(drag);
@@ -1082,10 +1239,10 @@ impl ScoreSyncApp {
             return;
         }
         match self.spread_hit_drop(drag.from, x, y) {
-            Some(SpreadDropKind::Isolate { at }) => {
+            Some((SpreadDropKind::Isolate { at }, _)) => {
                 self.insert_spread_blank_with(at, "已在原位置补上空白页, 左页单独留下.", cx);
             }
-            Some(SpreadDropKind::Move { anchor, after }) => {
+            Some((SpreadDropKind::Move { anchor, after }, _)) => {
                 let shown = self.shown_page_token();
                 let moving = self.spread_moving(drag.from);
                 self.push_crop_undo_page_structure();
@@ -1218,10 +1375,49 @@ impl ScoreSyncApp {
             .into_any_element()
     }
 
-    fn spread_hit_drop(&self, from: usize, x: f32, y: f32) -> Option<SpreadDropKind> {
-        let (anchor, after) = self.spread_drop_at(from, x, y)?;
+    fn spread_hit_drop(
+        &self,
+        from: usize,
+        x: f32,
+        y: f32,
+    ) -> Option<(SpreadDropKind, Option<usize>)> {
+        let (anchor, after, seam) = self.spread_drop_at(from, x, y)?;
         let moving = self.spread_moving(from);
-        classify_spread_drop(self.doc.pages.len(), from, &moving, anchor, after)
+        let kind = classify_spread_drop(self.doc.pages.len(), from, &moving, anchor, after)?;
+        Some((kind, seam))
+    }
+
+    /// 一对中间的书脊自己变色. 册与册之间补一条节的竖线.
+    fn spread_drag_seam_line(&self, seam: usize) -> gpui::AnyElement {
+        if seam % 2 == 0 {
+            return div().into_any_element();
+        }
+        let n = self.doc.pages.len();
+        let fit = spread_fit(self.spread_row_avail(), n.div_ceil(2));
+        let Some(prev) = self.spread_cells.get(&seam).copied() else {
+            return div().into_any_element();
+        };
+        let Some(next) = self.spread_cells.get(&(seam + 1)).copied() else {
+            return div().into_any_element();
+        };
+        let Some(slot) = super::page_organize::seam_slot(prev, next, 0.0, fit.thumb_h) else {
+            return div().into_any_element();
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .id("spread_drag_seam")
+                    .absolute()
+                    .left(px(slot.x - 1.5))
+                    .top(px(slot.y))
+                    .w(px(3.))
+                    .h(px(slot.h))
+                    .rounded_sm()
+                    .bg(ui_kit::chrome(0x2563eb)),
+            )
+            .into_any_element()
     }
 
     fn spread_moving(&self, from: usize) -> Vec<usize> {
@@ -1240,28 +1436,37 @@ impl ScoreSyncApp {
         }
     }
 
-    fn spread_drop_at(&self, from: usize, x: f32, y: f32) -> Option<(usize, bool)> {
+    fn spread_drop_at(&self, from: usize, x: f32, y: f32) -> Option<(usize, bool, Option<usize>)> {
         let n = self.doc.pages.len();
         let moving: HashSet<usize> = self.spread_moving(from).into_iter().collect();
+        let mut on_page = false;
         for i in 0..n {
+            let Some(b) = self.spread_cells.get(&i).copied() else {
+                continue;
+            };
+            if !super::page_organize::point_in_cell(b, x, y) {
+                continue;
+            }
+            on_page = true;
             if moving.contains(&i) {
                 continue;
             }
-            let b = self.spread_cells.get(&i)?;
             let left = f32::from(b.origin.x);
-            let top = f32::from(b.origin.y);
             let right = left + f32::from(b.size.width);
-            let bottom = top + f32::from(b.size.height);
-            if x >= left && x <= right && y >= top && y <= bottom {
-                let after = x >= (left + right) * 0.5;
-                return Some((i, after));
-            }
+            let after = x >= (left + right) * 0.5;
+            return Some((i, after, None));
         }
-        None
+        if on_page {
+            return None;
+        }
+        let seam = super::page_organize::drag_seam_at(&self.spread_cells, n, x, y)?;
+        let (anchor, after) = super::page_organize::seam_drop_anchor(seam, &moving, n)?;
+        Some((anchor, after, Some(seam)))
     }
 
     pub(super) fn select_all_spread_pages(&mut self, cx: &mut Context<Self>) {
         self.spread_selected = self.doc.pages.iter().map(|p| p.id.clone()).collect();
+        self.spread_seam = None;
         if self.spread_anchor.is_none() {
             self.spread_anchor = self.doc.pages.first().map(|p| p.id.clone());
         }
@@ -1314,8 +1519,11 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
-        let after = *order.last().unwrap();
-        self.insert_spread_copies(&order, after, true, false, cx);
+        let (after, from_seam) = self
+            .spread_seam_anchor()
+            .map(|i| (i, true))
+            .unwrap_or_else(|| (*order.last().unwrap(), false));
+        self.insert_spread_copies(&order, after, true, false, from_seam, cx);
     }
 
     pub(super) fn copy_spread_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -1335,7 +1543,7 @@ impl ScoreSyncApp {
             .collect();
         self.spread_menu = None;
         self.status = format!(
-            "已复制 {} 页. {}V 贴到当时选中页的右侧.",
+            "已复制 {} 页. 选中页间的节后 {}V 贴在两页中间, 否则贴到当时选中页的右侧.",
             order.len(),
             apply_bg::primary_mod()
         )
@@ -1365,14 +1573,18 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        if let Some(after) = self.spread_seam_anchor() {
+            self.insert_spread_copies(&order, after, true, true, true, cx);
+            return;
+        }
         let sel = self.spread_selection_indices();
         let Some(&after) = sel.last() else {
-            self.status = "请先选中要贴在其右侧的页面.".into();
+            self.status = "请先选中页面, 或点两页之间的节.".into();
             self.hint = self.status.clone();
             cx.notify();
             return;
         };
-        self.insert_spread_copies(&order, after, true, true, cx);
+        self.insert_spread_copies(&order, after, true, true, false, cx);
     }
 
     fn insert_spread_copies(
@@ -1381,6 +1593,7 @@ impl ScoreSyncApp {
         anchor: usize,
         place_after: bool,
         from_clip: bool,
+        from_seam: bool,
         cx: &mut Context<Self>,
     ) {
         let shown = self.shown_page_token();
@@ -1390,6 +1603,7 @@ impl ScoreSyncApp {
             .get(anchor)
             .map(|p| p.spread_caption().0)
             .unwrap_or_else(|| "这一页".into());
+        let right_name = self.doc.pages.get(anchor + 1).map(|p| p.spread_caption().0);
         self.push_crop_undo_page_structure();
         let Some(new_ids) = self.doc.copy_pages_beside(order, anchor, place_after) else {
             self.page_struct_history.undo.pop();
@@ -1398,17 +1612,24 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         };
+        self.spread_seam = if from_seam {
+            new_ids.last().cloned()
+        } else {
+            None
+        };
         self.spread_selected = new_ids;
         self.spread_anchor = self.spread_selected.last().cloned();
         self.spread_menu = None;
         self.request_organize_thumbs(cx);
         let verb = if from_clip { "已粘贴" } else { "已复制" };
-        let side = if place_after { "右侧" } else { "左侧" };
-        self.status = format!(
-            "{verb} {} 页, 紧贴在「{anchor_name}」{side}.",
-            self.spread_selected.len()
-        )
-        .into();
+        let n = self.spread_selected.len();
+        self.status = if from_seam {
+            super::page_organize::seam_inserted_status(verb, n, &anchor_name, right_name.as_deref())
+                .into()
+        } else {
+            let side = if place_after { "右侧" } else { "左侧" };
+            format!("{verb} {n} 页, 紧贴在「{anchor_name}」{side}.").into()
+        };
         self.hint = self.status.clone();
         self.finish_page_structure_edit(shown, cx);
     }
@@ -1422,6 +1643,13 @@ impl ScoreSyncApp {
             self.doc.pages.iter().map(|p| p.id.as_str()).collect();
         self.spread_selected.retain(|id| live.contains(id.as_str()));
         self.spread_clip.retain(|id| live.contains(id.as_str()));
+        if self
+            .spread_seam
+            .as_ref()
+            .is_some_and(|id| !live.contains(id.as_str()))
+        {
+            self.spread_seam = None;
+        }
         if self
             .spread_anchor
             .as_ref()
@@ -1479,6 +1707,7 @@ impl ScoreSyncApp {
         self.spread_drag = None;
         self.spread_selected.clear();
         self.spread_anchor = None;
+        self.spread_seam = None;
         self.spread_clip.clear();
         if to_spread {
             self.doc.enter_spread();
@@ -1734,7 +1963,7 @@ impl ScoreSyncApp {
         if anchor >= self.doc.pages.len() {
             return;
         }
-        self.insert_spread_copies(&order, anchor, after, true, cx);
+        self.insert_spread_copies(&order, anchor, after, true, false, cx);
     }
 
     fn spread_menu_leaf(
@@ -1928,9 +2157,15 @@ mod tests {
     fn spread_spacers_fill_the_rows_they_replace() {
         let stride = 180.0;
         assert_eq!(spread_spacer_before(0, stride), None);
-        assert_eq!(spread_spacer_before(2, stride), Some(2.0 * stride - SPREAD_BOOK_GAP));
+        assert_eq!(
+            spread_spacer_before(2, stride),
+            Some(2.0 * stride - SPREAD_BOOK_GAP)
+        );
         assert_eq!(spread_spacer_after(0, stride), None);
-        assert_eq!(spread_spacer_after(3, stride), Some(3.0 * stride - SPREAD_BOOK_GAP));
+        assert_eq!(
+            spread_spacer_after(3, stride),
+            Some(3.0 * stride - SPREAD_BOOK_GAP)
+        );
     }
 
     #[test]

@@ -94,10 +94,10 @@ pub(crate) use apply_bg::text_input::TextInput;
 pub(crate) use gpui::prelude::*;
 pub(crate) use gpui::{
     canvas, div, point, px, quad, rgb, size, App, Application, Bounds, Context, CursorStyle,
-    DispatchPhase, DisplayId, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
+    DispatchPhase, DisplayId, Div, Entity, ExternalPaths, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
 };
 pub(crate) use mask_tool::gui::MaskToolApp;
 pub(crate) use mask_tool::mask::MaskRect;
@@ -255,6 +255,8 @@ pub(crate) struct ScoreSyncApp {
     spread_anchor: Option<String>,
     /// Ctrl+C 记下的页 id, 仍是点选顺序. Ctrl+V 再贴.
     spread_clip: Vec<String>,
+    /// 对开里选中的节: 插在这一页后面.
+    spread_seam: Option<String>,
     /// 组织页面里 Ctrl+C 记下的页 id, 点选顺序.
     organize_clip: Vec<String>,
     spread_drag: Option<spread_view::SpreadDrag>,
@@ -349,11 +351,11 @@ impl ScoreSyncApp {
         let pdf_h_input = cx.new(|cx| TextInput::new(cx, "", "高").with_compact(true));
         let pdf_scale_input = cx.new(|cx| TextInput::new(cx, "", "倍率").with_compact(true));
         let pdf_preview_page_input = cx.new(|cx| TextInput::new(cx, "1", "页").with_compact(true));
-        let settings_key_query = cx.new(|cx| {
-            TextInput::new(cx, "", ui_kit::t("settings.search_keys"))
-        });
+        let settings_key_query =
+            cx.new(|cx| TextInput::new(cx, "", ui_kit::t("settings.search_keys")));
         let settings_key_query_sub = cx.observe(&settings_key_query, |this, input, cx| {
-            let (focused, text) = input.update(cx, |input, _| (input.take_focus_commit(), input.text()));
+            let (focused, text) =
+                input.update(cx, |input, _| (input.take_focus_commit(), input.text()));
             if focused {
                 this.end_key_search(cx);
             }
@@ -541,6 +543,7 @@ impl ScoreSyncApp {
             spread_selected: Vec::new(),
             spread_anchor: None,
             spread_clip: Vec::new(),
+            spread_seam: None,
             organize_clip: Vec::new(),
             spread_drag: None,
             spread_menu: None,
@@ -1384,6 +1387,7 @@ impl Render for ScoreSyncApp {
             )
             .child(self.dialog_overlay(window, cx))
             .child(self.tab_context_menu_overlay(cx))
+            .child(self.spread_seam_overlay(cx))
             .child(self.spread_menu_overlay(cx))
             .child(self.guide_context_menu_overlay(cx))
             .child(self.tab_tooltip_overlay(cx))

@@ -10,6 +10,8 @@ pub(super) struct OrganizeDrag {
     from: usize,
     line_at: Option<usize>,
     line_after: bool,
+    /// 指针在两页之间的节上, 不在某一页里. 高亮用节的竖线.
+    seam_drop: Option<usize>,
     start_x: f32,
     start_y: f32,
     origin_x: f32,
@@ -45,6 +47,8 @@ enum OrgMenuCmd {
 pub(super) struct PageOrganizeState {
     /// 点选顺序. 复制时按这个顺序收成一串, 不按页序.
     selected: Vec<String>,
+    /// 选中的节: 插在这一页后面, 也就是它和后一页的中间.
+    seam: Option<String>,
     anchor: Option<String>,
     cell_bounds: HashMap<usize, Bounds<Pixels>>,
     drag: Option<OrganizeDrag>,
@@ -181,6 +185,179 @@ fn truncate_name(name: &str, max_chars: usize) -> SharedString {
     format!("{s}…").into()
 }
 
+/// 两页之间那一节的落点. `x` 是竖线中心.
+#[derive(Clone, Copy)]
+pub(super) struct SeamSlot {
+    pub x: f32,
+    pub y: f32,
+    pub h: f32,
+    pub hit_w: f32,
+}
+
+/// 同一行时线在间隙正中; 折到下一行时贴在后一页左缘外侧.
+/// `line_h <= 1` 时竖线跟较高的那一格一样高.
+pub(super) fn seam_slot(
+    prev: Bounds<Pixels>,
+    next: Bounds<Pixels>,
+    y_inset: f32,
+    line_h: f32,
+) -> Option<SeamSlot> {
+    let top = f32::from(prev.origin.y);
+    let prev_right = f32::from(prev.origin.x) + f32::from(prev.size.width);
+    let next_left = f32::from(next.origin.x);
+    let next_top = f32::from(next.origin.y);
+    let h = if line_h > 1.0 {
+        line_h
+    } else {
+        f32::from(prev.size.height).max(f32::from(next.size.height))
+    };
+    let same_row = (top - next_top).abs() < 8.0 && next_left + 1.0 >= prev_right - 1.0;
+    if same_row {
+        let gap = (next_left - prev_right).max(0.0);
+        let hit = if gap >= 8.0 { gap.min(36.0) } else { 14.0 };
+        return Some(SeamSlot {
+            x: (prev_right + next_left) * 0.5,
+            y: top + y_inset,
+            h,
+            hit_w: hit,
+        });
+    }
+    if next_top > top + 24.0 {
+        let hit = 14.0;
+        return Some(SeamSlot {
+            x: next_left - hit * 0.5,
+            y: next_top + y_inset,
+            h,
+            hit_w: hit,
+        });
+    }
+    None
+}
+
+pub(super) fn point_in_cell(bounds: Bounds<Pixels>, x: f32, y: f32) -> bool {
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    x >= left
+        && x <= left + f32::from(bounds.size.width)
+        && y >= top
+        && y <= top + f32::from(bounds.size.height)
+}
+
+/// 拖动时指针不在页面上, 落在哪一条节里. 返回左边那一页的下标.
+pub(super) fn drag_seam_at(
+    bounds: &HashMap<usize, Bounds<Pixels>>,
+    n: usize,
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    for i in 0..n.saturating_sub(1) {
+        let (Some(prev), Some(next)) = (bounds.get(&i).copied(), bounds.get(&(i + 1)).copied())
+        else {
+            continue;
+        };
+        if drag_in_seam(prev, next, x, y) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// 节在 `left` 与下一页之间. 被拖走的那一侧不能当锚点.
+pub(super) fn seam_drop_anchor(
+    left: usize,
+    moving: &HashSet<usize>,
+    n: usize,
+) -> Option<(usize, bool)> {
+    if left + 1 >= n {
+        return None;
+    }
+    if !moving.contains(&left) {
+        Some((left, true))
+    } else if !moving.contains(&(left + 1)) {
+        Some((left + 1, false))
+    } else {
+        None
+    }
+}
+
+fn drag_in_seam(prev: Bounds<Pixels>, next: Bounds<Pixels>, x: f32, y: f32) -> bool {
+    let top = f32::from(prev.origin.y);
+    let prev_right = f32::from(prev.origin.x) + f32::from(prev.size.width);
+    let prev_bottom = top + f32::from(prev.size.height);
+    let next_left = f32::from(next.origin.x);
+    let next_top = f32::from(next.origin.y);
+    let next_bottom = next_top + f32::from(next.size.height);
+    let same_row = (top - next_top).abs() < 8.0 && next_left + 1.0 >= prev_right - 1.0;
+    if same_row {
+        let y0 = top.min(next_top);
+        let y1 = prev_bottom.max(next_bottom);
+        return x > prev_right - 1.0 && x < next_left + 1.0 && y >= y0 && y <= y1;
+    }
+    if next_top > top + 24.0 {
+        let gutter = 20.0;
+        let beside_next =
+            x >= next_left - gutter && x <= next_left + 1.0 && y >= next_top && y <= next_bottom;
+        let beside_prev =
+            x >= prev_right - 1.0 && x <= prev_right + gutter && y >= top && y <= prev_bottom;
+        return beside_next || beside_prev;
+    }
+    false
+}
+
+/// 节的热区. 线平时不画, 悬停或已选中才出现.
+pub(super) fn seam_hit(id: SharedString, slot: SeamSlot, active: bool) -> Stateful<Div> {
+    let group = id.clone();
+    div()
+        .id(id)
+        .group(group.clone())
+        .absolute()
+        .left(px(slot.x - slot.hit_w * 0.5))
+        .top(px(slot.y))
+        .w(px(slot.hit_w))
+        .h(px(slot.h))
+        .flex()
+        .flex_row()
+        .justify_center()
+        .cursor_pointer()
+        .child(
+            div()
+                .w(px(if active { 3.0 } else { 2.0 }))
+                .h_full()
+                .rounded_sm()
+                .when(active, |s| s.bg(ui_kit::chrome(0x2563eb)))
+                .when(!active, move |s| {
+                    s.group_hover(group, |st| st.bg(ui_kit::chrome(0x2563eb)))
+                }),
+        )
+}
+
+pub(super) fn seam_picked_status(after_idx: usize, has_next: bool) -> String {
+    if has_next {
+        format!(
+            "已选中第 {} 页与第 {} 页之间. 复制和粘贴会插在这里.",
+            after_idx + 1,
+            after_idx + 2
+        )
+    } else {
+        format!(
+            "已选中第 {} 页右侧. 复制和粘贴会接在这一页后面.",
+            after_idx + 1
+        )
+    }
+}
+
+pub(super) fn seam_inserted_status(
+    verb: &str,
+    n: usize,
+    left: &str,
+    right: Option<&str>,
+) -> String {
+    match right {
+        Some(right) => format!("{verb} {n} 页, 插在「{left}」和「{right}」之间."),
+        None => format!("{verb} {n} 页, 接在「{left}」右侧."),
+    }
+}
+
 fn org_menu_width(labels: &[&str], arrow: bool) -> f32 {
     const EM: f32 = 14.0;
     let text = labels
@@ -246,6 +423,7 @@ impl ScoreSyncApp {
         self.page_organize_scroll.set_offset(point(px(0.), px(0.)));
         self.page_organize = Some(PageOrganizeState {
             selected,
+            seam: None,
             anchor: cur,
             cell_bounds: HashMap::new(),
             drag: None,
@@ -254,7 +432,7 @@ impl ScoreSyncApp {
         });
         self.focus_handle.focus(window);
         self.status = format!(
-            "组织页面: 拖动排序, {}点击多选 / Shift 连选, {}C 复制, {}V 粘贴, Delete 删除.",
+            "组织页面: 拖动排序, {}点击多选 / Shift 连选, 悬停页间可选节, {}C 复制, {}V 粘贴, Delete 删除.",
             apply_bg::primary_mod(),
             apply_bg::primary_mod(),
             apply_bg::primary_mod()
@@ -307,6 +485,7 @@ impl ScoreSyncApp {
         let ids: Vec<String> = self.doc.pages.iter().map(|p| p.id.clone()).collect();
         if let Some(st) = self.page_organize.as_mut() {
             st.selected = ids;
+            st.seam = None;
             st.menu = None;
             if st.anchor.is_none() {
                 st.anchor = self.doc.current_page().map(|p| p.id.clone());
@@ -390,6 +569,9 @@ impl ScoreSyncApp {
         let fallback = self.doc.current_page().map(|p| p.id.clone());
         if let Some(st) = self.page_organize.as_mut() {
             st.selected.retain(|id| live.contains(id));
+            if st.seam.as_ref().is_some_and(|id| !live.contains(id)) {
+                st.seam = None;
+            }
             if st.selected.is_empty() {
                 if let Some(id) = fallback.clone() {
                     st.selected.push(id.clone());
@@ -584,6 +766,7 @@ impl ScoreSyncApp {
         let Some(st) = self.page_organize.as_mut() else {
             return;
         };
+        st.seam = None;
         let has = |selected: &[String], id: &str| selected.iter().any(|x| x == id);
         if shift {
             let anchor_idx = st
@@ -628,23 +811,26 @@ impl ScoreSyncApp {
         let was_armed = drag.armed;
         let prev_line = drag.line_at;
         let prev_after = drag.line_after;
+        let prev_seam = drag.seam_drop;
         let prev_x = drag.x;
         let prev_y = drag.y;
         if !drag.armed && Self::reorder_slop_exceeded(x - drag.start_x, y - drag.start_y) {
             drag.armed = true;
         }
-        let (line_at, line_after) = if drag.armed {
+        let (line_at, line_after, seam_drop) = if drag.armed {
             self.resolve_organize_drop(drag.from, x, y)
         } else {
-            (None, false)
+            (None, false, None)
         };
         drag.line_at = line_at;
         drag.line_after = line_after;
+        drag.seam_drop = seam_drop;
         drag.x = x;
         drag.y = y;
         let unchanged = drag.armed == was_armed
             && drag.line_at == prev_line
             && drag.line_after == prev_after
+            && drag.seam_drop == prev_seam
             && (drag.x - prev_x).abs() < 0.5
             && (drag.y - prev_y).abs() < 0.5;
         if let Some(st) = self.page_organize.as_mut() {
@@ -655,43 +841,53 @@ impl ScoreSyncApp {
         }
     }
 
-    fn resolve_organize_drop(&self, from: usize, x: f32, y: f32) -> (Option<usize>, bool) {
+    fn resolve_organize_drop(
+        &self,
+        from: usize,
+        x: f32,
+        y: f32,
+    ) -> (Option<usize>, bool, Option<usize>) {
         let Some(st) = self.page_organize.as_ref() else {
-            return (None, false);
+            return (None, false, None);
         };
         let n = self.doc.pages.len();
         if n == 0 {
-            return (None, false);
+            return (None, false, None);
         }
         let moving: HashSet<usize> = self.organize_moving(from).into_iter().collect();
         let mut last_bottom: Option<f32> = None;
         for i in 0..n {
-            let Some(b) = st.cell_bounds.get(&i) else {
+            let Some(b) = st.cell_bounds.get(&i).copied() else {
                 continue;
             };
-            let left = f32::from(b.origin.x);
-            let top = f32::from(b.origin.y);
-            let right = left + f32::from(b.size.width);
-            let bottom = top + f32::from(b.size.height);
+            let bottom = f32::from(b.origin.y) + f32::from(b.size.height);
             last_bottom = Some(bottom);
-            if x < left || x > right || y < top || y > bottom {
+            if !point_in_cell(b, x, y) {
                 continue;
             }
             if moving.contains(&i) {
-                return (None, false);
+                return (None, false, None);
             }
+            let left = f32::from(b.origin.x);
+            let right = left + f32::from(b.size.width);
             let after = x >= (left + right) * 0.5;
-            return (Some(i), after);
+            return (Some(i), after, None);
+        }
+        if let Some(seam) = drag_seam_at(&st.cell_bounds, n, x, y) {
+            if let Some((anchor, after)) = seam_drop_anchor(seam, &moving, n) {
+                return (Some(anchor), after, Some(seam));
+            }
         }
         // 只有最后一页真的在画面里, 才把「格子下面」当成拖到末尾.
         // 虚拟化之后, 视口底端的格子不一定是最后一页.
-        if last_bottom.is_some_and(|bottom| y > bottom + 8.0) && st.cell_bounds.contains_key(&(n - 1))
+        if last_bottom.is_some_and(|bottom| y > bottom + 8.0)
+            && st.cell_bounds.contains_key(&(n - 1))
         {
             if let Some(anchor) = (0..n).rev().find(|j| !moving.contains(j)) {
-                return (Some(anchor), true);
+                return (Some(anchor), true, None);
             }
         }
-        (None, false)
+        (None, false, None)
     }
 
     fn finish_organize_drag(&mut self, cx: &mut Context<Self>) {
@@ -733,6 +929,7 @@ impl ScoreSyncApp {
             }
             st.drag = None;
             st.menu = None;
+            st.seam = None;
             st.selected.clear();
         }
         cx.notify();
@@ -764,15 +961,16 @@ impl ScoreSyncApp {
         };
         let n = self.doc.pages.len();
         let n_sel = st.selected.len();
+        let seam_on = st.seam.is_some();
         let drag_armed = st.drag.as_ref().is_some_and(|d| d.armed);
         let show_org_paste_sub = st
             .menu
             .as_ref()
             .is_some_and(|m| m.fly && m.main_bounds.is_some() && m.paste_row.is_some());
         let drag_from = st.drag.as_ref().and_then(|d| d.armed.then_some(d.from));
-        let (line_at, line_after) = match &st.drag {
-            Some(d) if d.armed => (d.line_at, d.line_after),
-            _ => (None, false),
+        let (line_at, line_after, seam_drop) = match &st.drag {
+            Some(d) if d.armed => (d.line_at, d.line_after, d.seam_drop),
+            _ => (None, false, None),
         };
         let moving: HashSet<usize> = drag_from
             .map(|from| self.organize_moving(from).into_iter().collect())
@@ -786,7 +984,7 @@ impl ScoreSyncApp {
             0.0
         };
         let suppress_hover = st.drag.is_some();
-        let drop_line = if drag_armed {
+        let drop_line = if drag_armed && seam_drop.is_none() {
             line_at.and_then(|i| {
                 let b = st.cell_bounds.get(&i)?;
                 let left = f32::from(b.origin.x);
@@ -885,13 +1083,7 @@ impl ScoreSyncApp {
             );
         }
         if let Some(h) = stride.and_then(|s| org_spacer_before(row0, s)) {
-            tiles = tiles.child(
-                div()
-                    .id("org_pad_before")
-                    .w_full()
-                    .h(px(h))
-                    .flex_shrink_0(),
-            );
+            tiles = tiles.child(div().id("org_pad_before").w_full().h(px(h)).flex_shrink_0());
         }
         for (idx, _pid, caption, selected, is_current, thumb) in cells {
             let dragging = moving.contains(&idx);
@@ -1049,6 +1241,7 @@ impl ScoreSyncApp {
                             }
                             if let Some(st) = this.page_organize.as_mut() {
                                 st.menu = None;
+                                st.seam = None;
                             }
                             let mx = f32::from(ev.position.x);
                             let my = f32::from(ev.position.y);
@@ -1064,6 +1257,7 @@ impl ScoreSyncApp {
                                     from: idx,
                                     line_at: None,
                                     line_after: false,
+                                    seam_drop: None,
                                     start_x: mx,
                                     start_y: my,
                                     origin_x: ox,
@@ -1092,6 +1286,7 @@ impl ScoreSyncApp {
                             }
                             if let Some(st) = this.page_organize.as_mut() {
                                 st.drag = None;
+                                st.seam = None;
                                 st.menu = Some(OrganizeMenu {
                                     page_index: idx,
                                     x: f32::from(ev.position.x),
@@ -1107,25 +1302,42 @@ impl ScoreSyncApp {
             );
         }
         if let Some(h) = stride.and_then(|s| org_spacer_after(rows.saturating_sub(row1), s)) {
-            tiles = tiles.child(
-                div()
-                    .id("org_pad_after")
-                    .w_full()
-                    .h(px(h))
-                    .flex_shrink_0(),
-            );
+            tiles = tiles.child(div().id("org_pad_after").w_full().h(px(h)).flex_shrink_0());
         }
 
-        let header = if n_sel > 0 {
-            format!("组织页面  ·  共 {n} 页  ·  已选 {n_sel}")
-        } else {
-            format!("组织页面  ·  共 {n} 页")
+        let header = match (n_sel > 0, seam_on) {
+            (true, true) => format!("组织页面  ·  共 {n} 页  ·  已选 {n_sel}  ·  已选节"),
+            (true, false) => format!("组织页面  ·  共 {n} 页  ·  已选 {n_sel}"),
+            (false, true) => format!("组织页面  ·  共 {n} 页  ·  已选节"),
+            (false, false) => format!("组织页面  ·  共 {n} 页"),
         };
         let hint = format!(
-            "拖动排序 · {}点击多选 · Shift 连选 · {}C/V 复制粘贴 · 右键可贴到左右 · Delete 删除 · 双击跳转",
+            "拖动排序 · {}点击多选 · Shift 连选 · 悬停页间可选节 · {}C/V 复制粘贴 · 右键可贴到左右 · Delete 删除 · 双击跳转",
             apply_bg::primary_mod(),
             apply_bg::primary_mod()
         );
+        let seam_nodes: Vec<_> = if drag_armed {
+            Vec::new()
+        } else {
+            let bounds = self
+                .page_organize
+                .as_ref()
+                .map(|s| s.cell_bounds.clone())
+                .unwrap_or_default();
+            let seam_id = self.page_organize.as_ref().and_then(|s| s.seam.clone());
+            (0..n.saturating_sub(1))
+                .filter_map(|i| {
+                    let prev = bounds.get(&i).copied()?;
+                    let next = bounds.get(&(i + 1)).copied()?;
+                    let slot = seam_slot(prev, next, 0.0, 0.0)?;
+                    let active = seam_id.as_deref() == self.doc.pages.get(i).map(|p| p.id.as_str());
+                    Some(
+                        self.organize_seam_hit(i, slot, active, cx)
+                            .into_any_element(),
+                    )
+                })
+                .collect()
+        };
         let ghost = self.organize_drag_ghost(cx);
 
         div()
@@ -1301,12 +1513,88 @@ impl ScoreSyncApp {
                         .bg(ui_kit::chrome(0xf59e0b)),
                 )
             })
+            .when_some(seam_drop, |d, seam| {
+                let line = self.page_organize.as_ref().and_then(|st| {
+                    let prev = st.cell_bounds.get(&seam).copied()?;
+                    let next = st.cell_bounds.get(&(seam + 1)).copied()?;
+                    seam_slot(prev, next, 0.0, 0.0)
+                });
+                d.when_some(line, |d, slot| {
+                    d.child(
+                        div()
+                            .id("org_drag_seam")
+                            .absolute()
+                            .left(px(slot.x - 1.5))
+                            .top(px(slot.y))
+                            .w(px(3.))
+                            .h(px(slot.h))
+                            .rounded_sm()
+                            .bg(ui_kit::chrome(0x2563eb)),
+                    )
+                })
+            })
             .when(drag_armed, |d| d.child(ghost))
+            .children(seam_nodes)
             .child(self.organize_menu_overlay(cx))
             .when(show_org_paste_sub, |d| {
                 d.child(self.org_menu_paste_sub_overlay(cx))
             })
             .into_any_element()
+    }
+
+    fn organize_seam_hit(
+        &self,
+        idx: usize,
+        slot: SeamSlot,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        seam_hit(SharedString::from(format!("org_seam_{idx}")), slot, active)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.organize_pick_seam(idx, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                let x = f32::from(ev.position.x);
+                let y = f32::from(ev.position.y);
+                if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                    this.apply_scrollbar_drag(x, y, cx);
+                } else {
+                    this.organize_drag_move(x, y, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if matches!(this.drag, Some(DragKind::Scrollbar { .. })) {
+                        this.drag = None;
+                    }
+                    this.finish_organize_drag(cx);
+                }),
+            )
+    }
+
+    fn organize_pick_seam(&mut self, after_idx: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.doc.pages.get(after_idx).map(|p| p.id.clone()) else {
+            return;
+        };
+        let has_next = after_idx + 1 < self.doc.pages.len();
+        if let Some(st) = self.page_organize.as_mut() {
+            st.seam = Some(id);
+            st.menu = None;
+            st.drag = None;
+        }
+        self.status = seam_picked_status(after_idx, has_next).into();
+        self.hint = self.status.clone();
+        cx.notify();
+    }
+
+    fn organize_seam_anchor(&self) -> Option<usize> {
+        let id = self.page_organize.as_ref()?.seam.as_ref()?;
+        self.doc.pages.iter().position(|p| &p.id == id)
     }
 
     /// 点选顺序上的页下标. 已经不在的 id 略过.
@@ -1332,8 +1620,11 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
-        let after = *order.last().unwrap();
-        self.insert_organize_copies(&order, after, true, false, cx);
+        let (after, from_seam) = self
+            .organize_seam_anchor()
+            .map(|i| (i, true))
+            .unwrap_or_else(|| (*order.last().unwrap(), false));
+        self.insert_organize_copies(&order, after, true, false, from_seam, cx);
     }
 
     pub(super) fn copy_organize_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -1355,7 +1646,7 @@ impl ScoreSyncApp {
             st.menu = None;
         }
         self.status = format!(
-            "已复制 {} 页. {}V 贴到当时选中页的右侧.",
+            "已复制 {} 页. 选中页间的节后 {}V 贴在两页中间, 否则贴到当时选中页的右侧.",
             order.len(),
             apply_bg::primary_mod()
         )
@@ -1379,14 +1670,18 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         }
+        if let Some(after) = self.organize_seam_anchor() {
+            self.insert_organize_copies(&order, after, true, true, true, cx);
+            return;
+        }
         let sel = self.organize_selection_indices();
         let Some(&after) = sel.last() else {
-            self.status = "请先选中要贴在其右侧的页面.".into();
+            self.status = "请先选中页面, 或点两页之间的节.".into();
             self.hint = self.status.clone();
             cx.notify();
             return;
         };
-        self.insert_organize_copies(&order, after, true, true, cx);
+        self.insert_organize_copies(&order, after, true, true, false, cx);
     }
 
     fn organize_clip_indices(&self) -> Vec<usize> {
@@ -1414,7 +1709,7 @@ impl ScoreSyncApp {
         if anchor >= self.doc.pages.len() {
             return;
         }
-        self.insert_organize_copies(&order, anchor, after, true, cx);
+        self.insert_organize_copies(&order, anchor, after, true, false, cx);
     }
 
     fn insert_organize_copies(
@@ -1423,6 +1718,7 @@ impl ScoreSyncApp {
         anchor: usize,
         place_after: bool,
         from_clip: bool,
+        from_seam: bool,
         cx: &mut Context<Self>,
     ) {
         let shown = self.shown_page_token();
@@ -1432,6 +1728,7 @@ impl ScoreSyncApp {
             .get(anchor)
             .map(|p| p.title())
             .unwrap_or_else(|| "这一页".into());
+        let right_name = self.doc.pages.get(anchor + 1).map(|p| p.title());
         self.push_crop_undo_page_structure();
         let Some(new_ids) = self.doc.copy_pages_beside(order, anchor, place_after) else {
             self.page_struct_history.undo.pop();
@@ -1440,9 +1737,15 @@ impl ScoreSyncApp {
             cx.notify();
             return;
         };
+        let seam_now = if from_seam {
+            new_ids.last().cloned()
+        } else {
+            None
+        };
         if let Some(st) = self.page_organize.as_mut() {
             st.anchor = new_ids.last().cloned();
             st.selected = new_ids;
+            st.seam = seam_now;
             st.menu = None;
             st.drag = None;
         }
@@ -1452,8 +1755,12 @@ impl ScoreSyncApp {
             .map(|st| st.selected.len())
             .unwrap_or(0);
         let verb = if from_clip { "已粘贴" } else { "已复制" };
-        let side = if place_after { "右侧" } else { "左侧" };
-        self.status = format!("{verb} {n} 页, 紧贴在「{anchor_name}」{side}.").into();
+        self.status = if from_seam {
+            seam_inserted_status(verb, n, &anchor_name, right_name.as_deref()).into()
+        } else {
+            let side = if place_after { "右侧" } else { "左侧" };
+            format!("{verb} {n} 页, 紧贴在「{anchor_name}」{side}.").into()
+        };
         self.hint = self.status.clone();
         self.finish_page_structure_edit(shown, cx);
     }
@@ -1844,6 +2151,53 @@ mod tests {
             (7, 11)
         );
         assert_eq!(org_visible_rows(4, 200.0, 0.0, 8.0), (0, 4));
+    }
+
+    #[test]
+    fn seam_slot_centers_a_same_row_gap() {
+        let prev = bounds_at(0.0, 10.0);
+        let next = Bounds {
+            origin: point(px(140.0), px(10.0)),
+            size: size(px(128.0), px(210.0)),
+        };
+        let slot = seam_slot(prev, next, 4.0, 158.0).unwrap();
+        assert!((slot.x - 134.0).abs() < 0.01, "{}", slot.x);
+        assert!((slot.y - 14.0).abs() < 0.01, "{}", slot.y);
+        assert!((slot.h - 158.0).abs() < 0.01, "{}", slot.h);
+        assert!((slot.hit_w - 12.0).abs() < 0.01, "{}", slot.hit_w);
+    }
+
+    #[test]
+    fn drag_seam_at_uses_the_gap_between_pages() {
+        let mut bounds = HashMap::new();
+        bounds.insert(0, bounds_at(0.0, 10.0));
+        bounds.insert(
+            1,
+            Bounds {
+                origin: point(px(140.0), px(10.0)),
+                size: size(px(128.0), px(210.0)),
+            },
+        );
+        assert_eq!(drag_seam_at(&bounds, 2, 134.0, 80.0), Some(0));
+        assert_eq!(drag_seam_at(&bounds, 2, 40.0, 80.0), None);
+    }
+
+    #[test]
+    fn seam_drop_anchor_skips_a_page_that_is_moving() {
+        let moving = HashSet::from([0]);
+        assert_eq!(seam_drop_anchor(0, &moving, 2), Some((1, false)));
+        assert_eq!(seam_drop_anchor(0, &HashSet::new(), 2), Some((0, true)));
+        assert_eq!(seam_drop_anchor(0, &HashSet::from([0, 1]), 2), None);
+    }
+
+    #[test]
+    fn seam_slot_wraps_to_the_left_of_the_next_row() {
+        let prev = bounds_at(400.0, 10.0);
+        let next = bounds_at(16.0, 240.0);
+        let slot = seam_slot(prev, next, 0.0, 100.0).unwrap();
+        assert!((slot.x - 9.0).abs() < 0.01, "{}", slot.x);
+        assert!((slot.y - 240.0).abs() < 0.01, "{}", slot.y);
+        assert!((slot.h - 100.0).abs() < 0.01, "{}", slot.h);
     }
 
     #[test]

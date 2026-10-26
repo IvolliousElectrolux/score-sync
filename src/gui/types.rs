@@ -60,7 +60,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 【分块】快捷键:\n\
   {m}O 打开图片/PDF (仅本面板) | {ms}N 新建工程 | {ms}O 打开工程 | {m}S 保存工程 | {ms}S 另存工程\n\
   D 识别本页 | A 识别全部页\n\
-  设置里的项目属性切换「谱表分块」或「双页对开」. 对开不识别谱表, 按页序两页一册 (末页落单则右页留空, 要错开就在前面插入空白页). 空白页是和这格空页一样的占位, 不是白纸, 成片里不画它. 一对里左右都是空页时, 这一对自动去掉. 缩略图下是这一页自己的文件名, `_p` 页码始终留着, 太长时省略号放在页码前面. 拖动换位后仍然认得出来. 多册按左侧面板宽度折行: 按原册宽算一行放得下几册, 再把这一行的宽度摊满, 长宽比不变. 拖动改页序, 拖到相邻页且不会换位时不亮指示线; 把一对的右页拖进下一对左页的左侧, 会在原位置补空白页, 让左页单独留下. {m}点击按点选顺序多选, Shift 连选, Delete 删除. 「复制」把选中页收成一串, 紧贴在最后点中的那一页右侧 (中间有空的也会靠拢). {m}C 只记入待贴内容, {m}V 贴到当时选中页的右侧. 右键可复制, 粘贴到这一页的左侧或右侧, 或在这一页前面或后面插入空白页. 点一册后切到蒙版即这一对开.\n\
+  设置里的项目属性切换「谱表分块」或「双页对开」. 对开不识别谱表, 按页序两页一册 (末页落单则右页留空, 要错开就在前面插入空白页). 空白页是和这格空页一样的占位, 不是白纸, 成片里不画它. 一对里左右都是空页时, 这一对自动去掉. 缩略图下是这一页自己的文件名, `_p` 页码始终留着, 太长时省略号放在页码前面. 拖动换位后仍然认得出来. 多册按左侧面板宽度折行: 按原册宽算一行放得下几册, 再把这一行的宽度摊满, 长宽比不变. 拖动改页序, 拖到相邻页且不会换位时不亮指示线; 把一对的右页拖进下一对左页的左侧, 会在原位置补空白页, 让左页单独留下. {m}点击按点选顺序多选, Shift 连选, Delete 删除. 悬停两页之间出现竖线, 点一下选中这一节; 一对页面中间的书脊一直显示, 也可以点选. 选中节后, 「复制」和粘贴把选中页收成一串, 插在这两页中间. 没选节时仍紧贴在最后点中的那一页右侧 (中间有空的也会靠拢). {m}C 只记入待贴内容, {m}V 贴到选中的节, 否则贴到当时选中页的右侧. 右键可复制, 粘贴到这一页的左侧或右侧, 或在这一页前面或后面插入空白页. 点一册后切到蒙版即这一对开.\n\
   对开的蒙版可直接拖页面 (不必按 Shift). 左右可以从初始位置向外滑出成片, 直到这一页只剩一条边还留在原来的成片里; 往对面拖则停在成片对侧. 上下和谱表分块一样, 到边就停: 两页一样高时已经顶住上下边, 不能再上下拖. 「左右对称」默认开着: 拖一页, 另一页反向移动. 关掉后只移动被拖的那一页, 另一页留在原地. 「同步左右」把当前这一对里各页相对自己槽位的左右偏移, 按像素套到其余每一对的同一侧 (左对左, 右对右). 页更窄、移不到那么远时停在成片边缘, 已画上的蒙版跟着页走. 只改左右, 不改上下和四边裁切. 当前只有左页时, 只同步各对的左页. 四边仍是裁切, 向外扩也留在成片里. 此模式没有辅助线和对齐. 谱表分块仍是 Shift+拖左右, 探出原块左右的部分只在蒙版里画出, 终稿会裁掉.\n\
   N 添加新块 | S 分割块 | M 合并组合 | {m}M 一键两两合并 | U 拆开组合 | G 共享脚注 | Delete 删除\n\
   E 导出组合 | R 重置本页分组 | P 组织页面 | H / F1 操作说明\n\
@@ -127,7 +127,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 1. 打开/拖入图片或 PDF → 多标签页; 页图写入会话临时目录, 内存只留按视口缩小的预览代理 (默认当前页±4, 高清页自动收到 ±2/±1; 输出组合/蒙版页签仍列出全部); 放大超过预览密度时再按窗口裁切原图.\n\
 2. {m}S 保存为单个 .staffcrop 工程包 (zip), 下次可用 {ms}O 继续; {ms}N 新建空白工程后再导入; 有未保存改动关窗会确认.\n\
 3. 标签右键菜单「复制本页」可再放一页副本; 新页的输出组合插在原页组合之后、下一页之前.\n\
-   「组织页面」(P) 用缩略图网格排序/删除, 比拖页签轻松; 无叉号, {m}点击按点选顺序多选 / Shift 连选, Delete 删选中, {m}Z/Y 撤重. 「复制」把选中页收成一串, 紧贴在最后点中的那一页右侧. {m}C 只记入待贴内容, {m}V 贴到当时选中页的右侧. 右键可复制, 或粘贴到这一页的左侧或右侧.\n\
+   「组织页面」(P) 用缩略图网格排序/删除, 比拖页签轻松; 无叉号, {m}点击按点选顺序多选 / Shift 连选, Delete 删选中, {m}Z/Y 撤重. 悬停两页之间出现竖线, 点一下选中这一节. 选中节后, 「复制」和粘贴把选中页收成一串, 插在这两页中间. 没选节时仍紧贴在最后点中的那一页右侧. {m}C 只记入待贴内容, {m}V 贴到选中的节, 否则贴到当时选中页的右侧. 右键可复制, 或粘贴到这一页的左侧或右侧.\n\
 4. 每页独立识别分块; 「识别全部页」按可用内存限并发异步处理.\n\
    识别先找五线谱表, 再看相邻谱表是否有墨迹像素直接 8 连通 (贴边分量、无内部孔洞或过窄的连通域不计).\n\
    矢量 PDF 不先光栅整页, 按长水平谱线收谱行; 没有这种谱线则收成整页一块.\n\
@@ -177,7 +177,7 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 \n\
 其他:\n\
   空白双击或 F 适应窗口; 拖动画布与侧栏之间的分隔条可调宽度.\n\
-  P 组织页面: 缩略图后台并行加载 (关窗仍保留), 拖动排序, {m}点击按点选顺序多选 / Shift 连选, Delete 删除选中页, {m}C / {m}V 复制粘贴, 右键可贴到左右.\n\
+  P 组织页面: 缩略图后台并行加载 (关窗仍保留), 拖动排序, {m}点击按点选顺序多选 / Shift 连选, 悬停页间可选节, Delete 删除选中页, {m}C / {m}V 复制粘贴, 右键可贴到左右.\n\
   右侧顶栏可切换「分块 / 底色 / 蒙版 / 视频」四个面板.\n\
   标题栏右侧图标: 新建 / 打开工程 / 保存 / 另存 / 操作说明 / 设置 ({ms}N / {ms}O / {m}S / {ms}S / H / {m},), 悬停显示名称.\n\
   标题栏未保存改动显示 *; 异步保存中改为转圈提示.\n\
@@ -205,7 +205,7 @@ const HELP_TEMPLATE_EN: &str = "\
 [Blocks]\n\
   {m}O open image/PDF (this panel only) | {ms}N new project | {ms}O open project | {m}S save | {ms}S save as\n\
   D detect this page | A detect all pages\n\
-  Project properties in Settings switches Staff blocks or Two-page spread. Spread does not detect staves: pages are paired in order (a leftover last page leaves the right side empty; insert a blank page in front to offset the pairing). A blank page is an empty slot, not paper, and is not drawn in the finished image. A pair of two blanks is dropped. The filename sits under each thumbnail; the _p number is kept, with the ellipsis before the number when the name is long. Dragging to reorder keeps the name. Books wrap to the left panel width: a row that fits N books at the original size stretches those books to fill the panel, keeping the aspect ratio. Dragging onto a neighbor that would not change order shows no indicator. Dragging a right page to the left of the next pair's left page inserts a blank so the left page stays alone. {m}click adds to the selection in click order, Shift extends, Delete removes. Duplicate gathers the selection and places it just to the right of the last clicked page. {m}C remembers the selection, {m}V pastes to the right of the page selected at that moment. Right-click can duplicate, paste to the left or right, or insert a blank before or after. Opening Mask on a book edits that pair.\n\
+  Project properties in Settings switches Staff blocks or Two-page spread. Spread does not detect staves: pages are paired in order (a leftover last page leaves the right side empty; insert a blank page in front to offset the pairing). A blank page is an empty slot, not paper, and is not drawn in the finished image. A pair of two blanks is dropped. The filename sits under each thumbnail; the _p number is kept, with the ellipsis before the number when the name is long. Dragging to reorder keeps the name. Books wrap to the left panel width: a row that fits N books at the original size stretches those books to fill the panel, keeping the aspect ratio. Dragging onto a neighbor that would not change order shows no indicator. Dragging a right page to the left of the next pair's left page inserts a blank so the left page stays alone. {m}click adds to the selection in click order, Shift extends, Delete removes. Hovering between two pages shows a vertical line; click it to select that joint. The spine between a pair stays visible and can be selected too. With a joint selected, duplicate and paste insert between those pages. Otherwise duplicate still sits just to the right of the last clicked page. {m}C remembers the selection, {m}V pastes into the selected joint, or to the right of the selected page. Right-click can duplicate, paste to the left or right, or insert a blank before or after. Opening Mask on a book edits that pair.\n\
   Spread mask: drag a page directly (no Shift). Left and right can slide outward until one edge remains inside the original sheet; dragging toward the other page stops at the far side. Up and down stop at the edge. Mirror left/right is on by default: the other page moves the opposite way. Turn it off to move only the dragged page. Sync left/right copies the current pair's horizontal offsets, in pixels, onto the same side of every other pair. A narrower page stops at the sheet edge, and masks move with the page. Only horizontal offsets change. Edge drags stay inside the sheet. This mode has no guides or align. Staff blocks still use Shift to drag sideways; the part past the original block is drawn here and cropped in the final image.\n\
   N add block | S split | M merge | {m}M pair ungrouped | U ungroup | G share footnote | Delete delete\n\
   E export groups | R reset this page | P organize pages | H / F1 help\n\
@@ -249,7 +249,7 @@ const HELP_TEMPLATE_EN: &str = "\
 Steps:\n\
 1. Open or drop images or a PDF. Page images live in a session temp directory; memory keeps a preview proxy.\n\
 2. {m}S saves one .staffcrop package. {ms}O continues later. {ms}N starts empty. Closing with unsaved changes asks first.\n\
-3. Right-click a tab to duplicate the page. Organize pages (P) reorders and deletes with thumbnails. {m}click selects in click order, Shift extends, Delete removes. Duplicate gathers the selection just to the right of the last clicked page. {m}C copies, {m}V pastes to the right of the selection. Right-click can duplicate, or paste to the left or right.\n\
+3. Right-click a tab to duplicate the page. Organize pages (P) reorders and deletes with thumbnails. {m}click selects in click order, Shift extends, Delete removes. Hovering between two thumbnails shows a vertical line; click it to select that joint. With a joint selected, duplicate and paste insert between those pages. Otherwise duplicate sits just to the right of the last clicked page. {m}C copies, {m}V pastes into the selected joint, or to the right of the selection. Right-click can duplicate, or paste to the left or right.\n\
 4. Each page is detected on its own. Detect all pages runs in parallel within the memory budget. Vector PDFs stay vector and use long horizontal staff lines.\n\
    Settings, Project, Staff packing runs after that. 1 keeps one staff line per block.\n\
    Within page joins every N lines on the same page (top of the first through bottom of the last, including the gap; a short tail stays on that page).\n\
