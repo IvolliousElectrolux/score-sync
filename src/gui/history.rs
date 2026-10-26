@@ -4,7 +4,13 @@ use super::ScoreSyncApp;
 use super::*;
 
 impl ScoreSyncApp {
-    pub(super) fn capture_crop_snap(&self, page_ids: &[String]) -> CropSnap {
+    fn bump_undo_seq(&mut self) -> u64 {
+        self.crop_undo_seq = self.crop_undo_seq.wrapping_add(1);
+        self.crop_undo_seq
+    }
+
+    pub(super) fn capture_crop_snap(&mut self, page_ids: &[String]) -> CropSnap {
+        let seq = self.bump_undo_seq();
         let mut page_regions = HashMap::new();
         for pid in page_ids {
             if let Some(p) = self.doc.pages.iter().find(|p| p.id == *pid) {
@@ -12,6 +18,7 @@ impl ScoreSyncApp {
             }
         }
         CropSnap {
+            seq,
             page_regions,
             pages: None,
             current_page_index: None,
@@ -30,7 +37,8 @@ impl ScoreSyncApp {
         }
     }
 
-    pub(super) fn capture_crop_snap_pages(&self) -> CropSnap {
+    pub(super) fn capture_crop_snap_pages(&mut self) -> CropSnap {
+        let seq = self.bump_undo_seq();
         // 结构撤重只保留路径 + 元数据, 不克隆整幅位图
         let pages = self
             .doc
@@ -49,6 +57,7 @@ impl ScoreSyncApp {
             })
             .collect();
         CropSnap {
+            seq,
             page_regions: HashMap::new(),
             pages: Some(pages),
             current_page_index: Some(self.doc.current_page_index),
@@ -75,12 +84,12 @@ impl ScoreSyncApp {
             return;
         }
         let snap = self.capture_crop_snap(page_ids);
+        self.clear_crop_redos();
         let h = self.crop_histories.entry(cur).or_default();
         h.undo.push(snap);
         if h.undo.len() > CROP_HISTORY_LIMIT {
             h.undo.remove(0);
         }
-        h.redo.clear();
     }
 
     pub(super) fn push_crop_undo_current(&mut self) {
@@ -97,16 +106,36 @@ impl ScoreSyncApp {
 
     pub(super) fn push_crop_undo_page_structure(&mut self) {
         let snap = self.capture_crop_snap_pages();
+        self.clear_crop_redos();
         let h = &mut self.page_struct_history;
         h.undo.push(snap);
         if h.undo.len() > CROP_HISTORY_LIMIT {
             h.undo.remove(0);
         }
-        h.redo.clear();
+    }
+
+    fn clear_crop_redos(&mut self) {
+        self.page_struct_history.redo.clear();
+        for history in self.crop_histories.values_mut() {
+            history.redo.clear();
+        }
     }
 
     pub(super) fn apply_crop_snap(&mut self, snap: CropSnap) {
-        if let Some(pages) = snap.pages {
+        if let Some(mut pages) = snap.pages {
+            let mut images: HashMap<String, std::sync::Arc<image::RgbImage>> = HashMap::new();
+            for page in self.doc.pages.drain(..) {
+                if let Some(image) = page.image {
+                    images.insert(page.id, image);
+                }
+            }
+            for page in &mut pages {
+                if page.image.is_none() {
+                    if let Some(image) = images.remove(&page.id) {
+                        page.image = Some(image);
+                    }
+                }
+            }
             self.doc.pages = pages;
             if let Some(idx) = snap.current_page_index {
                 self.doc.current_page_index = idx.min(self.doc.pages.len().saturating_sub(1));
@@ -114,7 +143,9 @@ impl ScoreSyncApp {
             if let Some(masks) = snap.group_masks {
                 self.doc.group_masks = masks;
             }
-            self.doc.retain_memory_window();
+            // 快照里没有像素. 把还在窗口里的旧图接回去, 缺的页交给后台,
+            // 不要在这一下把原图解码进界面线程.
+            self.doc.release_outside_memory_window();
         } else {
             for (pid, regions) in snap.page_regions {
                 if let Some(p) = self.doc.pages.iter_mut().find(|p| p.id == pid) {
@@ -133,13 +164,84 @@ impl ScoreSyncApp {
         self.doc.group_guide_defaults = snap.group_guide_defaults;
         self.doc.guides_global = snap.guides_global;
         self.doc.guides_sync_positions = snap.guides_sync_positions;
+        self.doc.rebuild_rid_index();
         self.doc.ensure_active_group();
         self.mark_dirty();
         self.mark_video_pool_dirty_all();
     }
 
+    /// 结构撤重前后是不是同一张已经画在画布上的页. 是的话不要拆掉贴图重做.
+    pub(super) fn shown_page_token(&self) -> Option<(String, usize, u32, u32)> {
+        let page = self.doc.current_page()?;
+        let ptr = page.image.as_ref().map(|img| std::sync::Arc::as_ptr(img) as usize)?;
+        if self.render_image.is_none() {
+            return None;
+        }
+        let w = page.width();
+        let h = page.height();
+        if w != self.img_w || h != self.img_h {
+            return None;
+        }
+        Some((page.id.clone(), ptr, w, h))
+    }
+
+    pub(super) fn finish_page_structure_edit(
+        &mut self,
+        before: Option<(String, usize, u32, u32)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_page_window(cx);
+        if self.page_organize.is_some() {
+            self.sync_organize_after_doc(cx);
+        }
+        let same = match (&before, self.shown_page_token()) {
+            (Some(prev), Some(now)) => prev == &now,
+            _ => false,
+        };
+        if same {
+            self.after_doc_change(cx);
+        } else {
+            self.refresh_render(cx);
+        }
+    }
+
+    fn latest_region_undo_seq(&self) -> Option<u64> {
+        let id = &self.doc.current_page()?.id;
+        self.crop_histories
+            .get(id)?
+            .undo
+            .last()
+            .map(|snap| snap.seq)
+    }
+
+    fn latest_struct_undo_seq(&self) -> Option<u64> {
+        self.page_struct_history.undo.last().map(|snap| snap.seq)
+    }
+
+    fn latest_region_redo_seq(&self) -> Option<u64> {
+        let id = &self.doc.current_page()?.id;
+        self.crop_histories
+            .get(id)?
+            .redo
+            .last()
+            .map(|snap| snap.seq)
+    }
+
+    fn latest_struct_redo_seq(&self) -> Option<u64> {
+        self.page_struct_history.redo.last().map(|snap| snap.seq)
+    }
+
     pub(super) fn undo_crop(&mut self, cx: &mut Context<Self>) {
-        // 1) 当前页的 regions 撤重
+        let struct_newer = match (self.latest_struct_undo_seq(), self.latest_region_undo_seq()) {
+            (Some(page), Some(region)) => page > region,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if struct_newer {
+            self.undo_page_structure(cx);
+            return;
+        }
+        // 当前页的 regions 撤重
         if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
             if let Some(h) = self.crop_histories.get_mut(&cur) {
                 if let Some(prev) = h.undo.pop() {
@@ -156,17 +258,21 @@ impl ScoreSyncApp {
                 }
             }
         }
-        // 2) 删页 / 导入等结构撤重
+        self.undo_page_structure(cx);
+    }
+
+    fn undo_page_structure(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.page_struct_history.undo.pop() {
             if self.pdf_importing {
                 self.abandon_pdf_import();
             }
+            let shown = self.shown_page_token();
             let now = self.capture_crop_snap_pages();
             self.page_struct_history.redo.push(now);
             self.apply_crop_snap(prev);
             self.status = "已撤回页操作.".into();
             self.hint = self.status.clone();
-            self.refresh_render(cx);
+            self.finish_page_structure_edit(shown, cx);
             return;
         }
         self.status = "没有可撤回的操作.".into();
@@ -174,6 +280,15 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn redo_crop(&mut self, cx: &mut Context<Self>) {
+        let struct_newer = match (self.latest_struct_redo_seq(), self.latest_region_redo_seq()) {
+            (Some(page), Some(region)) => page > region,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if struct_newer {
+            self.redo_page_structure(cx);
+            return;
+        }
         if let Some(cur) = self.doc.current_page().map(|p| p.id.clone()) {
             if let Some(h) = self.crop_histories.get_mut(&cur) {
                 if let Some(next) = h.redo.pop() {
@@ -193,7 +308,12 @@ impl ScoreSyncApp {
                 }
             }
         }
+        self.redo_page_structure(cx);
+    }
+
+    fn redo_page_structure(&mut self, cx: &mut Context<Self>) {
         if let Some(next) = self.page_struct_history.redo.pop() {
+            let shown = self.shown_page_token();
             let now = self.capture_crop_snap_pages();
             self.page_struct_history.undo.push(now);
             if self.page_struct_history.undo.len() > CROP_HISTORY_LIMIT {
@@ -202,7 +322,7 @@ impl ScoreSyncApp {
             self.apply_crop_snap(next);
             self.status = "已重做页操作.".into();
             self.hint = self.status.clone();
-            self.refresh_render(cx);
+            self.finish_page_structure_edit(shown, cx);
             return;
         }
         self.status = "没有可重做的操作.".into();

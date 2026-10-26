@@ -2,6 +2,7 @@
 //! 像素只在预览缓存和成片光栅时产生.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use image::{Rgb, RgbImage, Rgba, RgbaImage};
 use mask_tool::layout::BlockAdjust;
@@ -78,7 +79,8 @@ pub struct VectorSource {
     pub page_index: u32,
     pub w_pt: f32,
     pub h_pt: f32,
-    pub scene: VectorScene,
+    /// 几何导入后不再改. `Arc` 让撤重快照只加引用, 不复制整页路径.
+    pub scene: Arc<VectorScene>,
 }
 
 impl VectorSource {

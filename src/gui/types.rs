@@ -306,6 +306,8 @@ pub(crate) enum SideTool {
 /// 删除/复制页等结构变更另存完整 `pages`, 走 `page_struct_history`.
 #[derive(Clone)]
 pub(crate) struct CropSnap {
+    /// 入栈顺序. 分块栈和页序栈谁的序号新, Ctrl+Z 就先撤谁.
+    pub(crate) seq: u64,
     pub(crate) page_regions: HashMap<String, HashMap<String, Region>>,
     /// 页级结构快照; `Some` 时 apply 整表替换 pages (含图), 忽略 page_regions.
     pub(crate) pages: Option<Vec<Page>>,

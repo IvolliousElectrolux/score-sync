@@ -724,7 +724,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
                         page_index: i as u32,
                         w_pt,
                         h_pt,
-                        scene,
+                        scene: std::sync::Arc::new(scene),
                     },
                     preview_png,
                     no_staff,
@@ -1026,7 +1026,7 @@ pub fn load_vector_source(
         page_index,
         w_pt,
         h_pt,
-        scene,
+        scene: std::sync::Arc::new(scene),
     })
 }
 

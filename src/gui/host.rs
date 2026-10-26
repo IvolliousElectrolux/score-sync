@@ -201,7 +201,7 @@ impl ScoreSyncApp {
                 from, to, armed, ..
             }) => {
                 if armed && from != to {
-                    self.push_crop_undo_all_pages();
+                    self.push_crop_undo_page_structure();
                     self.doc.move_page(from, to);
                     self.after_doc_change(cx);
                     self.request_page_window(cx);

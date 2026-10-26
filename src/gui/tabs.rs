@@ -923,7 +923,7 @@ impl ScoreSyncApp {
                     }) = this.drag.take()
                     {
                         if armed && from != to {
-                            this.push_crop_undo_all_pages();
+                            this.push_crop_undo_page_structure();
                             this.doc.move_page(from, to);
                             this.after_doc_change(cx);
                             this.request_page_window(cx);

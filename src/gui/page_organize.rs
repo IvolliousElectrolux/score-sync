@@ -353,13 +353,13 @@ impl ScoreSyncApp {
 
     pub(super) fn undo_organize(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.page_struct_history.undo.pop() {
+            let shown = self.shown_page_token();
             let now = self.capture_crop_snap_pages();
             self.page_struct_history.redo.push(now);
             self.apply_crop_snap(prev);
             self.status = "已撤回页操作.".into();
             self.hint = self.status.clone();
-            self.sync_organize_after_doc(cx);
-            self.refresh_render(cx);
+            self.finish_page_structure_edit(shown, cx);
             return;
         }
         self.status = "没有可撤回的操作.".into();
@@ -368,6 +368,7 @@ impl ScoreSyncApp {
 
     pub(super) fn redo_organize(&mut self, cx: &mut Context<Self>) {
         if let Some(next) = self.page_struct_history.redo.pop() {
+            let shown = self.shown_page_token();
             let now = self.capture_crop_snap_pages();
             self.page_struct_history.undo.push(now);
             if self.page_struct_history.undo.len() > CROP_HISTORY_LIMIT {
@@ -376,15 +377,14 @@ impl ScoreSyncApp {
             self.apply_crop_snap(next);
             self.status = "已重做页操作.".into();
             self.hint = self.status.clone();
-            self.sync_organize_after_doc(cx);
-            self.refresh_render(cx);
+            self.finish_page_structure_edit(shown, cx);
             return;
         }
         self.status = "没有可重做的操作.".into();
         cx.notify();
     }
 
-    fn sync_organize_after_doc(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_organize_after_doc(&mut self, cx: &mut Context<Self>) {
         let live: HashSet<String> = self.doc.pages.iter().map(|p| p.id.clone()).collect();
         self.organize_clip.retain(|id| live.contains(id));
         let fallback = self.doc.current_page().map(|p| p.id.clone());

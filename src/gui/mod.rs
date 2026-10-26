@@ -280,6 +280,8 @@ pub(crate) struct ScoreSyncApp {
     crop_histories: HashMap<String, CropHistory>,
     /// 删页/复制页等文档结构撤重 (与单页 regions 栈分开).
     page_struct_history: CropHistory,
+    /// 分块撤重和页序撤重共用的序号, 保证 Ctrl+Z 先撤最近的一次.
+    crop_undo_seq: u64,
     /// 底色应用/取消/切换/改比例撤重.
     bg_history: BgHistory,
     /// 蒙版「全局开启 / 全局对齐」等跨组合操作, 与当前页 `host_guide_token` 配对.
@@ -549,6 +551,7 @@ impl ScoreSyncApp {
             video_sync_gen: 0,
             crop_histories: HashMap::new(),
             page_struct_history: CropHistory::default(),
+            crop_undo_seq: 0,
             bg_history: BgHistory::default(),
             guide_undo: Vec::new(),
             guide_redo: Vec::new(),
