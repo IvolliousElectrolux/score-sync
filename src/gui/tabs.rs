@@ -21,16 +21,21 @@ impl ScoreSyncApp {
     pub(super) fn apply_tab_reorder_at(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         let Some(DragKind::TabReorder {
             from,
+            to: prev_to,
+            line_at: prev_line,
+            line_after: prev_after,
             start_x,
             start_y,
             origin_x,
             origin_y,
+            x: prev_x,
+            y: prev_y,
             mut armed,
-            ..
         }) = self.drag.take()
         else {
             return;
         };
+        let was_armed = armed;
         if !armed && Self::reorder_slop_exceeded(x - start_x, y - start_y) {
             armed = true;
         }
@@ -39,6 +44,14 @@ impl ScoreSyncApp {
         } else {
             (from, None, false)
         };
+        // 落点和像素都没变就别整页重画. macOS 上按住不动时合成拖拽每 16ms
+        // 还会送一颗同一坐标, 不挡掉的话虚影不动也在重绘.
+        let unchanged = armed == was_armed
+            && to == prev_to
+            && line_at == prev_line
+            && line_after == prev_after
+            && (x - prev_x).abs() < 0.5
+            && (y - prev_y).abs() < 0.5;
         self.drag = Some(DragKind::TabReorder {
             from,
             to,
@@ -52,7 +65,9 @@ impl ScoreSyncApp {
             y,
             armed,
         });
-        cx.notify();
+        if !unchanged {
+            cx.notify();
+        }
     }
 
     pub(super) fn resolve_tab_drop(

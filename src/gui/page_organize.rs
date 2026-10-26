@@ -49,6 +49,8 @@ pub(super) struct PageOrganizeState {
     cell_bounds: HashMap<usize, Bounds<Pixels>>,
     drag: Option<OrganizeDrag>,
     menu: Option<OrganizeMenu>,
+    /// 相邻两行缩略图顶边的距离 (含行间距). 第一帧铺满测出来, 之后只渲染可见行.
+    row_stride: Option<f32>,
 }
 
 fn rgb_to_render_image(rgb: &image::RgbImage) -> Arc<RenderImage> {
@@ -75,16 +77,86 @@ fn org_slot_host_w(viewport_w: f32) -> f32 {
     (viewport_w - ORG_SLOT_PAD * 2.0).max(0.0)
 }
 
-fn org_grid_inner_width(avail: f32, cell_w: f32, n: usize) -> f32 {
+fn org_grid_cols(avail: f32, cell_w: f32, n: usize) -> usize {
     if avail < 8.0 || n == 0 {
-        return 0.0;
+        return 1;
     }
     let cell_w = cell_w.max(1.0);
     let cols = ((avail + ORG_GRID_GAP) / (cell_w + ORG_GRID_GAP))
         .floor()
         .max(1.0) as usize;
-    let cols = cols.min(n.max(1));
+    cols.min(n.max(1)).max(1)
+}
+
+fn org_grid_inner_width(avail: f32, cell_w: f32, n: usize) -> f32 {
+    if avail < 8.0 || n == 0 {
+        return 0.0;
+    }
+    let cols = org_grid_cols(avail, cell_w, n);
+    let cell_w = cell_w.max(1.0);
     cols as f32 * cell_w + (cols.saturating_sub(1) as f32) * ORG_GRID_GAP
+}
+
+/// 网格上下留白, 与 `.py_3()` 在 16px rem 下相同. 虚拟化行窗口用同一个数.
+const ORG_TILES_PAD_Y: f32 = 12.0;
+
+/// 同一列里相邻两格的顶边距. 跟列数算法无关, 直接看已经画出来的格子.
+fn measure_org_stride(bounds: &HashMap<usize, Bounds<Pixels>>) -> Option<f32> {
+    let mut pts: Vec<(f32, f32)> = bounds
+        .values()
+        .map(|b| (f32::from(b.origin.x), f32::from(b.origin.y)))
+        .collect();
+    if pts.len() < 2 {
+        return None;
+    }
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut best: Option<f32> = None;
+    for (i, &(x0, y0)) in pts.iter().enumerate() {
+        for &(x1, y1) in pts.iter().skip(i + 1) {
+            if (x0 - x1).abs() > 2.0 {
+                break;
+            }
+            let dy = (y1 - y0).abs();
+            if dy < 32.0 {
+                continue;
+            }
+            best = Some(best.map(|v| v.min(dy)).unwrap_or(dy));
+        }
+    }
+    best
+}
+
+/// 可见行区间 `[start, end)`, 上下各多留一行. 视口高度还没有时返回全部.
+fn org_visible_rows(rows: usize, stride: f32, off_y: f32, view_h: f32) -> (usize, usize) {
+    if rows == 0 {
+        return (0, 0);
+    }
+    if view_h < 32.0 || stride < 8.0 {
+        return (0, rows);
+    }
+    let start = ((off_y - ORG_TILES_PAD_Y) / stride).floor();
+    let end = ((off_y + view_h - ORG_TILES_PAD_Y) / stride).ceil();
+    let row0 = (start as isize - 1).max(0) as usize;
+    let row1 = ((end as isize + 1).max(0) as usize).min(rows);
+    (row0.min(rows), row1.max(row0.min(rows)))
+}
+
+/// 顶部占位高度. 占位后面还有一条 flex gap, 加起来等于被省掉的行高.
+fn org_spacer_before(row0: usize, stride: f32) -> Option<f32> {
+    if row0 == 0 {
+        return None;
+    }
+    let h = row0 as f32 * stride - ORG_GRID_GAP;
+    (h > 0.5).then_some(h)
+}
+
+/// 底部占位高度. 前面还有一条 flex gap.
+fn org_spacer_after(remaining_rows: usize, stride: f32) -> Option<f32> {
+    if remaining_rows == 0 {
+        return None;
+    }
+    let h = remaining_rows as f32 * stride - ORG_GRID_GAP;
+    (h > 0.5).then_some(h)
 }
 
 /// 卡片外宽: 整列网格 + 滚动条 + padding/边框, 不超过可放区域.
@@ -178,6 +250,7 @@ impl ScoreSyncApp {
             cell_bounds: HashMap::new(),
             drag: None,
             menu: None,
+            row_stride: None,
         });
         self.focus_handle.focus(window);
         self.status = format!(
@@ -552,6 +625,11 @@ impl ScoreSyncApp {
         let Some(mut drag) = self.page_organize.as_mut().and_then(|st| st.drag.take()) else {
             return;
         };
+        let was_armed = drag.armed;
+        let prev_line = drag.line_at;
+        let prev_after = drag.line_after;
+        let prev_x = drag.x;
+        let prev_y = drag.y;
         if !drag.armed && Self::reorder_slop_exceeded(x - drag.start_x, y - drag.start_y) {
             drag.armed = true;
         }
@@ -564,10 +642,17 @@ impl ScoreSyncApp {
         drag.line_after = line_after;
         drag.x = x;
         drag.y = y;
+        let unchanged = drag.armed == was_armed
+            && drag.line_at == prev_line
+            && drag.line_after == prev_after
+            && (drag.x - prev_x).abs() < 0.5
+            && (drag.y - prev_y).abs() < 0.5;
         if let Some(st) = self.page_organize.as_mut() {
             st.drag = Some(drag);
         }
-        cx.notify();
+        if !unchanged {
+            cx.notify();
+        }
     }
 
     fn resolve_organize_drop(&self, from: usize, x: f32, y: f32) -> (Option<usize>, bool) {
@@ -598,7 +683,10 @@ impl ScoreSyncApp {
             let after = x >= (left + right) * 0.5;
             return (Some(i), after);
         }
-        if last_bottom.is_some_and(|bottom| y > bottom + 8.0) {
+        // 只有最后一页真的在画面里, 才把「格子下面」当成拖到末尾.
+        // 虚拟化之后, 视口底端的格子不一定是最后一页.
+        if last_bottom.is_some_and(|bottom| y > bottom + 8.0) && st.cell_bounds.contains_key(&(n - 1))
+        {
             if let Some(anchor) = (0..n).rev().find(|j| !moving.contains(j)) {
                 return (Some(anchor), true);
             }
@@ -696,6 +784,44 @@ impl ScoreSyncApp {
         } else {
             0.0
         };
+        let suppress_hover = st.drag.is_some();
+        let drop_line = if drag_armed {
+            line_at.and_then(|i| {
+                let b = st.cell_bounds.get(&i)?;
+                let left = f32::from(b.origin.x);
+                let top = f32::from(b.origin.y);
+                let w = f32::from(b.size.width);
+                let h = f32::from(b.size.height);
+                let x = if line_after { left + w } else { left };
+                Some((x, top, h))
+            })
+        } else {
+            None
+        };
+        let cols = if inner_w > 1.0 && n > 0 {
+            org_grid_cols(inner_w, ORG_CELL_W, n)
+        } else {
+            1
+        };
+        let rows = if n == 0 || cols == 0 {
+            0
+        } else {
+            (n + cols - 1) / cols
+        };
+        let stride = measure_org_stride(&st.cell_bounds).or(st.row_stride);
+        let (row0, row1) = if let Some(stride) = stride {
+            if n > cols.saturating_mul(3) {
+                let view_h = f32::from(self.page_organize_scroll.bounds().size.height);
+                let off = (-f32::from(self.page_organize_scroll.offset().y)).max(0.0);
+                org_visible_rows(rows, stride, off, view_h)
+            } else {
+                (0, rows)
+            }
+        } else {
+            (0, rows)
+        };
+        let vis0 = row0.saturating_mul(cols).min(n);
+        let vis1 = row1.saturating_mul(cols).min(n);
         let entity = cx.entity();
         let cells: Vec<(
             usize,
@@ -709,6 +835,8 @@ impl ScoreSyncApp {
             .pages
             .iter()
             .enumerate()
+            .skip(vis0)
+            .take(vis1.saturating_sub(vis0))
             .map(|(i, p)| {
                 (
                     i,
@@ -720,6 +848,14 @@ impl ScoreSyncApp {
                 )
             })
             .collect();
+        if let Some(st) = self.page_organize.as_mut() {
+            if let Some(stride) = stride {
+                st.row_stride = Some(stride);
+            }
+            if vis0 > 0 || vis1 < n {
+                st.cell_bounds.retain(|i, _| (vis0..vis1).contains(i));
+            }
+        }
 
         let mut tiles = div()
             .id("org_pages_tiles")
@@ -727,7 +863,7 @@ impl ScoreSyncApp {
             .flex_row()
             .flex_wrap()
             .gap(px(ORG_GRID_GAP))
-            .py_3()
+            .py(px(ORG_TILES_PAD_Y))
             .when(inner_w > 1.0, |d| d.w(px(inner_w)))
             .on_mouse_down(
                 MouseButton::Left,
@@ -747,9 +883,17 @@ impl ScoreSyncApp {
                     .child("还没有页面. 先打开图片或 PDF."),
             );
         }
+        if let Some(h) = stride.and_then(|s| org_spacer_before(row0, s)) {
+            tiles = tiles.child(
+                div()
+                    .id("org_pad_before")
+                    .w_full()
+                    .h(px(h))
+                    .flex_shrink_0(),
+            );
+        }
         for (idx, _pid, caption, selected, is_current, thumb) in cells {
             let dragging = moving.contains(&idx);
-            let show_line = line_at == Some(idx);
             let border = if selected {
                 ui_kit::chrome(0x2563eb)
             } else if is_current {
@@ -778,20 +922,15 @@ impl ScoreSyncApp {
                     .bg(bg)
                     .border_2()
                     .border_color(border)
-                    .cursor_pointer()
                     .when(dragging, |d| d.opacity(0.35))
-                    .when(show_line && !line_after, |d| {
-                        d.border_l_4().border_color(ui_kit::chrome(0xf59e0b))
-                    })
-                    .when(show_line && line_after, |d| {
-                        d.border_r_4().border_color(ui_kit::chrome(0xf59e0b))
-                    })
-                    .hover(|s| {
-                        if selected {
-                            s
-                        } else {
-                            s.bg(ui_kit::chrome(0xf8fafc))
-                        }
+                    .when(!suppress_hover, |d| {
+                        d.cursor_pointer().hover(move |s| {
+                            if selected {
+                                s
+                            } else {
+                                s.bg(ui_kit::chrome(0xf8fafc))
+                            }
+                        })
                     })
                     .child(Self::measure_org_cell(entity.clone(), idx))
                     .child(
@@ -964,6 +1103,15 @@ impl ScoreSyncApp {
                             cx.notify();
                         }),
                     ),
+            );
+        }
+        if let Some(h) = stride.and_then(|s| org_spacer_after(rows.saturating_sub(row1), s)) {
+            tiles = tiles.child(
+                div()
+                    .id("org_pad_after")
+                    .w_full()
+                    .h(px(h))
+                    .flex_shrink_0(),
             );
         }
 
@@ -1140,6 +1288,18 @@ impl ScoreSyncApp {
                         ),
                     ),
             )
+            .when_some(drop_line, |d, (x, y, h)| {
+                d.child(
+                    div()
+                        .id("org_drop_line")
+                        .absolute()
+                        .left(px(x - 1.0))
+                        .top(px(y))
+                        .w(px(2.))
+                        .h(px(h))
+                        .bg(ui_kit::chrome(0xf59e0b)),
+                )
+            })
             .when(drag_armed, |d| d.child(ghost))
             .child(self.organize_menu_overlay(cx))
             .when(show_org_paste_sub, |d| {
@@ -1661,6 +1821,46 @@ mod tests {
                 );
                 assert!(w <= slot + 0.01);
             }
+        }
+    }
+
+    #[test]
+    fn org_spacers_fill_the_rows_they_replace() {
+        let stride = 222.0;
+        let before = org_spacer_before(2, stride).unwrap();
+        // 占位高度 + 它和下一行之间的 gap = 第 2 行顶边的位置.
+        assert!((before + ORG_GRID_GAP - 2.0 * stride).abs() < 0.01);
+        let after = org_spacer_after(2, stride).unwrap();
+        assert!((ORG_GRID_GAP + after - 2.0 * stride).abs() < 0.01);
+        assert!(org_spacer_before(0, stride).is_none());
+        assert!(org_spacer_after(0, stride).is_none());
+    }
+
+    #[test]
+    fn org_visible_rows_overscans_one_row() {
+        assert_eq!(org_visible_rows(20, 200.0, 0.0, 400.0), (0, 3));
+        assert_eq!(
+            org_visible_rows(20, 200.0, ORG_TILES_PAD_Y + 200.0 * 8.0, 400.0),
+            (7, 11)
+        );
+        assert_eq!(org_visible_rows(4, 200.0, 0.0, 8.0), (0, 4));
+    }
+
+    #[test]
+    fn measure_org_stride_uses_the_nearest_row_in_a_column() {
+        let mut bounds = HashMap::new();
+        bounds.insert(0, bounds_at(10.0, 40.0));
+        bounds.insert(1, bounds_at(150.0, 40.0));
+        bounds.insert(2, bounds_at(10.0, 262.0));
+        bounds.insert(4, bounds_at(10.0, 484.0));
+        let stride = measure_org_stride(&bounds).unwrap();
+        assert!((stride - 222.0).abs() < 0.01, "{stride}");
+    }
+
+    fn bounds_at(x: f32, y: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(128.0), px(210.0)),
         }
     }
 }

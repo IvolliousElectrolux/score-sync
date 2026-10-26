@@ -404,6 +404,10 @@ struct MacWindowState {
     input_handler: Option<PlatformInputHandler>,
     last_key_equivalent: Option<KeyDownEvent>,
     synthetic_drag_counter: usize,
+    /// 最近一次还没派发的鼠标移动. macOS 不合并 `mouseDragged`, 高回报率鼠标
+    /// 会在一帧里送进几十次; 每次都走完整棵命中测试. Windows 的 `WM_MOUSEMOVE`
+    /// 在队列里只留最新的一颗. 这里收成每帧最多派发一次, 画这一帧之前再吐出来.
+    pending_mouse_move: Option<PlatformInput>,
     traffic_light_position: Option<Point<Pixels>>,
     transparent_titlebar: bool,
     previous_modifiers_changed_event: Option<PlatformInput>,
@@ -707,6 +711,7 @@ impl MacWindow {
                 input_handler: None,
                 last_key_equivalent: None,
                 synthetic_drag_counter: 0,
+                pending_mouse_move: None,
                 traffic_light_position: titlebar
                     .as_ref()
                     .and_then(|titlebar| titlebar.traffic_light_position),
@@ -1896,11 +1901,27 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
             _ => {}
         }
 
-        if let Some(mut callback) = lock.event_callback.take() {
-            drop(lock);
-            callback(event);
-            window_state.lock().event_callback = Some(callback);
+        // 移动先攒着, 等这一帧真正画之前再派发最新的一颗. 按下/松开要先把
+        // 攒下的移动吐出去, 否则松手时落点还是上一帧的坐标.
+        let defer_move = matches!(event, PlatformInput::MouseMove(_));
+        let flush_before = matches!(
+            event,
+            PlatformInput::MouseDown(_) | PlatformInput::MouseUp(_)
+        );
+        if defer_move {
+            lock.pending_mouse_move = Some(event);
+            // 窗口不可见时显示链是停的. 不在这里拉起来的话, 这颗移动
+            // 要等下一次遮挡变化才出得去.
+            if lock.display_link.is_none() {
+                lock.start_display_link();
+            }
+            return;
         }
+        drop(lock);
+        if flush_before {
+            flush_pending_mouse_move(&window_state);
+        }
+        send_new_event(&window_state, event);
     }
 }
 
@@ -2135,6 +2156,7 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
 
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
+    flush_pending_mouse_move(&window_state);
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.request_frame_callback.take() {
         #[cfg(not(feature = "macos-blade"))]
@@ -2154,6 +2176,7 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
 unsafe extern "C" fn step(view: *mut c_void) {
     let view = view as id;
     let window_state = unsafe { get_window_state(&*view) };
+    flush_pending_mouse_move(&window_state);
     let mut lock = window_state.lock();
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
@@ -2443,15 +2466,19 @@ async fn synthetic_drag(
         if let Some(window_state) = window_state.upgrade() {
             let mut lock = window_state.lock();
             if lock.synthetic_drag_counter == drag_id {
-                if let Some(mut callback) = lock.event_callback.take() {
-                    drop(lock);
-                    callback(PlatformInput::MouseMove(event.clone()));
-                    window_state.lock().event_callback = Some(callback);
-                }
+                // 跟真实移动走同一条合并路径, 不要在帧中间再打一颗进去.
+                lock.pending_mouse_move = Some(PlatformInput::MouseMove(event.clone()));
             } else {
                 break;
             }
         }
+    }
+}
+
+fn flush_pending_mouse_move(window_state: &Mutex<MacWindowState>) {
+    let pending = window_state.lock().pending_mouse_move.take();
+    if let Some(event) = pending {
+        send_new_event(window_state, event);
     }
 }
 
