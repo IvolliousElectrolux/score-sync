@@ -722,6 +722,7 @@ impl ScoreSyncApp {
         self.status = "已调整页面顺序.".into();
         self.hint = self.status.clone();
         self.after_doc_change(cx);
+        self.request_page_window(cx);
         self.sync_organize_after_doc(cx);
     }
 

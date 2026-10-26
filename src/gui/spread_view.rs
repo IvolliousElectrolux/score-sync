@@ -959,6 +959,7 @@ impl ScoreSyncApp {
                 self.prune_spread_page_ids();
                 self.mark_dirty();
                 self.mark_video_pool_dirty_all();
+                self.request_page_window(cx);
                 self.status = "已调整页序, 对开已按新顺序重配.".into();
                 self.hint = self.status.clone();
                 self.refresh_render(cx);

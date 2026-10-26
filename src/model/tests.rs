@@ -484,6 +484,26 @@ fn move_pages_block_inserts_before_anchor() {
 }
 
 #[test]
+fn move_page_drops_outside_images_without_decoding_new_neighbors() {
+    let mut doc = DocState::new();
+    for _ in 0..12 {
+        doc.pages.push(stub_page(40));
+    }
+    let px = Arc::new(image::RgbImage::from_raw(1, 1, vec![1, 2, 3]).unwrap());
+    doc.pages[0].image = Some(px.clone());
+    doc.pages[1].image = Some(px);
+    seed_bands(&mut doc, 0, &[(10, 20)]);
+    seed_bands(&mut doc, 1, &[(30, 40)]);
+    doc.current_page_index = 0;
+    doc.move_page(0, 11);
+    assert_eq!(doc.current_page_index, 11);
+    assert!(doc.pages[11].image.is_some());
+    assert!(doc.pages[0].image.is_none());
+    assert!(doc.pages[8].image.is_none());
+    assert_eq!(group_y0s(&doc), vec![(0, 30), (11, 10)]);
+}
+
+#[test]
 fn close_pages_at_prefers_next_then_prev() {
     let mut doc = DocState::new();
     for i in 0..6 {

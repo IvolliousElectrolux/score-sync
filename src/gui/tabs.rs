@@ -926,6 +926,7 @@ impl ScoreSyncApp {
                             this.push_crop_undo_all_pages();
                             this.doc.move_page(from, to);
                             this.after_doc_change(cx);
+                            this.request_page_window(cx);
                         } else {
                             cx.notify();
                         }

@@ -67,8 +67,28 @@ impl DocState {
     }
 
     /// 只留当前页附近的解码像素, 半径见 [`Self::memory_window_radius`].
+    /// 缺的页在这里同步解码. 拖完页序不要走这条, 用
+    /// [`Self::release_outside_memory_window`], 再让界面后台补图.
     pub fn retain_memory_window(&mut self) {
         self.retain_window(self.current_page_index, self.memory_window_radius());
+    }
+
+    /// 卸掉当前页窗口以外的像素, 不解码. 松手调序时同步解码旁边几页原图
+    /// 会把界面卡住; 缺的页由 `request_page_window` 在后台补.
+    pub fn release_outside_memory_window(&mut self) {
+        let n = self.pages.len();
+        if n == 0 {
+            return;
+        }
+        let center = self.current_page_index.min(n - 1);
+        let radius = self.memory_window_radius();
+        let lo = center.saturating_sub(radius);
+        let hi = (center + radius).min(n - 1);
+        for i in 0..n {
+            if i < lo || i > hi {
+                self.unload_page_image(i);
+            }
+        }
     }
 
     /// 内存只保留 `center ± radius` 页的像素.
@@ -325,9 +345,11 @@ impl DocState {
         } else if from > self.current_page_index && to <= self.current_page_index {
             self.current_page_index += 1;
         }
-        self.sort_groups();
-        self.retain_memory_window();
+        // 先按新页序重建区域索引, 再排序. 索引还指着旧位置时,
+        // 每个组合都会把全部页扫一遍.
         self.rebuild_rid_index();
+        self.sort_groups();
+        self.release_outside_memory_window();
         if self.is_spread() {
             self.rebuild_spreads();
         }
@@ -375,9 +397,9 @@ impl DocState {
                 self.current_page_index = 0;
             }
         }
-        self.sort_groups();
-        self.retain_memory_window();
         self.rebuild_rid_index();
+        self.sort_groups();
+        self.release_outside_memory_window();
         if self.is_spread() {
             self.rebuild_spreads();
         }

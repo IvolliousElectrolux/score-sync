@@ -204,6 +204,7 @@ impl ScoreSyncApp {
                     self.push_crop_undo_all_pages();
                     self.doc.move_page(from, to);
                     self.after_doc_change(cx);
+                    self.request_page_window(cx);
                 } else {
                     cx.notify();
                 }
