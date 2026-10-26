@@ -504,6 +504,27 @@ fn move_page_drops_outside_images_without_decoding_new_neighbors() {
 }
 
 #[test]
+fn close_pages_at_drops_outside_images_without_decoding() {
+    let mut doc = DocState::new();
+    for _ in 0..12 {
+        doc.pages.push(stub_page(40));
+    }
+    let img = Arc::new(image::RgbImage::from_pixel(
+        80,
+        40,
+        image::Rgb([1, 2, 3]),
+    ));
+    doc.pages[5].image = Some(img.clone());
+    doc.pages[11].image = Some(img);
+    doc.current_page_index = 5;
+    doc.close_pages_at(&[0]);
+    assert_eq!(doc.current_page_index, 4);
+    assert!(doc.pages[4].image.is_some());
+    assert!(doc.pages[10].image.is_none());
+    assert!(doc.pages[8].image.is_none());
+}
+
+#[test]
 fn close_pages_at_prefers_next_then_prev() {
     let mut doc = DocState::new();
     for i in 0..6 {

@@ -284,6 +284,65 @@ fn spread_caption_px(fit: SpreadFit) -> f32 {
     ((fit.thumb_w - 4.0) / fit.scale.max(0.2)).max(8.0)
 }
 
+/// 同一列里相邻两册的顶边距. 直接看已经画出来的页格, 不估一个固定册高.
+fn measure_spread_stride(bounds: &HashMap<usize, Bounds<Pixels>>) -> Option<f32> {
+    let mut pts: Vec<(f32, f32)> = bounds
+        .values()
+        .map(|b| (f32::from(b.origin.x), f32::from(b.origin.y)))
+        .collect();
+    if pts.len() < 2 {
+        return None;
+    }
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut best: Option<f32> = None;
+    for (i, &(x0, y0)) in pts.iter().enumerate() {
+        for &(x1, y1) in pts.iter().skip(i + 1) {
+            if (x0 - x1).abs() > 2.0 {
+                break;
+            }
+            let dy = (y1 - y0).abs();
+            if dy < 32.0 {
+                continue;
+            }
+            best = Some(best.map(|v| v.min(dy)).unwrap_or(dy));
+        }
+    }
+    best
+}
+
+/// 可见册行 `[start, end)`, 上下各多留一行. 视口高度还没有时返回全部.
+fn spread_visible_rows(rows: usize, stride: f32, off_y: f32, view_h: f32) -> (usize, usize) {
+    if rows == 0 {
+        return (0, 0);
+    }
+    if view_h < 32.0 || stride < 8.0 {
+        return (0, rows);
+    }
+    let start = ((off_y - SPREAD_SCROLL_PAD) / stride).floor();
+    let end = ((off_y + view_h - SPREAD_SCROLL_PAD) / stride).ceil();
+    let row0 = (start as isize - 1).max(0) as usize;
+    let row1 = ((end as isize + 1).max(0) as usize).min(rows);
+    (row0.min(rows), row1.max(row0.min(rows)))
+}
+
+/// 顶部占位. 占位后面还有一条 flex gap, 加起来等于被省掉的行高.
+fn spread_spacer_before(row0: usize, stride: f32) -> Option<f32> {
+    if row0 == 0 {
+        return None;
+    }
+    let h = row0 as f32 * stride - SPREAD_BOOK_GAP;
+    (h > 0.5).then_some(h)
+}
+
+/// 底部占位. 前面还有一条 flex gap.
+fn spread_spacer_after(remaining_rows: usize, stride: f32) -> Option<f32> {
+    if remaining_rows == 0 {
+        return None;
+    }
+    let h = remaining_rows as f32 * stride - SPREAD_BOOK_GAP;
+    (h > 0.5).then_some(h)
+}
+
 impl ScoreSyncApp {
     /// 对开网格真正能用来排册的宽度: 左栏去掉分隔条, 右侧滚动条和四周留白.
     fn spread_row_avail(&self) -> f32 {
@@ -294,9 +353,34 @@ impl ScoreSyncApp {
     pub(super) fn spread_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         self.queue_spread_thumbs(cx);
         let n = self.doc.pages.len();
-        let rows = n.div_ceil(2);
-        let fit = spread_fit(self.spread_row_avail(), rows);
-        self.spread_cells.clear();
+        let book_n = n.div_ceil(2);
+        let avail = self.spread_row_avail();
+        let cols = spread_books_per_row(avail, book_n).max(1);
+        let visual_rows = book_n.div_ceil(cols);
+        let fit = spread_fit(avail, book_n);
+        let stride = measure_spread_stride(&self.spread_cells).or(self.spread_row_stride);
+        let (row0, row1) = if let Some(stride) = stride {
+            if book_n > cols.saturating_mul(3) {
+                let view_h = f32::from(self.page_organize_scroll.bounds().size.height);
+                let off = (-f32::from(self.page_organize_scroll.offset().y)).max(0.0);
+                spread_visible_rows(visual_rows, stride, off, view_h)
+            } else {
+                (0, visual_rows)
+            }
+        } else {
+            (0, visual_rows)
+        };
+        let book0 = row0.saturating_mul(cols).min(book_n);
+        let book1 = row1.saturating_mul(cols).min(book_n);
+        let page0 = book0.saturating_mul(2).min(n);
+        let page1 = book1.saturating_mul(2).min(n);
+        if let Some(stride) = stride {
+            self.spread_row_stride = Some(stride);
+        }
+        self.spread_cells.retain(|i, _| (page0..page1).contains(i));
+        self.spread_caption_bounds
+            .retain(|i, _| (page0..page1).contains(i));
+        let suppress_pointer = self.spread_drag.is_some();
         let moving: HashSet<usize> = self
             .spread_drag
             .as_ref()
@@ -322,8 +406,27 @@ impl ScoreSyncApp {
                     .child("还没有页面. 用「打开」导入 PDF 或图片, 将按顺序两两对开."),
             );
         }
-        for row in 0..rows {
-            books = books.child(self.spread_book(row, &moving, fit, cx));
+        if let Some(h) = stride.and_then(|s| spread_spacer_before(row0, s)) {
+            books = books.child(
+                div()
+                    .id("spread_pad_before")
+                    .w_full()
+                    .h(px(h))
+                    .flex_shrink_0(),
+            );
+        }
+        for row in book0..book1 {
+            books = books.child(self.spread_book(row, &moving, fit, suppress_pointer, cx));
+        }
+        if let Some(h) = stride.and_then(|s| spread_spacer_after(visual_rows.saturating_sub(row1), s))
+        {
+            books = books.child(
+                div()
+                    .id("spread_pad_after")
+                    .w_full()
+                    .h(px(h))
+                    .flex_shrink_0(),
+            );
         }
         div()
             .id("spread_workspace")
@@ -362,6 +465,7 @@ impl ScoreSyncApp {
         row: usize,
         moving: &HashSet<usize>,
         fit: SpreadFit,
+        suppress_pointer: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let n = self.doc.pages.len();
@@ -406,10 +510,22 @@ impl ScoreSyncApp {
                     .flex()
                     .flex_row()
                     .items_start()
-                    .child(self.spread_page_half(left, moving.contains(&left), fit, cx))
+                    .child(self.spread_page_half(
+                        left,
+                        moving.contains(&left),
+                        fit,
+                        suppress_pointer,
+                        cx,
+                    ))
                     .child(self.spread_spine(fit))
                     .when(right < n, |d| {
-                        d.child(self.spread_page_half(right, moving.contains(&right), fit, cx))
+                        d.child(self.spread_page_half(
+                            right,
+                            moving.contains(&right),
+                            fit,
+                            suppress_pointer,
+                            cx,
+                        ))
                     })
                     .when(right >= n, |d| d.child(self.spread_empty_half(fit))),
             )
@@ -461,6 +577,7 @@ impl ScoreSyncApp {
         idx: usize,
         dragging: bool,
         fit: SpreadFit,
+        suppress_pointer: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let page = &self.doc.pages[idx];
@@ -505,7 +622,7 @@ impl ScoreSyncApp {
             .items_center()
             .gap(px(4.0 * fit.scale))
             .rounded_sm()
-            .cursor_pointer()
+            .when(!suppress_pointer, |d| d.cursor_pointer())
             .when(selected, |d| d.bg(ui_kit::chrome(0xeff6ff)))
             .when(dragging, |d| d.opacity(0.4))
             .child(Self::measure_spread_cell(entity, idx))
@@ -606,7 +723,13 @@ impl ScoreSyncApp {
                         )
                     }),
             )
-            .child(self.spread_caption_hover_line(idx, &full_title, &title, fit, cx))
+            .child(if suppress_pointer {
+                self.spread_caption_line(&title, fit.thumb_w)
+                    .into_any_element()
+            } else {
+                self.spread_caption_hover_line(idx, &full_title, &title, fit, cx)
+                    .into_any_element()
+            })
             .when(line_before, |d| {
                 d.child(
                     div()
@@ -907,6 +1030,11 @@ impl ScoreSyncApp {
         let Some(mut drag) = self.spread_drag.take() else {
             return;
         };
+        let was_armed = drag.armed;
+        let prev_line = drag.line_at;
+        let prev_after = drag.line_after;
+        let prev_x = drag.x;
+        let prev_y = drag.y;
         if !drag.armed && Self::reorder_slop_exceeded(x - drag.start_x, y - drag.start_y) {
             drag.armed = true;
         }
@@ -928,8 +1056,13 @@ impl ScoreSyncApp {
                 }
             }
         }
+        let unchanged = drag.armed == was_armed
+            && drag.line_at == prev_line
+            && drag.line_after == prev_after
+            && (drag.x - prev_x).abs() < 0.5
+            && (drag.y - prev_y).abs() < 0.5;
         self.spread_drag = Some(drag);
-        if self.spread_drag.as_ref().is_some_and(|d| d.armed) {
+        if !unchanged {
             cx.notify();
         }
     }
@@ -953,16 +1086,14 @@ impl ScoreSyncApp {
                 self.insert_spread_blank_with(at, "已在原位置补上空白页, 左页单独留下.", cx);
             }
             Some(SpreadDropKind::Move { anchor, after }) => {
+                let shown = self.shown_page_token();
                 let moving = self.spread_moving(drag.from);
                 self.push_crop_undo_page_structure();
                 self.doc.move_pages_block(&moving, anchor, after);
                 self.prune_spread_page_ids();
-                self.mark_dirty();
-                self.mark_video_pool_dirty_all();
-                self.request_page_window(cx);
                 self.status = "已调整页序, 对开已按新顺序重配.".into();
                 self.hint = self.status.clone();
-                self.refresh_render(cx);
+                self.finish_page_structure_edit(shown, cx);
             }
             None => cx.notify(),
         }
@@ -1149,6 +1280,7 @@ impl ScoreSyncApp {
         if idxs.is_empty() {
             return;
         }
+        let shown = self.shown_page_token();
         self.push_crop_undo_page_structure();
         let n = idxs.len();
         let dead = self.doc.close_pages_at(&idxs);
@@ -1161,11 +1293,9 @@ impl ScoreSyncApp {
             }
         }
         self.spread_menu = None;
-        self.mark_dirty();
-        self.mark_video_pool_dirty_all();
         self.status = format!("已删除 {n} 页, 对开已重配.").into();
         self.hint = self.status.clone();
-        self.refresh_render(cx);
+        self.finish_page_structure_edit(shown, cx);
     }
 
     fn spread_keys_live(&self) -> bool {
@@ -1302,14 +1432,13 @@ impl ScoreSyncApp {
     }
 
     fn insert_spread_blank_with(&mut self, index: usize, status: &str, cx: &mut Context<Self>) {
+        let shown = self.shown_page_token();
         self.push_crop_undo_page_structure();
         match self.doc.insert_blank_page(index) {
             Ok(stayed) => {
                 self.spread_menu = None;
                 self.spread_drag = None;
                 self.prune_spread_page_ids();
-                self.mark_dirty();
-                self.mark_video_pool_dirty_all();
                 self.request_organize_thumbs(cx);
                 self.status = if stayed.is_some() {
                     status.to_string().into()
@@ -1317,7 +1446,7 @@ impl ScoreSyncApp {
                     "这一对都是空页, 已经去掉.".into()
                 };
                 self.hint = self.status.clone();
-                self.refresh_render(cx);
+                self.finish_page_structure_edit(shown, cx);
             }
             Err(e) => {
                 self.page_struct_history.undo.pop();
@@ -1793,6 +1922,26 @@ mod tests {
         let w = spread_book_width(narrow, 4);
         assert!((w - (narrow - 1.0)).abs() < 0.01);
         assert_eq!(spread_book_width(0.0, 0), SPREAD_BOOK_W);
+    }
+
+    #[test]
+    fn spread_spacers_fill_the_rows_they_replace() {
+        let stride = 180.0;
+        assert_eq!(spread_spacer_before(0, stride), None);
+        assert_eq!(spread_spacer_before(2, stride), Some(2.0 * stride - SPREAD_BOOK_GAP));
+        assert_eq!(spread_spacer_after(0, stride), None);
+        assert_eq!(spread_spacer_after(3, stride), Some(3.0 * stride - SPREAD_BOOK_GAP));
+    }
+
+    #[test]
+    fn spread_visible_rows_overscans_one_row() {
+        let (a, b) = spread_visible_rows(10, 200.0, 0.0, 400.0);
+        assert_eq!(a, 0);
+        assert!(b >= 2 && b <= 5, "{b}");
+        let (a, b) = spread_visible_rows(10, 200.0, 500.0, 200.0);
+        assert!(a >= 1, "{a}");
+        assert!(b > a && b <= 10, "{a} {b}");
+        assert_eq!(spread_visible_rows(4, 200.0, 0.0, 0.0), (0, 4));
     }
 
     #[test]

@@ -246,6 +246,8 @@ pub(crate) struct ScoreSyncApp {
     page_organize_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
     spread_cells: HashMap<usize, Bounds<Pixels>>,
+    /// 上一帧量到的册行距. 页多时只排可见的几行, 没量到之前先排全部.
+    spread_row_stride: Option<f32>,
     /// 对开文件名那一行的屏幕范围, 悬浮提示锚在这里
     spread_caption_bounds: HashMap<usize, Bounds<Pixels>>,
     /// 点选顺序. 复制时按这个顺序收成一串, 不按页序.
@@ -534,6 +536,7 @@ impl ScoreSyncApp {
             page_organize_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
             spread_cells: HashMap::new(),
+            spread_row_stride: None,
             spread_caption_bounds: HashMap::new(),
             spread_selected: Vec::new(),
             spread_anchor: None,

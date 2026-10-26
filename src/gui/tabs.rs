@@ -208,6 +208,7 @@ impl ScoreSyncApp {
         if index >= self.doc.pages.len() {
             return;
         }
+        let shown = self.shown_page_token();
         self.push_crop_undo_page_structure();
         let pid = self.doc.pages.get(index).map(|p| p.id.clone());
         if self.doc.close_page_at(index) {
@@ -216,7 +217,7 @@ impl ScoreSyncApp {
             }
             self.status = format!("已关闭页面 ({}Z 可撤回).", apply_bg::primary_mod()).into();
             self.hint = self.status.clone();
-            self.refresh_render(cx);
+            self.finish_page_structure_edit(shown, cx);
         } else {
             // close 失败则丢掉刚压的空操作
             self.page_struct_history.undo.pop();

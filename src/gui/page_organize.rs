@@ -331,6 +331,7 @@ impl ScoreSyncApp {
         if idxs.is_empty() {
             return;
         }
+        let shown = self.shown_page_token();
         self.push_crop_undo_page_structure();
         let n = idxs.len();
         let dead = self.doc.close_pages_at(&idxs);
@@ -347,8 +348,7 @@ impl ScoreSyncApp {
         }
         self.status = format!("已删除 {n} 页 ({}Z 可撤回).", apply_bg::primary_mod()).into();
         self.hint = self.status.clone();
-        self.sync_organize_after_doc(cx);
-        self.refresh_render(cx);
+        self.finish_page_structure_edit(shown, cx);
     }
 
     pub(super) fn undo_organize(&mut self, cx: &mut Context<Self>) {

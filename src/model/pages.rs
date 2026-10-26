@@ -324,7 +324,7 @@ impl DocState {
         } else {
             self.current_page_index = 0;
         }
-        self.retain_memory_window();
+        self.release_outside_memory_window();
         self.rebuild_rid_index();
         if self.is_spread() {
             self.rebuild_spreads();
