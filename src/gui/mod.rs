@@ -175,6 +175,15 @@ pub(crate) struct ScoreSyncApp {
     settings_page: settings::SettingsPage,
     settings_capture: Option<(String, usize)>,
     settings_conflict: SharedString,
+    /// 快捷键页的搜索框. 父视图观察它, 文字一变就重滤列表.
+    settings_key_query: Entity<TextInput>,
+    /// 必须留着, 否则观察会立刻取消.
+    #[allow(dead_code)]
+    settings_key_query_sub: gpui::Subscription,
+    /// 与输入框内容同步, 避免在渲染里再读一遍.
+    settings_key_filter: String,
+    /// 录键搜索: 下一击写入搜索框, 而不是改绑定.
+    settings_key_record: bool,
     capture_sub: Option<gpui::Subscription>,
     /// 窗口移动/缩放观察, 必须留着, 否则订阅会立刻取消.
     window_place_sub: Option<gpui::Subscription>,
@@ -336,6 +345,20 @@ impl ScoreSyncApp {
         let pdf_h_input = cx.new(|cx| TextInput::new(cx, "", "高").with_compact(true));
         let pdf_scale_input = cx.new(|cx| TextInput::new(cx, "", "倍率").with_compact(true));
         let pdf_preview_page_input = cx.new(|cx| TextInput::new(cx, "1", "页").with_compact(true));
+        let settings_key_query = cx.new(|cx| {
+            TextInput::new(cx, "", ui_kit::t("settings.search_keys"))
+        });
+        let settings_key_query_sub = cx.observe(&settings_key_query, |this, input, cx| {
+            let (focused, text) = input.update(cx, |input, _| (input.take_focus_commit(), input.text()));
+            if focused {
+                this.end_key_search(cx);
+            }
+            if this.settings_key_filter != text {
+                this.settings_key_filter = text;
+                this.settings_scroll.set_offset(point(px(0.), px(0.)));
+            }
+            cx.notify();
+        });
         let mask_tool = cx.new(|cx| {
             let mut m = MaskToolApp::new(cx, None);
             m.apply_color_prefs(mask_prefs.clone());
@@ -463,6 +486,10 @@ impl ScoreSyncApp {
             settings_page: settings::SettingsPage::Project,
             settings_capture: None,
             settings_conflict: SharedString::default(),
+            settings_key_query,
+            settings_key_query_sub,
+            settings_key_filter: String::new(),
+            settings_key_record: false,
             capture_sub: None,
             window_place_sub: None,
             window_place_gen: 0,

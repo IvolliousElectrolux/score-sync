@@ -36,6 +36,7 @@ impl ScoreSyncApp {
         }
         self.settings_open = true;
         self.settings_conflict = SharedString::default();
+        self.sync_key_search_placeholder(cx);
         cx.notify();
     }
 
@@ -44,6 +45,12 @@ impl ScoreSyncApp {
         self.settings_open = false;
         self.settings_conflict = SharedString::default();
         cx.notify();
+    }
+
+    fn sync_key_search_placeholder(&mut self, cx: &mut Context<Self>) {
+        let placeholder = t("settings.search_keys");
+        self.settings_key_query
+            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
     }
 
     pub(super) fn settings_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -445,6 +452,7 @@ impl ScoreSyncApp {
                 cx,
                 |this, _, cx| {
                     ui_kit::set_language(ui_kit::Language::Zh);
+                    this.sync_key_search_placeholder(cx);
                     this.persist_prefs(cx);
                 },
             ))
@@ -456,6 +464,7 @@ impl ScoreSyncApp {
                 cx,
                 |this, _, cx| {
                     ui_kit::set_language(ui_kit::Language::En);
+                    this.sync_key_search_placeholder(cx);
                     this.persist_prefs(cx);
                 },
             ))
@@ -530,9 +539,23 @@ impl ScoreSyncApp {
 
     fn settings_keys(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ui_kit::theme();
+        let query = self.settings_key_filter.clone();
+        let record_label = if self.settings_key_record {
+            t("settings.capture")
+        } else {
+            t("settings.record_keys")
+        };
         let mut list = div().id("settings_key_list").flex().flex_col().gap(px(2.));
         let mut last = None;
+        let mut shown = 0usize;
         for cmd in COMMANDS {
+            let label = t(cmd.id);
+            let group = t(keymap::group_label(cmd.group));
+            let keys = keymap::effective_keys(cmd.id);
+            if !keymap::command_matches(label.as_ref(), cmd.id, group.as_ref(), &keys, &query) {
+                continue;
+            }
+            shown += 1;
             if last != Some(cmd.group) {
                 last = Some(cmd.group);
                 list = list.child(
@@ -541,10 +564,19 @@ impl ScoreSyncApp {
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(theme.text_muted))
-                        .child(t(keymap::group_label(cmd.group))),
+                        .child(group),
                 );
             }
             list = list.child(self.settings_key_row(cmd, cx));
+        }
+        if shown == 0 {
+            list = list.child(
+                div()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child(t("settings.search_empty")),
+            );
         }
         div()
             .flex_1()
@@ -581,6 +613,54 @@ impl ScoreSyncApp {
                             keymap::clear_overrides();
                             this.settings_conflict = SharedString::default();
                             this.persist_prefs(cx);
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(self.settings_key_query.clone()),
+                    )
+                    .when(!query.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .id("key-search-clear")
+                                .px_1()
+                                .text_sm()
+                                .text_color(rgb(theme.text_muted))
+                                .cursor_pointer()
+                                .child("×")
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.settings_key_query
+                                            .update(cx, |input, cx| input.set_text("", cx));
+                                    }),
+                                ),
+                        )
+                    })
+                    .child(self.settings_text_btn(
+                        "record-keys",
+                        &record_label,
+                        self.settings_key_record,
+                        cx,
+                        |this, window, cx| {
+                            if this.settings_key_record {
+                                this.end_key_search(cx);
+                            } else {
+                                this.begin_key_search(window, cx);
+                            }
                         },
                     )),
             )
@@ -825,9 +905,51 @@ impl ScoreSyncApp {
 
     pub(super) fn end_shortcut_capture(&mut self, cx: &mut Context<Self>) {
         self.capture_sub = None;
-        if self.settings_capture.take().is_some() {
+        let searching = self.settings_key_record;
+        self.settings_key_record = false;
+        if self.settings_capture.take().is_some() || searching {
             cx.notify();
         }
+    }
+
+    pub(super) fn end_key_search(&mut self, cx: &mut Context<Self>) {
+        if self.settings_key_record {
+            self.end_shortcut_capture(cx);
+        }
+    }
+
+    fn begin_key_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_shortcut_capture(cx);
+        self.settings_key_record = true;
+        window.blur();
+        let entity = cx.entity().clone();
+        self.capture_sub = Some(cx.intercept_keystrokes(move |event, _, app| {
+            let keystroke = event.keystroke.clone();
+            entity.update(app, |this, cx| this.on_search_key(keystroke, cx));
+            app.stop_propagation();
+        }));
+        cx.notify();
+    }
+
+    fn on_search_key(&mut self, keystroke: gpui::Keystroke, cx: &mut Context<Self>) {
+        if !self.settings_key_record {
+            return;
+        }
+        if keystroke.key.eq_ignore_ascii_case("escape") && !keystroke.modifiers.modified() {
+            self.end_key_search(cx);
+            return;
+        }
+        if keystroke.key.eq_ignore_ascii_case("backspace") && !keystroke.modifiers.modified() {
+            self.settings_key_query
+                .update(cx, |input, cx| input.set_text("", cx));
+            return;
+        }
+        let Some(logical) = keymap::logical_from(&keystroke) else {
+            return;
+        };
+        let shown = keymap::display_key(&logical);
+        self.settings_key_query
+            .update(cx, |input, cx| input.set_text(shown, cx));
     }
 
     fn on_shortcut_key(&mut self, keystroke: gpui::Keystroke, cx: &mut Context<Self>) {

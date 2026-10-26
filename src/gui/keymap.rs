@@ -580,6 +580,169 @@ fn normalize(key: &str) -> String {
     key.trim().to_ascii_lowercase()
 }
 
+/// 快捷键页的搜索. 名称, 命令 id, 分组名, 以及键位都能对上.
+/// 键位忽略大小写和空格, `+` / `-` 等价; Ctrl / Cmd / ⌘ 都认主修饰键.
+pub(crate) fn command_matches(
+    label: &str,
+    id: &str,
+    group: &str,
+    keys: &[String],
+    query: &str,
+) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    if text_hit(label, query) || text_hit(id, query) || text_hit(group, query) || keys_hit(keys, query)
+    {
+        return true;
+    }
+    let words: Vec<&str> = query.split_whitespace().filter(|word| !word.is_empty()).collect();
+    words.len() > 1
+        && words.iter().all(|word| {
+            text_hit(label, word) || text_hit(id, word) || text_hit(group, word) || keys_hit(keys, word)
+        })
+}
+
+fn text_hit(hay: &str, query: &str) -> bool {
+    let query = query.trim();
+    !query.is_empty() && hay.to_lowercase().contains(&query.to_lowercase())
+}
+
+fn keys_hit(keys: &[String], query: &str) -> bool {
+    let query = fold_key_query(query);
+    if query.is_empty() {
+        return false;
+    }
+    keys.iter().any(|key| {
+        !key.is_empty()
+            && key_haystacks(key)
+                .iter()
+                .any(|hay| chord_contains(hay, &query))
+    })
+}
+
+/// 查询串收成 `ctrl+shift+s` 这种片段. 空格去掉, 符号换成单词.
+fn fold_key_query(raw: &str) -> String {
+    let mut text = raw.trim().to_lowercase();
+    text = text.replace('＋', "+").replace('－', "+").replace('-', "+");
+    text = text
+        .replace('⌘', "cmd+")
+        .replace('⇧', "shift+")
+        .replace('⌥', "alt+")
+        .replace('←', "left")
+        .replace('→', "right")
+        .replace('↑', "up")
+        .replace('↓', "down");
+    text.retain(|ch| !ch.is_whitespace());
+    while text.contains("++") {
+        text = text.replace("++", "+");
+    }
+    text.split('+')
+        .filter(|part| !part.is_empty())
+        .map(canon_token)
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn canon_token(token: &str) -> String {
+    match token {
+        "control" => "ctrl".into(),
+        "command" | "meta" | "win" | "super" => "cmd".into(),
+        "option" | "opt" => "alt".into(),
+        "primary" => {
+            if cfg!(target_os = "macos") {
+                "cmd"
+            } else {
+                "ctrl"
+            }
+        }
+        .into(),
+        "escape" => "esc".into(),
+        "delete" => "del".into(),
+        "return" => "enter".into(),
+        other => other.to_string(),
+    }
+}
+
+fn key_haystacks(logical: &str) -> Vec<String> {
+    let (mods, body) = split_mods(logical);
+    let bodies = body_canons(body);
+    let mut out = Vec::new();
+    for mods in modifier_lists(mods) {
+        for body in &bodies {
+            if mods.is_empty() {
+                out.push(body.clone());
+            } else {
+                let mut chord = mods.join("+");
+                chord.push('+');
+                chord.push_str(body);
+                out.push(chord);
+            }
+        }
+    }
+    out
+}
+
+fn body_canons(body: &str) -> Vec<String> {
+    let lower = body.to_ascii_lowercase();
+    match lower.as_str() {
+        "escape" => vec!["esc".into()],
+        "delete" => vec!["del".into()],
+        "return" => vec!["enter".into()],
+        "space" => vec!["space".into(), "空格".into()],
+        _ => vec![lower],
+    }
+}
+
+/// 主修饰键同时给出 ctrl 和 cmd, 因为绑定本身两套都生效.
+fn modifier_lists(mods: &str) -> Vec<Vec<&'static str>> {
+    match mods {
+        "" => vec![vec![]],
+        "shift" => vec![vec!["shift"]],
+        "alt" => vec![vec!["alt"]],
+        "ctrl" => vec![vec!["ctrl"]],
+        "fn" => vec![vec!["fn"]],
+        "primary" => vec![vec!["ctrl"], vec!["cmd"]],
+        "primary-shift" => vec![vec!["ctrl", "shift"], vec!["cmd", "shift"]],
+        "primary-alt" => vec![vec!["ctrl", "alt"], vec!["cmd", "alt"]],
+        _ => Vec::new(),
+    }
+}
+
+/// `query` 按 `+` 对齐到 `hay` 的一段. 单个字母必须整段相等, 避免 `s` 命中 `shift`.
+fn chord_contains(hay: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    let hay: Vec<&str> = hay.split('+').filter(|part| !part.is_empty()).collect();
+    let query: Vec<&str> = query.split('+').filter(|part| !part.is_empty()).collect();
+    if query.is_empty() || query.len() > hay.len() {
+        return false;
+    }
+    hay.windows(query.len()).any(|window| {
+        window.iter().zip(query.iter()).enumerate().all(|(index, (left, right))| {
+            token_eq(left, right, index + 1 == query.len())
+        })
+    })
+}
+
+fn token_eq(hay: &str, query: &str, prefix_ok: bool) -> bool {
+    if hay == query {
+        return true;
+    }
+    if !prefix_ok || query.chars().count() <= 1 {
+        return false;
+    }
+    let function_key = |token: &str| {
+        token.starts_with('f') && token[1..].chars().all(|ch| ch.is_ascii_digit()) && token.len() > 1
+    };
+    if function_key(hay) && function_key(query) {
+        return false;
+    }
+    hay.starts_with(query)
+}
+
 fn contexts(id: &str) -> &'static [Option<&'static str>] {
     match id {
         "app.new" | "app.open_project" | "app.save" | "app.save_as" => HOST_FILE,
@@ -800,5 +963,44 @@ mod tests {
         map.insert("crop.detect".into(), vec!["not a key".into()]);
         let cmd = command("crop.detect").unwrap();
         assert_eq!(effective_in(&map, cmd), vec!["d".to_string()]);
+    }
+
+    #[test]
+    fn search_matches_name_id_and_chord() {
+        let save = ["primary-s".to_string()];
+        assert!(command_matches("保存工程", "app.save", "全局", &save, ""));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "保存"));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "save"));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "全局"));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "ctrl+s"));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "Ctrl + S"));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "cmd+s"));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "primary-s"));
+        assert!(command_matches("保存工程", "app.save", "全局", &save, "⌘s"));
+        assert!(!command_matches("保存工程", "app.save", "全局", &save, "识别"));
+        assert!(!command_matches("识别", "crop.detect", "分块", &["d".into()], "ctrl+s"));
+    }
+
+    #[test]
+    fn search_chord_does_not_swallow_extra_modifiers() {
+        let shifted = ["primary-shift-s".to_string()];
+        assert!(command_matches("另存", "app.save_as", "全局", &shifted, "ctrl+shift+s"));
+        assert!(command_matches("另存", "app.save_as", "全局", &shifted, "shift+s"));
+        assert!(command_matches("另存", "app.save_as", "全局", &shifted, "ctrl shift"));
+        assert!(!command_matches("另存", "app.save_as", "全局", &shifted, "ctrl+s"));
+        assert!(!command_matches("向左", "crop.prev", "分块", &["left".into()], "s"));
+        assert!(command_matches(
+            "向左",
+            "crop.prev",
+            "分块",
+            &["shift-left".into()],
+            "shift+left"
+        ));
+        assert!(command_matches("向左", "crop.prev", "分块", &["shift-left".into()], "←"));
+        assert!(!command_matches("向左", "crop.prev", "分块", &["shift-left".into()], "s"));
+        assert!(command_matches("播放", "video.play", "视频", &["space".into()], "空格"));
+        assert!(command_matches("播放", "video.play", "视频", &["space".into()], "space"));
+        assert!(!command_matches("帮助", "app.help", "全局", &["f1".into()], "f12"));
+        assert!(command_matches("保存工程", "app.save", "全局", &["primary-s".into()], "保存 工程"));
     }
 }
