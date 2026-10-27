@@ -35,9 +35,8 @@ pub struct BlockTile {
 
 /// 分块局部 `(x, y, w, h)` 按逻辑尺寸光栅成 `tex_w × tex_h` 的 RGBA.
 /// 矢量页用它按视口重渲, 不从磁盘位图裁.
-pub type PieceRaster = std::sync::Arc<
-    dyn Fn(u32, u32, u32, u32, u32, u32) -> Option<image::RgbaImage> + Send + Sync,
->;
+pub type PieceRaster =
+    std::sync::Arc<dyn Fn(u32, u32, u32, u32, u32, u32) -> Option<image::RgbaImage> + Send + Sync>;
 
 /// 分块原图像素在磁盘上的位置. `flat` 时文件本身就是这块;
 /// 否则是整页, 条带为 `[band_y, band_y+band_h)`.
@@ -622,7 +621,8 @@ impl MaskToolApp {
                 .collect();
             let boxes = crate::layout::spread_boxes(&sizes, &self.block_layout);
             for b in boxes.iter().rev() {
-                let Some(tile) = self.block_tiles.iter().find(|t| t.region_id == b.region_id) else {
+                let Some(tile) = self.block_tiles.iter().find(|t| t.region_id == b.region_id)
+                else {
                     continue;
                 };
                 let x0 = canvas_x(b.x as f32);
@@ -949,8 +949,7 @@ impl MaskToolApp {
     fn spread_shift_pad(&self) -> (i64, i64) {
         let sizes = self.spread_sizes();
         let (pad_x, pad_y) = layout::spread_canvas_pad(&sizes, &self.block_layout);
-        let (base_x, base_y) =
-            layout::spread_canvas_pad(&sizes, &self.spread_unshifted_layout());
+        let (base_x, base_y) = layout::spread_canvas_pad(&sizes, &self.spread_unshifted_layout());
         (pad_x - base_x, pad_y - base_y)
     }
 
@@ -995,7 +994,13 @@ impl MaskToolApp {
         if bg.aspect_w == 0 || bg.aspect_h == 0 {
             return 0;
         }
-        let sw = self.block_tiles.iter().map(|t| t.width).max().unwrap_or(1).max(1) as i64;
+        let sw = self
+            .block_tiles
+            .iter()
+            .map(|t| t.width)
+            .max()
+            .unwrap_or(1)
+            .max(1) as i64;
         let aw = bg.aspect_w.max(1) as i64;
         let ah = bg.aspect_h.max(1) as i64;
         ((ah * sw + aw / 2) / aw).max(1) as i32
@@ -1491,7 +1496,15 @@ impl MaskToolApp {
         iy: f32,
     ) -> (bool, bool) {
         if self.spread {
-            return self.apply_spread_move(region_id, start_ix, start_iy, start_layout, undid, ix, iy);
+            return self.apply_spread_move(
+                region_id,
+                start_ix,
+                start_iy,
+                start_layout,
+                undid,
+                ix,
+                iy,
+            );
         }
         if horizontal {
             return self.apply_block_shift_x_drag(region_id, start_ix, start_layout, undid, ix);

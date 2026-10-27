@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use apply_bg::palette::{self, PaletteSlot, SB_SIZE, HUE_BAR_W};
+use apply_bg::palette::{self, PaletteSlot, HUE_BAR_W, SB_SIZE};
 use gpui::{
     canvas, div, point, prelude::*, px, Bounds, Context, Entity, MouseButton, MouseDownEvent,
     MouseUpEvent, PathBuilder, Pixels, RenderImage,
@@ -443,8 +443,10 @@ impl VectorEditApp {
                 .background_spawn(async move {
                     let tex_w = (plan.w * plan.px).round().max(1.0) as u32;
                     let tex_h = (plan.h * plan.px).round().max(1.0) as u32;
-                    crate::raster::rasterize_rect(&doc, plan.x, plan.y, plan.w, plan.h, tex_w, tex_h)
-                        .ok()
+                    crate::raster::rasterize_rect(
+                        &doc, plan.x, plan.y, plan.w, plan.h, tex_w, tex_h,
+                    )
+                    .ok()
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -672,15 +674,18 @@ impl VectorEditApp {
                                 let prev = this.picker_layer_bounds;
                                 this.picker_layer_bounds = bounds;
                                 let changed = f32::from(prev.size.width) < 1.0
-                                    || (f32::from(prev.origin.x) - f32::from(bounds.origin.x)).abs()
+                                    || (f32::from(prev.origin.x) - f32::from(bounds.origin.x))
+                                        .abs()
                                         > 0.5
-                                    || (f32::from(prev.origin.y) - f32::from(bounds.origin.y)).abs()
+                                    || (f32::from(prev.origin.y) - f32::from(bounds.origin.y))
+                                        .abs()
                                         > 0.5
                                     || (f32::from(prev.size.width) - f32::from(bounds.size.width))
                                         .abs()
                                         > 0.5
-                                    || (f32::from(prev.size.height) - f32::from(bounds.size.height))
-                                        .abs()
+                                    || (f32::from(prev.size.height)
+                                        - f32::from(bounds.size.height))
+                                    .abs()
                                         > 0.5;
                                 if changed && this.palette_open {
                                     cx.notify();
@@ -771,7 +776,9 @@ impl VectorEditApp {
                         )
                         .when(place_below, |d| d.child(Self::picker_caret(true, caret_x)))
                         .child(self.palette_block(cx))
-                        .when(!place_below, |d| d.child(Self::picker_caret(false, caret_x))),
+                        .when(!place_below, |d| {
+                            d.child(Self::picker_caret(false, caret_x))
+                        }),
                 )
             })
     }

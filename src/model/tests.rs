@@ -509,11 +509,7 @@ fn close_pages_at_drops_outside_images_without_decoding() {
     for _ in 0..12 {
         doc.pages.push(stub_page(40));
     }
-    let img = Arc::new(image::RgbImage::from_pixel(
-        80,
-        40,
-        image::Rgb([1, 2, 3]),
-    ));
+    let img = Arc::new(image::RgbImage::from_pixel(80, 40, image::Rgb([1, 2, 3])));
     doc.pages[5].image = Some(img.clone());
     doc.pages[11].image = Some(img);
     doc.current_page_index = 5;
@@ -1085,8 +1081,14 @@ fn copy_pages_beside_shares_the_loaded_image() {
     let src_ptr = Arc::as_ptr(doc.pages[0].image.as_ref().unwrap());
     doc.copy_pages_beside(&[0], 0, true).unwrap();
     let copy = &doc.pages[1];
-    assert!(copy.image.as_ref().is_some_and(|img| Arc::as_ptr(img) == src_ptr));
-    assert!(doc.pages[0].image.as_ref().is_some_and(|img| Arc::as_ptr(img) == src_ptr));
+    assert!(copy
+        .image
+        .as_ref()
+        .is_some_and(|img| Arc::as_ptr(img) == src_ptr));
+    assert!(doc.pages[0]
+        .image
+        .as_ref()
+        .is_some_and(|img| Arc::as_ptr(img) == src_ptr));
     assert!(copy.disk_path.is_file());
     assert!(crate::page_cache::org_thumb_path(&copy.disk_path).is_file());
 }

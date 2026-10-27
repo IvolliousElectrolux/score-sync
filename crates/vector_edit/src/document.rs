@@ -85,9 +85,7 @@ impl Paint {
     }
 
     pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self {
-            rgba: [r, g, b, a],
-        }
+        Self { rgba: [r, g, b, a] }
     }
 }
 
@@ -406,7 +404,13 @@ impl VecDocument {
         out
     }
 
-    fn collect_leaves(&self, id: &str, out: &mut Vec<String>, seen: &mut HashSet<String>, depth: u8) {
+    fn collect_leaves(
+        &self,
+        id: &str,
+        out: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+        depth: u8,
+    ) {
         if depth > 32 || !seen.insert(id.to_string()) {
             return;
         }
@@ -576,7 +580,9 @@ impl VecDocument {
             layer.objects.retain(|o| !drop_objs.contains(o.id.as_str()));
             layer.groups.retain(|g| !drop_groups.contains(&g.id));
             for group in &mut layer.groups {
-                group.children.retain(|c| !drop_objs.contains(c.as_str()) && !drop_groups.contains(c));
+                group
+                    .children
+                    .retain(|c| !drop_objs.contains(c.as_str()) && !drop_groups.contains(c));
             }
             crate::outline::sanitize_layer(layer);
         }
@@ -769,8 +775,10 @@ impl VecDocument {
             source: self.source.clone(),
             layers: self.layers.iter().map(LayerRuntime::to_layer).collect(),
         };
-        let json = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("序列化场景失败: {e}"))?;
-        std::fs::write(dir.join("manifest.json"), json).map_err(|e| format!("写 manifest 失败: {e}"))?;
+        let json =
+            serde_json::to_vec_pretty(&manifest).map_err(|e| format!("序列化场景失败: {e}"))?;
+        std::fs::write(dir.join("manifest.json"), json)
+            .map_err(|e| format!("写 manifest 失败: {e}"))?;
         if let Ok(preview) = crate::raster::rasterize_rgba(self, 1.5) {
             let _ = preview.save(dir.join("preview.png"));
         }
@@ -778,7 +786,8 @@ impl VecDocument {
     }
 
     pub fn load_from_dir(dir: &Path) -> Result<Self, String> {
-        let raw = std::fs::read(dir.join("manifest.json")).map_err(|e| format!("读 manifest 失败: {e}"))?;
+        let raw = std::fs::read(dir.join("manifest.json"))
+            .map_err(|e| format!("读 manifest 失败: {e}"))?;
         let manifest: Manifest =
             serde_json::from_slice(&raw).map_err(|e| format!("解析场景失败: {e}"))?;
         if manifest.kind != KIND_VECTOR {
@@ -912,7 +921,10 @@ impl LayerRuntime {
                 out.insert(obj.id.clone());
                 continue;
             }
-            if parent.get(obj.id.as_str()).is_some_and(|p| hidden_group.contains(p)) {
+            if parent
+                .get(obj.id.as_str())
+                .is_some_and(|p| hidden_group.contains(p))
+            {
                 out.insert(obj.id.clone());
             }
         }
@@ -1152,13 +1164,21 @@ mod tests {
         let light = VecDocument::from_objects(
             10.0,
             10.0,
-            vec![ink_path([250, 250, 250]), ink_path([255, 255, 255]), ink_path([0, 0, 0])],
+            vec![
+                ink_path([250, 250, 250]),
+                ink_path([255, 255, 255]),
+                ink_path([0, 0, 0]),
+            ],
         );
         assert_eq!(contrast_backdrop(&light), 0x242428);
         let dark = VecDocument::from_objects(
             10.0,
             10.0,
-            vec![ink_path([0, 0, 0]), ink_path([12, 12, 12]), ink_path([255, 255, 255])],
+            vec![
+                ink_path([0, 0, 0]),
+                ink_path([12, 12, 12]),
+                ink_path([255, 255, 255]),
+            ],
         );
         assert_eq!(contrast_backdrop(&dark), 0xe7e7e7);
         assert_eq!(contrast_backdrop(&VecDocument::empty(10.0, 10.0)), 0xe7e7e7);

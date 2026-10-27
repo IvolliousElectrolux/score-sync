@@ -26,10 +26,7 @@ impl ScoreVideoApp {
             cx,
             || {
                 rfd::FileDialog::new()
-                    .add_filter(
-                        "音频",
-                        &["wav", "mp3", "flac", "ogg", "m4a", "aac", "m4b"],
-                    )
+                    .add_filter("音频", &["wav", "mp3", "flac", "ogg", "m4a", "aac", "m4b"])
                     .add_filter("M4A / AAC", &["m4a", "aac", "m4b"])
                     .pick_files()
             },
@@ -89,7 +86,9 @@ impl ScoreVideoApp {
             .audio_clips
             .iter()
             .map(|c| c.path.clone())
-            .filter(|p| crate::audio::needs_ffmpeg_preview(p) && !crate::audio::preview_wav_ready(p))
+            .filter(|p| {
+                crate::audio::needs_ffmpeg_preview(p) && !crate::audio::preview_wav_ready(p)
+            })
             .collect();
         if jobs.is_empty() {
             return;
@@ -185,7 +184,8 @@ impl ScoreVideoApp {
         self.timeline.selected_audio = None;
         self.drag_undo_pushed = false;
         if let Some(c) = self.timeline.video_clips.iter().find(|c| c.id == id) {
-            let origin_x = f32::from(self.tracks_bounds.origin.x) - (self.track_scroll as f32) * self.px_per_sec;
+            let origin_x = f32::from(self.tracks_bounds.origin.x)
+                - (self.track_scroll as f32) * self.px_per_sec;
             let start_x = origin_x + (c.start as f32) * self.px_per_sec;
             let end_x = origin_x + (c.end as f32) * self.px_per_sec;
             if (mouse_x - start_x).abs() <= EDGE_ZONE {
@@ -221,14 +221,15 @@ impl ScoreVideoApp {
             return;
         }
         if let Some(f) = self.timeline.fades.iter().find(|f| f.id == id) {
-            let origin_x = f32::from(self.tracks_bounds.origin.x) - (self.track_scroll as f32) * self.px_per_sec;
+            let origin_x = f32::from(self.tracks_bounds.origin.x)
+                - (self.track_scroll as f32) * self.px_per_sec;
             let start_x = origin_x + (f.start as f32) * self.px_per_sec;
             let end_x = origin_x + (f.end as f32) * self.px_per_sec;
             if (mouse_x - start_x).abs() <= EDGE_ZONE {
                 self.drag = Some(VideoDrag::FadeTrimLeft { id });
             } else if (mouse_x - end_x).abs() <= EDGE_ZONE {
                 self.drag = Some(VideoDrag::FadeTrimRight { id });
-            } else if !f.kind.is_wipe() {
+            } else if !f.kind.is_page_cut() {
                 self.drag = Some(VideoDrag::FadeBody {
                     id,
                     last_t: self.x_to_time(mouse_x),

@@ -69,11 +69,10 @@ pub(crate) use std::sync::Arc;
 pub(crate) use gpui::{
     actions, canvas, div, point, prelude::*, px, quad, relative, rgb, size, App, Application,
     Bounds, ContentMask, Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    LineCap, LineJoin, MouseMoveEvent, MouseUpEvent, PathBuilder, PathStyle, Pixels, Point,
-    Render, RenderImage, ScrollDelta, StrokeOptions,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, Window, WindowBounds,
-    WindowOptions,
+    Focusable, InteractiveElement, IntoElement, KeyBinding, LineCap, LineJoin, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, PathStyle, Pixels, Point, Render,
+    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement,
+    StrokeOptions, Styled, Window, WindowBounds, WindowOptions,
 };
 pub(crate) use image::{Frame, ImageBuffer, Rgb, RgbaImage};
 pub(crate) use smallvec::smallvec;

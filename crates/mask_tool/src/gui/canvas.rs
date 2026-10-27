@@ -775,10 +775,9 @@ impl MaskToolApp {
                 } else {
                     if freehand {
                         if let Some(n) = self.poly_draft.as_ref().map(|d| d.len()) {
-                            self.status = format!(
-                                "套索 {n} 点 · 靠近首点闭环, 或按住拖轨迹 (右键/Esc 取消)"
-                            )
-                            .into();
+                            self.status =
+                                format!("套索 {n} 点 · 靠近首点闭环, 或按住拖轨迹 (右键/Esc 取消)")
+                                    .into();
                         }
                     }
                     cx.notify();
@@ -952,10 +951,7 @@ impl MaskToolApp {
             return;
         }
         // Ctrl+滚轮仍是缩放. Ctrl+Shift+滚轮交给宿主换组合.
-        if !self.preview_only
-            && apply_bg::is_primary_mod(&ev.modifiers)
-            && ev.modifiers.shift
-        {
+        if !self.preview_only && apply_bg::is_primary_mod(&ev.modifiers) && ev.modifiers.shift {
             if let Some(dir) = apply_bg::wheel_page_delta(ev) {
                 self.page_step_wheel = dir;
                 cx.notify();
@@ -1669,10 +1665,7 @@ fn snap_device_bounds(b: Bounds<Pixels>, device_scale: f32) -> Bounds<Pixels> {
     let sy1 = (y1 * sf).round() / sf;
     Bounds {
         origin: point(px(sx0), px(sy0)),
-        size: size(
-            px((sx1 - sx0).max(1.0 / sf)),
-            px((sy1 - sy0).max(1.0 / sf)),
-        ),
+        size: size(px((sx1 - sx0).max(1.0 / sf)), px((sy1 - sy0).max(1.0 / sf))),
     }
 }
 

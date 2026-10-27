@@ -7,9 +7,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use vector_edit::document::is_scene_dir;
 use vector_edit::gui;
 use vector_edit::ids::is_pdf_path;
-use vector_edit::document::is_scene_dir;
 
 #[derive(Parser, Debug)]
 #[command(name = "vector_edit", about = "谱面分块矢量修图")]

@@ -116,7 +116,11 @@ impl ExportOptions {
 /// 向上取偶且至少为 2 (x264 / yuv420p 硬性要求).
 fn even_dim(n: u32) -> u32 {
     let n = n.max(2);
-    if n % 2 == 0 { n } else { n + 1 }
+    if n % 2 == 0 {
+        n
+    } else {
+        n + 1
+    }
 }
 
 pub enum ExportMsg {
@@ -189,9 +193,7 @@ fn build_frame_runs(timeline: &Timeline, fps: u32) -> Vec<FrameRun> {
             .covering_clip(t)
             .map(|c| c.group_id.clone())
             .unwrap_or_else(|| BLACK_KEY.to_string());
-        let fade = timeline
-            .covering_fade(t)
-            .map(|f| (f.kind, f.keep_bg));
+        let fade = timeline.covering_fade(t).map(|f| (f.kind, f.keep_bg));
         if let Some(last) = runs.last_mut() {
             if last.gid == gid && last.fade == fade {
                 last.frames += f1 - f0;
@@ -288,7 +290,7 @@ fn load_pool_rgba(
 
 fn fade_overlay_at(timeline: &Timeline, t: f64, fade_bg: [u8; 3]) -> Option<(f32, [u8; 3])> {
     let fade = timeline.covering_fade(t)?;
-    if fade.kind.is_wipe() {
+    if fade.kind.is_page_cut() {
         return None;
     }
     let span = (fade.end - fade.start).max(1e-6);
@@ -296,7 +298,7 @@ fn fade_overlay_at(timeline: &Timeline, t: f64, fade_bg: [u8; 3]) -> Option<(f32
     let alpha = match fade.kind {
         FadeKind::In => 1.0 - p,
         FadeKind::Out => p,
-        FadeKind::WipeLtr => return None,
+        FadeKind::WipeLtr | FadeKind::Dissolve => return None,
     } as f32;
     let bg = if fade.keep_bg { fade_bg } else { [0, 0, 0] };
     Some((alpha, bg))
@@ -314,6 +316,27 @@ fn apply_fade_overlay(src: &[u8], dst: &mut [u8], alpha: f32, bg: [u8; 3]) {
 }
 
 /// 左→右硬切擦除: `progress` 为 0 时整帧上一页, 1 时整帧下一页.
+/// 两页线性叠化: `progress` 为 0 时整帧上一页, 1 时整帧下一页.
+fn apply_dissolve(prev: &[u8], next: &[u8], dst: &mut [u8], progress: f32) {
+    let p = progress.clamp(0.0, 1.0);
+    let ip = 1.0 - p;
+    if dst.len() != prev.len() || dst.len() != next.len() || dst.len() % 4 != 0 {
+        if dst.len() == next.len() {
+            dst.copy_from_slice(next);
+        }
+        return;
+    }
+    for (out, (a, b)) in dst
+        .chunks_exact_mut(4)
+        .zip(prev.chunks_exact(4).zip(next.chunks_exact(4)))
+    {
+        out[0] = (a[0] as f32 * ip + b[0] as f32 * p + 0.5) as u8;
+        out[1] = (a[1] as f32 * ip + b[1] as f32 * p + 0.5) as u8;
+        out[2] = (a[2] as f32 * ip + b[2] as f32 * p + 0.5) as u8;
+        out[3] = 255;
+    }
+}
+
 fn apply_wipe(prev: &[u8], next: &[u8], dst: &mut [u8], progress: f32, width: u32) {
     let width = width.max(1) as usize;
     let split = ((progress.clamp(0.0, 1.0) * width as f32) as usize).min(width);
@@ -322,10 +345,10 @@ fn apply_wipe(prev: &[u8], next: &[u8], dst: &mut [u8], progress: f32, width: u3
         dst.copy_from_slice(next);
         return;
     }
-    for (out_row, (prev_row, next_row)) in dst
-        .chunks_exact_mut(row_bytes)
-        .zip(prev.chunks_exact(row_bytes).zip(next.chunks_exact(row_bytes)))
-    {
+    for (out_row, (prev_row, next_row)) in dst.chunks_exact_mut(row_bytes).zip(
+        prev.chunks_exact(row_bytes)
+            .zip(next.chunks_exact(row_bytes)),
+    ) {
         let left = split * 4;
         out_row[..left].copy_from_slice(&next_row[..left]);
         out_row[left..].copy_from_slice(&prev_row[left..]);
@@ -416,7 +439,10 @@ fn run_ffmpeg_in(
         let _ = h.join();
     }
     if !status.success() {
-        let detail = tail.lock().map(|t| t.trim().to_string()).unwrap_or_default();
+        let detail = tail
+            .lock()
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
         let detail = if detail.is_empty() {
             format!("退出码 {:?}", status.code())
         } else {
@@ -583,37 +609,36 @@ fn encode_raw_video(
                 }
             } else {
                 let base = written;
-                let is_wipe = matches!(run.fade, Some((FadeKind::WipeLtr, _)));
+                let fade_kind = run.fade.map(|(k, _)| k);
                 for i in 0..run.frames {
                     let t = frame_time(base + i, fps);
-                    if is_wipe {
-                        if let Some((prev_gid, next_gid, p)) = timeline.wipe_at(t) {
-                            let next = images.get(next_gid).unwrap_or(pixels);
-                            let prev = images.get(prev_gid).unwrap_or(&black);
-                            apply_wipe(prev, next, &mut scratch, p as f32, w);
-                            stdin
-                                .write_all(&scratch)
-                                .map_err(|e| format!("写入帧失败: {e}"))?;
-                        } else {
-                            stdin
-                                .write_all(pixels)
-                                .map_err(|e| format!("写入帧失败: {e}"))?;
+                    let blended = match fade_kind {
+                        Some(FadeKind::WipeLtr) => {
+                            timeline.page_blend_at(t).map(|(prev_gid, next_gid, p, _)| {
+                                let next = images.get(next_gid).unwrap_or(pixels);
+                                let prev = images.get(prev_gid).unwrap_or(&black);
+                                apply_wipe(prev, next, &mut scratch, p as f32, w);
+                            })
                         }
-                    } else {
-                        match fade_overlay_at(timeline, t, opts.fade_bg_rgb) {
+                        Some(FadeKind::Dissolve) => {
+                            timeline.page_blend_at(t).map(|(prev_gid, next_gid, p, _)| {
+                                let next = images.get(next_gid).unwrap_or(pixels);
+                                let prev = images.get(prev_gid).unwrap_or(&black);
+                                apply_dissolve(prev, next, &mut scratch, p as f32);
+                            })
+                        }
+                        _ => match fade_overlay_at(timeline, t, opts.fade_bg_rgb) {
                             Some((alpha, bg)) if alpha > 0.004 => {
                                 apply_fade_overlay(pixels, &mut scratch, alpha, bg);
-                                stdin
-                                    .write_all(&scratch)
-                                    .map_err(|e| format!("写入帧失败: {e}"))?;
+                                Some(())
                             }
-                            _ => {
-                                stdin
-                                    .write_all(pixels)
-                                    .map_err(|e| format!("写入帧失败: {e}"))?;
-                            }
-                        }
-                    }
+                            _ => None,
+                        },
+                    };
+                    let bytes: &[u8] = if blended.is_some() { &scratch } else { pixels };
+                    stdin
+                        .write_all(bytes)
+                        .map_err(|e| format!("写入帧失败: {e}"))?;
                     written += 1;
                 }
             }
@@ -627,9 +652,7 @@ fn encode_raw_video(
         if written != n_frames {
             return Err(format!("写出 {written} 帧, 期望 {n_frames}"));
         }
-        stdin
-            .flush()
-            .map_err(|e| format!("刷新帧数据失败: {e}"))?;
+        stdin.flush().map_err(|e| format!("刷新帧数据失败: {e}"))?;
         Ok(())
     })();
 
@@ -645,14 +668,20 @@ fn encode_raw_video(
         let _ = h.join();
     }
     if let Err(e) = write_result {
-        let detail = tail.lock().map(|t| t.trim().to_string()).unwrap_or_default();
+        let detail = tail
+            .lock()
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
         if detail.is_empty() {
             return Err(e);
         }
         return Err(format!("{e}\n{detail}"));
     }
     if !status.success() {
-        let detail = tail.lock().map(|t| t.trim().to_string()).unwrap_or_default();
+        let detail = tail
+            .lock()
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
         let detail = if detail.is_empty() {
             format!("退出码 {:?}", status.code())
         } else {
@@ -904,16 +933,8 @@ mod tests {
         assert_eq!(total, frame_at_or_after(3.7, fps));
         assert!(runs.iter().all(|r| r.frames > 0));
 
-        let a_frames: u64 = runs
-            .iter()
-            .filter(|r| r.gid == "a")
-            .map(|r| r.frames)
-            .sum();
-        let b_frames: u64 = runs
-            .iter()
-            .filter(|r| r.gid == "b")
-            .map(|r| r.frames)
-            .sum();
+        let a_frames: u64 = runs.iter().filter(|r| r.gid == "a").map(|r| r.frames).sum();
+        let b_frames: u64 = runs.iter().filter(|r| r.gid == "b").map(|r| r.frames).sum();
         assert_eq!(a_frames, frame_at_or_after(1.016666, fps));
         assert_eq!(
             b_frames,
@@ -1005,6 +1026,28 @@ mod tests {
     }
 
     #[test]
+    fn apply_dissolve_is_a_linear_mix() {
+        let prev = vec![0, 0, 0, 255, 100, 0, 0, 255];
+        let next = vec![100, 0, 0, 255, 0, 0, 0, 255];
+        let mut dst = vec![0u8; 8];
+        apply_dissolve(&prev, &next, &mut dst, 0.0);
+        assert_eq!(dst, prev);
+        apply_dissolve(&prev, &next, &mut dst, 1.0);
+        assert_eq!(dst, next);
+        apply_dissolve(&prev, &next, &mut dst, 0.5);
+        assert_eq!(&dst[..4], &[50, 0, 0, 255]);
+        assert_eq!(&dst[4..], &[50, 0, 0, 255]);
+
+        let mut tl = Timeline::new();
+        tl.video_clips = vec![clip("a", 0.0, 5.0), clip("b", 5.0, 10.0)];
+        tl.fades.push(fade(FadeKind::Dissolve, 5.0, 6.0));
+        assert!(fade_overlay_at(&tl, 5.5, [1, 2, 3]).is_none());
+        let (prev_id, next_id, p, kind) = tl.page_blend_at(5.5).unwrap();
+        assert_eq!((prev_id, next_id, kind), ("a", "b", FadeKind::Dissolve));
+        assert!((p - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
     fn fade_splits_a_page_without_shifting_neighbors() {
         let mut tl = Timeline::new();
         tl.video_clips = vec![clip("a", 0.0, 10.0)];
@@ -1032,11 +1075,7 @@ mod tests {
         let mut tl = Timeline::new();
         tl.video_clips = vec![clip("a", 0.0, cut), clip("b", cut, 2.0)];
         let runs = build_frame_runs(&tl, fps);
-        let a_frames: u64 = runs
-            .iter()
-            .filter(|r| r.gid == "a")
-            .map(|r| r.frames)
-            .sum();
+        let a_frames: u64 = runs.iter().filter(|r| r.gid == "a").map(|r| r.frames).sum();
         let rounded = (cut * fps as f64).round() as u64;
         assert!(a_frames >= rounded);
         assert!(frame_time(a_frames, fps) + 1e-9 >= cut);
@@ -1124,7 +1163,9 @@ mod tests {
         for (i, frame) in samples.chunks(ch).enumerate() {
             let loud = frame.iter().any(|s| s.abs() > 800);
             if loud && !prev_loud {
-                let far_enough = last_onset.map(|j| i.saturating_sub(j) >= min_gap).unwrap_or(true);
+                let far_enough = last_onset
+                    .map(|j| i.saturating_sub(j) >= min_gap)
+                    .unwrap_or(true);
                 if far_enough {
                     onsets.push(i as f64 / sr as f64);
                     last_onset = Some(i);
@@ -1159,10 +1200,7 @@ mod tests {
         assert_eq!(onsets.len(), clips_n, "onsets={onsets:?}");
         for (i, t) in onsets.iter().enumerate() {
             let exp = i as f64 * dur;
-            assert!(
-                (t - exp).abs() < 0.005,
-                "clip {i} onset {t} expected {exp}"
-            );
+            assert!((t - exp).abs() < 0.005, "clip {i} onset {t} expected {exp}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1254,10 +1292,7 @@ mod tests {
         assert_eq!(onsets.len(), 4, "onsets={onsets:?}");
         for (i, t) in onsets.iter().enumerate() {
             let exp = i as f64 * 2.0;
-            assert!(
-                (t - exp).abs() < 0.005,
-                "clip {i} onset {t} expected {exp}"
-            );
+            assert!((t - exp).abs() < 0.005, "clip {i} onset {t} expected {exp}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1469,28 +1504,32 @@ mod tests {
                 }
             }
             assert_eq!(
-                notes[best_f],
-                notes[i],
+                notes[best_f], notes[i],
                 "cut {:.3}s +0.2s audio is {} want {} (later clips drifted)",
-                cut,
-                notes[best_f],
-                notes[i]
+                cut, notes[best_f], notes[i]
             );
         }
     }
 
     fn note_glyph(letter: u8) -> [u8; 7] {
         match letter {
-            b'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
-            b'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-            b'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+            b'C' => [
+                0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+            ],
+            b'D' => [
+                0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+            ],
+            b'E' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+            ],
             _ => [0; 7],
         }
     }
 
     fn draw_note_page(path: &Path, letter: u8, rgb: [u8; 3]) {
         let (w, h) = (160u32, 90u32);
-        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+        let mut img =
+            image::RgbaImage::from_pixel(w, h, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
         let glyph = note_glyph(letter);
         let scale = 8u32;
         let ox = (w - 5 * scale) / 2;
@@ -1640,7 +1679,11 @@ mod tests {
             "extract wav"
         );
         let onsets = beep_onsets(&wav, sr);
-        assert_eq!(onsets.len(), expect_onsets.len(), "onsets={onsets:?} want={expect_onsets:?}");
+        assert_eq!(
+            onsets.len(),
+            expect_onsets.len(),
+            "onsets={onsets:?} want={expect_onsets:?}"
+        );
         for (got, exp) in onsets.iter().zip(expect_onsets.iter()) {
             assert!((got - exp).abs() < 0.03, "onset {got} expected {exp}");
         }

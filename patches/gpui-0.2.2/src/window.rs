@@ -2448,6 +2448,12 @@ impl Window {
         result
     }
 
+    /// Multiply the current paint opacity for `f`. Images and quads pick it up.
+    /// Only valid during paint.
+    pub fn with_opacity<R>(&mut self, opacity: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_element_opacity(Some(opacity), f)
+    }
+
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
     /// of prepaints can be discarded before prepainting again. This is used to support autoscroll
     /// where we need to prepaint children to detect the autoscroll bounds, then adjust the

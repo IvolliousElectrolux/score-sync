@@ -11,7 +11,11 @@ impl ScoreVideoApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if primary { rgb(0x93c5fd) } else { ui_kit::chrome(0xcbd5e1) };
+        let fg = if primary {
+            rgb(0x93c5fd)
+        } else {
+            ui_kit::chrome(0xcbd5e1)
+        };
         div()
             .id(id)
             .px_2()
@@ -81,6 +85,13 @@ impl ScoreVideoApp {
                 cx,
             ))
             .child(self.btn(
+                "sv_insert_dissolve",
+                ui_kit::menu_label(ui_kit::t("video.dissolve"), "video.dissolve"),
+                false,
+                |this, _, cx| this.insert_next_dissolve(cx),
+                cx,
+            ))
+            .child(self.btn(
                 "sv_fade_in",
                 ui_kit::menu_label(ui_kit::t("video.fade_in"), "video.fade_in"),
                 false,
@@ -118,7 +129,11 @@ impl ScoreVideoApp {
                 } else {
                     "分割音频".into()
                 };
-                let fg = if armed { rgb(0x93c5fd) } else { ui_kit::chrome(0xcbd5e1) };
+                let fg = if armed {
+                    rgb(0x93c5fd)
+                } else {
+                    ui_kit::chrome(0xcbd5e1)
+                };
                 div()
                     .id("sv_split_audio")
                     .px_2()
@@ -161,7 +176,11 @@ impl ScoreVideoApp {
     fn speed_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let label: SharedString = fmt_speed(self.audio.speed()).into();
         let open = self.speed_menu_open;
-        let fg = if open { rgb(0x93c5fd) } else { ui_kit::chrome(0xcbd5e1) };
+        let fg = if open {
+            rgb(0x93c5fd)
+        } else {
+            ui_kit::chrome(0xcbd5e1)
+        };
         let entity = cx.entity().clone();
         // padding 放内层, 避免测量 canvas 与可视按钮差出左右内边距 (蒙版色块同款).
         div()
@@ -191,7 +210,8 @@ impl ScoreVideoApp {
                                     > 0.5
                                 || (f32::from(prev.origin.y) - f32::from(bounds.origin.y)).abs()
                                     > 0.5
-                                || (f32::from(prev.size.width) - f32::from(bounds.size.width)).abs()
+                                || (f32::from(prev.size.width) - f32::from(bounds.size.width))
+                                    .abs()
                                     > 0.5;
                             if changed && this.speed_menu_open {
                                 cx.notify();
@@ -268,35 +288,31 @@ impl ScoreVideoApp {
     fn speed_caret(place_below: bool, caret_x: f32) -> impl IntoElement {
         let h = 8.0_f32;
         let half = 8.0_f32;
-        div()
-            .w_full()
-            .h(px(h))
-            .relative()
-            .child(
-                canvas(|_, _, _| {}, {
-                    move |bounds, _, window, _| {
-                        let ox = f32::from(bounds.origin.x);
-                        let oy = f32::from(bounds.origin.y);
-                        let cx = ox + caret_x;
-                        let mut builder = PathBuilder::fill();
-                        if place_below {
-                            builder.move_to(point(px(cx), px(oy)));
-                            builder.line_to(point(px(cx - half), px(oy + h)));
-                            builder.line_to(point(px(cx + half), px(oy + h)));
-                        } else {
-                            builder.move_to(point(px(cx), px(oy + h)));
-                            builder.line_to(point(px(cx - half), px(oy)));
-                            builder.line_to(point(px(cx + half), px(oy)));
-                        }
-                        builder.close();
-                        if let Ok(path) = builder.build() {
-                            window.paint_path(path, ui_kit::chrome(0x1e293b));
-                        }
+        div().w_full().h(px(h)).relative().child(
+            canvas(|_, _, _| {}, {
+                move |bounds, _, window, _| {
+                    let ox = f32::from(bounds.origin.x);
+                    let oy = f32::from(bounds.origin.y);
+                    let cx = ox + caret_x;
+                    let mut builder = PathBuilder::fill();
+                    if place_below {
+                        builder.move_to(point(px(cx), px(oy)));
+                        builder.line_to(point(px(cx - half), px(oy + h)));
+                        builder.line_to(point(px(cx + half), px(oy + h)));
+                    } else {
+                        builder.move_to(point(px(cx), px(oy + h)));
+                        builder.line_to(point(px(cx - half), px(oy)));
+                        builder.line_to(point(px(cx + half), px(oy)));
                     }
-                })
-                .absolute()
-                .size_full(),
-            )
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, ui_kit::chrome(0x1e293b));
+                    }
+                }
+            })
+            .absolute()
+            .size_full(),
+        )
     }
 
     pub(super) fn speed_menu_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -404,16 +420,20 @@ impl ScoreVideoApp {
     pub(super) fn preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.timeline.playhead;
         self.prefetch_preview_pages(t, cx);
-        let (prev_group, wipe_p) = match self.timeline.wipe_at(t) {
-            Some((prev, _, p)) => (Some(prev.to_string()), Some(p as f32)),
-            None => (None, None),
+        let (prev_group, wipe_p, dissolve_p) = match self.timeline.page_blend_at(t) {
+            Some((prev, _, p, FadeKind::WipeLtr)) => (Some(prev.to_string()), Some(p as f32), None),
+            Some((prev, _, p, FadeKind::Dissolve)) => {
+                (Some(prev.to_string()), None, Some(p as f32))
+            }
+            _ => (None, None, None),
         };
         let cur_group = self.timeline.covering_clip(t).map(|c| c.group_id.clone());
         let img = cur_group.as_deref().and_then(|g| self.image_for(g, cx));
-        let img = if wipe_p.is_none() {
-            img.or_else(|| self.cached_previous_page(t))
-        } else {
+        let page_blend = wipe_p.is_some() || dissolve_p.is_some();
+        let img = if page_blend {
             img
+        } else {
+            img.or_else(|| self.cached_previous_page(t))
         };
         let prev_img = prev_group.as_deref().and_then(|g| self.image_for(g, cx));
         let fade = self.timeline.covering_fade(t);
@@ -424,7 +444,7 @@ impl ScoreVideoApp {
                 match f.kind {
                     FadeKind::In => 1.0 - p,
                     FadeKind::Out => p,
-                    FadeKind::WipeLtr => 0.0,
+                    FadeKind::WipeLtr | FadeKind::Dissolve => 0.0,
                 }
             })
             .unwrap_or(0.0) as f32;
@@ -477,10 +497,7 @@ impl ScoreVideoApp {
                             let idw = iw * img_fit;
                             let idh = ih * img_fit;
                             let img_bounds = Bounds {
-                                origin: point(
-                                    ox + px((dw - idw) * 0.5),
-                                    oy + px((dh - idh) * 0.5),
-                                ),
+                                origin: point(ox + px((dw - idw) * 0.5), oy + px((dh - idh) * 0.5)),
                                 size: size(px(idw), px(idh)),
                             };
                             let _ = window.paint_image(
@@ -508,6 +525,18 @@ impl ScoreVideoApp {
                                             paint_page(window, next);
                                         },
                                     );
+                                }
+                            }
+                        } else if let Some(p) = dissolve_p {
+                            if let Some(prev) = &prev_img {
+                                paint_page(window, prev);
+                            }
+                            if let Some(next) = &img {
+                                let alpha = p.clamp(0.0, 1.0);
+                                if alpha > 0.004 {
+                                    window.with_opacity(alpha, |window| {
+                                        paint_page(window, next);
+                                    });
                                 }
                             }
                         } else if let Some(img) = &img {
@@ -623,5 +652,4 @@ impl ScoreVideoApp {
             .child(self.fade_context_menu_overlay(cx))
             .child(self.speed_menu_overlay(cx))
     }
-
 }

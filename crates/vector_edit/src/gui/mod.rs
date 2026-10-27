@@ -228,18 +228,14 @@ fn thumb_key(doc: &crate::document::VecDocument, row: &crate::outline::OutlineRo
 
 impl VectorEditApp {
     pub fn new(cx: &mut Context<Self>, standalone: bool) -> Self {
-        let rgb_r = cx.new(|cx| {
-            apply_bg::text_input::TextInput::new(cx, "0", "R").with_compact(true)
-        });
-        let rgb_g = cx.new(|cx| {
-            apply_bg::text_input::TextInput::new(cx, "0", "G").with_compact(true)
-        });
-        let rgb_b = cx.new(|cx| {
-            apply_bg::text_input::TextInput::new(cx, "0", "B").with_compact(true)
-        });
-        let rgb_a = cx.new(|cx| {
-            apply_bg::text_input::TextInput::new(cx, "255", "A").with_compact(true)
-        });
+        let rgb_r =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "0", "R").with_compact(true));
+        let rgb_g =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "0", "G").with_compact(true));
+        let rgb_b =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "0", "B").with_compact(true));
+        let rgb_a =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "255", "A").with_compact(true));
         cx.observe(&rgb_r, |this, _, cx| this.apply_rgb_inputs(cx))
             .detach();
         cx.observe(&rgb_g, |this, _, cx| this.apply_rgb_inputs(cx))
@@ -248,11 +244,12 @@ impl VectorEditApp {
             .detach();
         cx.observe(&rgb_a, |this, _, cx| this.apply_rgb_inputs(cx))
             .detach();
-        let rename_input = cx.new(|cx| {
-            apply_bg::text_input::TextInput::new(cx, "", "名称").with_compact(true)
-        });
-        cx.observe(&rename_input, |this, _, cx| this.finish_rename_if_blurred(cx))
-            .detach();
+        let rename_input =
+            cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "", "名称").with_compact(true));
+        cx.observe(&rename_input, |this, _, cx| {
+            this.finish_rename_if_blurred(cx)
+        })
+        .detach();
         Self {
             focus_handle: cx.focus_handle(),
             doc: None,
@@ -417,9 +414,8 @@ impl VectorEditApp {
 
     pub fn take_commit(&self) -> Option<Commit> {
         let doc = self.doc.as_ref()?.clone();
-        let preview = crate::raster::rasterize_rgba(&doc, 1.0).unwrap_or_else(|_| {
-            image::RgbaImage::new(doc.rounded_size().0, doc.rounded_size().1)
-        });
+        let preview = crate::raster::rasterize_rgba(&doc, 1.0)
+            .unwrap_or_else(|_| image::RgbaImage::new(doc.rounded_size().0, doc.rounded_size().1));
         Some(Commit {
             document: doc,
             preview,
@@ -589,7 +585,11 @@ impl VectorEditApp {
         }
         self.push_undo();
         let ids = self.selected.clone();
-        if self.doc.as_mut().is_some_and(|d| d.extract_to_new_layer(&ids)) {
+        if self
+            .doc
+            .as_mut()
+            .is_some_and(|d| d.extract_to_new_layer(&ids))
+        {
             self.selected.clear();
             self.dirty = true;
             self.rebuild_raster(cx);
@@ -904,7 +904,9 @@ impl VectorEditApp {
     }
 
     fn finish_rename_if_blurred(&mut self, cx: &mut Context<Self>) {
-        let commit = self.rename_input.update(cx, |input, _| input.take_blur_commit());
+        let commit = self
+            .rename_input
+            .update(cx, |input, _| input.take_blur_commit());
         // 名称框还没接上焦点时, 忽略这一次失焦, 否则第一次按键会马上关掉.
         if commit && !self.rename_focus {
             self.commit_rename(cx);
@@ -1038,7 +1040,11 @@ impl VectorEditApp {
             common = Some(match common {
                 None => chain,
                 Some(prev) => {
-                    let n = prev.iter().zip(chain.iter()).take_while(|(a, b)| a == b).count();
+                    let n = prev
+                        .iter()
+                        .zip(chain.iter())
+                        .take_while(|(a, b)| a == b)
+                        .count();
                     prev.into_iter().take(n).collect()
                 }
             });
@@ -1046,7 +1052,11 @@ impl VectorEditApp {
         common.unwrap_or_default()
     }
 
-    pub(crate) fn pump_thumbs(&mut self, rows: &[crate::outline::OutlineRow], range: std::ops::Range<usize>) -> bool {
+    pub(crate) fn pump_thumbs(
+        &mut self,
+        rows: &[crate::outline::OutlineRow],
+        range: std::ops::Range<usize>,
+    ) -> bool {
         let mut budget = 6u32;
         let mut made = false;
         let mut pending = false;
@@ -1096,7 +1106,8 @@ impl VectorEditApp {
                     budget = budget.saturating_sub(cost);
                 }
                 None => {
-                    self.thumbs.insert(row.id.clone(), ThumbSlot { key, tex: None });
+                    self.thumbs
+                        .insert(row.id.clone(), ThumbSlot { key, tex: None });
                 }
             }
         }
@@ -1187,7 +1198,12 @@ impl VectorEditApp {
         false
     }
 
-    pub fn import_document_as_layer(&mut self, other: VecDocument, name: &str, cx: &mut Context<Self>) {
+    pub fn import_document_as_layer(
+        &mut self,
+        other: VecDocument,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.push_undo();
         if let Some(doc) = self.doc.as_mut() {
             doc.append_layer_from(&other, name);
@@ -1385,7 +1401,8 @@ impl VectorEditApp {
     }
 
     pub(crate) fn view_ready(&self) -> bool {
-        f32::from(self.view_bounds.size.width) > 8.0 && f32::from(self.view_bounds.size.height) > 8.0
+        f32::from(self.view_bounds.size.width) > 8.0
+            && f32::from(self.view_bounds.size.height) > 8.0
     }
 
     pub(crate) fn consider_raster(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1437,9 +1454,11 @@ impl VectorEditApp {
                 .background_spawn(async move {
                     let tex_w = (plan.w * plan.px).round().max(1.0) as u32;
                     let tex_h = (plan.h * plan.px).round().max(1.0) as u32;
-                    crate::raster::rasterize_rect(&doc, plan.x, plan.y, plan.w, plan.h, tex_w, tex_h)
-                        .ok()
-                        .map(|img| (img, plan))
+                    crate::raster::rasterize_rect(
+                        &doc, plan.x, plan.y, plan.w, plan.h, tex_w, tex_h,
+                    )
+                    .ok()
+                    .map(|img| (img, plan))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -1839,7 +1858,9 @@ impl VectorEditApp {
             .on_action(cx.listener(|this, _: &FitView, _, cx| this.fit_to_view(cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
-            .on_action(cx.listener(|this, _: &DeleteSelection, window, cx| this.delete_selection(window, cx)))
+            .on_action(cx.listener(|this, _: &DeleteSelection, window, cx| {
+                this.delete_selection(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &SelectAll, window, cx| this.select_all(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLayer, window, cx| this.copy_layer(window, cx)))
             .on_action(cx.listener(|this, _: &PasteLayer, window, cx| this.paste_layer(window, cx)))
@@ -1870,18 +1891,44 @@ impl VectorEditApp {
             }))
             .on_action(cx.listener(|this, _: &ApplyEdit, _, cx| this.request_apply(cx)))
             .on_action(cx.listener(|this, _: &RestoreOriginal, _, cx| this.request_restore(cx)))
-            .on_action(cx.listener(|this, _: &ToolSelect, window, cx| this.set_mode(ToolMode::Select, window, cx)))
-            .on_action(cx.listener(|this, _: &ToolNode, window, cx| this.set_mode(ToolMode::Node, window, cx)))
-            .on_action(cx.listener(|this, _: &ToolCanvas, window, cx| this.set_mode(ToolMode::Canvas, window, cx)))
-            .on_action(cx.listener(|this, _: &ToolHand, window, cx| this.set_mode(ToolMode::Hand, window, cx)))
-            .on_action(cx.listener(|this, _: &ToolPen, window, cx| this.set_mode(ToolMode::Pen, window, cx)))
-            .on_action(cx.listener(|this, _: &ToolPencil, window, cx| this.set_mode(ToolMode::Pencil, window, cx)))
-            .on_action(cx.listener(|this, _: &ToolEraser, window, cx| this.set_mode(ToolMode::Eraser, window, cx)))
-            .on_action(cx.listener(|this, _: &ToolLasso, window, cx| this.set_mode(ToolMode::Lasso, window, cx)))
-            .on_action(cx.listener(|this, _: &NudgeLeft, window, cx| this.nudge(-1.0, 0.0, window, cx)))
-            .on_action(cx.listener(|this, _: &NudgeRight, window, cx| this.nudge(1.0, 0.0, window, cx)))
-            .on_action(cx.listener(|this, _: &NudgeUp, window, cx| this.nudge(0.0, -1.0, window, cx)))
-            .on_action(cx.listener(|this, _: &NudgeDown, window, cx| this.nudge(0.0, 1.0, window, cx)))
+            .on_action(cx.listener(|this, _: &ToolSelect, window, cx| {
+                this.set_mode(ToolMode::Select, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToolNode, window, cx| {
+                this.set_mode(ToolMode::Node, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToolCanvas, window, cx| {
+                this.set_mode(ToolMode::Canvas, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToolHand, window, cx| {
+                this.set_mode(ToolMode::Hand, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToolPen, window, cx| {
+                    this.set_mode(ToolMode::Pen, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ToolPencil, window, cx| {
+                this.set_mode(ToolMode::Pencil, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToolEraser, window, cx| {
+                this.set_mode(ToolMode::Eraser, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToolLasso, window, cx| {
+                this.set_mode(ToolMode::Lasso, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &NudgeLeft, window, cx| this.nudge(-1.0, 0.0, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NudgeRight, window, cx| this.nudge(1.0, 0.0, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NudgeUp, window, cx| this.nudge(0.0, -1.0, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NudgeDown, window, cx| this.nudge(0.0, 1.0, window, cx)),
+            )
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if this.text_focused(window, cx) {
                     return;
@@ -1900,14 +1947,16 @@ impl VectorEditApp {
                     this.notify_nav(cx);
                 }
             }))
-            .on_modifiers_changed(cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _, cx| {
-                this.note_pointer_modifiers(
-                    ev.modifiers.shift,
-                    ev.modifiers.alt,
-                    apply_bg::is_primary_mod(&ev.modifiers),
-                    cx,
-                );
-            }))
+            .on_modifiers_changed(
+                cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _, cx| {
+                    this.note_pointer_modifiers(
+                        ev.modifiers.shift,
+                        ev.modifiers.alt,
+                        apply_bg::is_primary_mod(&ev.modifiers),
+                        cx,
+                    );
+                }),
+            )
     }
 }
 
@@ -1992,7 +2041,12 @@ fn clip_center(objs: &[crate::document::Obj]) -> Option<(f32, f32)> {
 }
 
 /// 目标位置上如果已经有一份同样的粘贴, 再往右下错 8, 直到空位. 撤销掉那一份后空位回来.
-fn clear_shift(doc: &crate::document::VecDocument, objs: &[crate::document::Obj], mut dx: f32, mut dy: f32) -> (f32, f32) {
+fn clear_shift(
+    doc: &crate::document::VecDocument,
+    objs: &[crate::document::Obj],
+    mut dx: f32,
+    mut dy: f32,
+) -> (f32, f32) {
     for _ in 0..64 {
         if !paste_occupied(doc, objs, dx, dy) {
             return (dx, dy);
@@ -2003,7 +2057,12 @@ fn clear_shift(doc: &crate::document::VecDocument, objs: &[crate::document::Obj]
     (dx, dy)
 }
 
-fn paste_occupied(doc: &crate::document::VecDocument, objs: &[crate::document::Obj], dx: f32, dy: f32) -> bool {
+fn paste_occupied(
+    doc: &crate::document::VecDocument,
+    objs: &[crate::document::Obj],
+    dx: f32,
+    dy: f32,
+) -> bool {
     if objs.is_empty() {
         return false;
     }
@@ -2078,7 +2137,11 @@ pub fn bind_embedded_keys(cx: &mut App) {
         ExportSvg,
         Some("VectorEdit"),
     ));
-    cx.bind_keys(apply_bg::bind_primary("g", GroupSelection, Some("VectorEdit")));
+    cx.bind_keys(apply_bg::bind_primary(
+        "g",
+        GroupSelection,
+        Some("VectorEdit"),
+    ));
     cx.bind_keys(apply_bg::bind_primary(
         "shift-g",
         UngroupSelection,

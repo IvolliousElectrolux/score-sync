@@ -1,7 +1,7 @@
 //! 手工核对用: 正弦波 + 音名图, 覆盖当前全部转场, 走 `export_async` 出 mp4.
 //!
 //! 输出: `<repo>/transition_review/review.mp4`
-//! 时间轴 (每页 3s, 共 21s, 底色 keep_bg = 暖黄):
+//! 时间轴 (每页 3s, 共 24s, 底色 keep_bg = 暖黄):
 //!   C 0-3    淡入→黑 0.0-1.2
 //!   D 3-6    硬切
 //!   E 6-9    左→右刷入 6.0-7.2
@@ -9,6 +9,7 @@
 //!   G 12-15  淡入→底色 12.0-13.5
 //!   A 15-18  淡出→底色 16.5-18.0
 //!   B 18-21  左→右刷入 18.0-19.2
+//!   K 21-24  交叠 21.0-22.2
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,7 +25,7 @@ const PAGE: f64 = 3.0;
 const SR: u32 = 44100;
 const FADE_BG: [u8; 3] = [240, 200, 80];
 
-const NOTES: [(&str, f64, [u8; 3], &str); 7] = [
+const NOTES: [(&str, f64, [u8; 3], &str); 8] = [
     ("C", 261.626, [229, 57, 53], "fade-in to black"),
     ("D", 293.665, [251, 140, 0], "hard cut"),
     ("E", 329.628, [220, 180, 20], "wipe L->R"),
@@ -32,6 +33,7 @@ const NOTES: [(&str, f64, [u8; 3], &str); 7] = [
     ("G", 392.000, [30, 136, 229], "fade-in keep-bg"),
     ("A", 440.000, [142, 36, 170], "fade-out keep-bg"),
     ("B", 493.883, [216, 27, 96], "wipe L->R"),
+    ("K", 523.251, [0, 137, 123], "crossfade"),
 ];
 
 fn out_dir() -> PathBuf {
@@ -57,27 +59,67 @@ fn write_sine(path: &Path, freq: f64) {
 /// 5x7 大写字模, 行是 5 bit (高位在左).
 fn glyph(ch: char) -> [u8; 7] {
     match ch {
-        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-        'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
-        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110],
-        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'I' => [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
-        '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+        ],
+        '-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
         ' ' => [0; 7],
-        _ => [0b11111, 0b10001, 0b10001, 0b00100, 0b00100, 0b00000, 0b00100],
+        _ => [
+            0b11111, 0b10001, 0b10001, 0b00100, 0b00100, 0b00000, 0b00100,
+        ],
     }
 }
 
@@ -92,7 +134,10 @@ fn blit(img: &mut RgbaImage, mut x: i32, y: i32, text: &str, scale: i32, rgba: [
                         for dx in 0..scale {
                             let px = x + col * scale + dx;
                             let py = y + row as i32 * scale + dy;
-                            if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height()
+                            if px >= 0
+                                && py >= 0
+                                && (px as u32) < img.width()
+                                && (py as u32) < img.height()
                             {
                                 img.put_pixel(px as u32, py as u32, color);
                             }
@@ -134,12 +179,7 @@ fn try_magick_page(png: &Path, note: &str, rgb: [u8; 3], caption: &str) -> bool 
     };
     let fill = format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]);
     let status = Command::new("magick")
-        .args([
-            "-size",
-            &format!("{W}x{H}"),
-            &format!("xc:{fill}"),
-            "-font",
-        ])
+        .args(["-size", &format!("{W}x{H}"), &format!("xc:{fill}"), "-font"])
         .arg(&font)
         .args([
             "-fill",
@@ -159,7 +199,9 @@ fn try_magick_page(png: &Path, note: &str, rgb: [u8; 3], caption: &str) -> bool 
         ])
         .arg(png)
         .status();
-    status.map(|s| s.success() && png.is_file()).unwrap_or(false)
+    status
+        .map(|s| s.success() && png.is_file())
+        .unwrap_or(false)
 }
 
 fn write_page_png(png: &Path, note: &str, rgb: [u8; 3], caption: &str) {
@@ -179,7 +221,14 @@ fn write_page_png(png: &Path, note: &str, rgb: [u8; 3], caption: &str) {
     let letter_w = 5 * 28;
     let lx = ((W as i32) - letter_w) / 2;
     blit(&mut img, lx, 220, note, 28, [255, 255, 255, 255]);
-    blit(&mut img, 40, (H as i32) - 72, caption, 4, [255, 220, 80, 255]);
+    blit(
+        &mut img,
+        40,
+        (H as i32) - 72,
+        caption,
+        4,
+        [255, 220, 80, 255],
+    );
     img.save(png).unwrap();
 }
 
@@ -236,11 +285,17 @@ fn build_review_project(dir: &Path) -> (Timeline, Vec<MaterialItem>) {
         fade(FadeKind::In, 12.0, 13.5, true),
         fade(FadeKind::Out, 16.5, 18.0, true),
         fade(FadeKind::WipeLtr, 18.0, 19.2, false),
+        fade(FadeKind::Dissolve, 21.0, 22.2, false),
     ];
     (tl, pool)
 }
 
-fn export_once(tl: Timeline, pool: Vec<MaterialItem>, out: PathBuf, log: bool) -> std::time::Duration {
+fn export_once(
+    tl: Timeline,
+    pool: Vec<MaterialItem>,
+    out: PathBuf,
+    log: bool,
+) -> std::time::Duration {
     let opts = ExportOptions {
         container: Container::Mp4,
         width: W,

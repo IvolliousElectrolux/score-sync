@@ -34,7 +34,11 @@ impl ScoreVideoApp {
                     .bottom_0()
                     .left(px(x))
                     .w(px(w))
-                    .bg(if is_sel { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0x334155) })
+                    .bg(if is_sel {
+                        ui_kit::chrome(0x2563eb)
+                    } else {
+                        ui_kit::chrome(0x334155)
+                    })
                     .border_1()
                     .border_color(if is_sel {
                         rgb(0x93c5fd)
@@ -93,6 +97,7 @@ impl ScoreVideoApp {
             let keep_bg = f.keep_bg;
             let label: SharedString = match (f.kind, keep_bg) {
                 (FadeKind::WipeLtr, _) => "刷入".into(),
+                (FadeKind::Dissolve, _) => "交叠".into(),
                 (FadeKind::In, false) => "淡入".into(),
                 (FadeKind::Out, false) => "淡出".into(),
                 (FadeKind::In, true) => "淡入·底".into(),
@@ -101,6 +106,7 @@ impl ScoreVideoApp {
             // 保持底色: 更浅的填充 + 米色描边, 和淡到黑的块一眼能分开.
             let base_color = match (f.kind, keep_bg) {
                 (FadeKind::WipeLtr, _) => rgb(0x7c3aed),
+                (FadeKind::Dissolve, _) => rgb(0xbe185d),
                 (FadeKind::In, false) => rgb(0x0d9488),
                 (FadeKind::Out, false) => rgb(0xb45309),
                 (FadeKind::In, true) => rgb(0x5eead4),
@@ -143,7 +149,12 @@ impl ScoreVideoApp {
                             cx.stop_propagation();
                             this.fade_menu = None;
                             let x = f32::from(ev.position.x);
-                            this.begin_fade_drag(id, x, apply_bg::is_primary_mod(&ev.modifiers), cx);
+                            this.begin_fade_drag(
+                                id,
+                                x,
+                                apply_bg::is_primary_mod(&ev.modifiers),
+                                cx,
+                            );
                         }),
                     )
                     .on_mouse_down(
@@ -210,7 +221,7 @@ impl ScoreVideoApp {
         if !self.timeline.fade_is_selected(id) {
             self.timeline.select_fade(id, false);
         }
-        if self.timeline.selected_fades_are_all_wipes() {
+        if self.timeline.selected_fades_are_all_page_cuts() {
             self.fade_menu = None;
             cx.notify();
             return;
@@ -287,8 +298,8 @@ impl ScoreVideoApp {
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                    this.push_undo();
-                    let _keep = this.timeline.toggle_keep_bg_on_selected();
+                                    this.push_undo();
+                                    let _keep = this.timeline.toggle_keep_bg_on_selected();
                                     this.fade_menu = None;
                                     cx.notify();
                                 }),
@@ -324,7 +335,11 @@ impl ScoreVideoApp {
             .w_full()
             .h(px(AUDIO_TRACK_H))
             .flex_shrink_0()
-            .bg(if split_armed { rgb(0x0e7490) } else { rgb(0x082f2f) })
+            .bg(if split_armed {
+                rgb(0x0e7490)
+            } else {
+                rgb(0x082f2f)
+            })
             .border_1()
             .border_color(if split_armed {
                 rgb(0x22d3ee)
@@ -464,7 +479,12 @@ impl ScoreVideoApp {
 
     /// Ctrl+滚轮以鼠标所在时刻为锚点缩放轨道 (无上限, 下限为"全部轨道可见");
     /// 普通滚轮横向平移 (时间轴过长超出可视宽度时用).
-    pub(super) fn on_tracks_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_tracks_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let delta_y = match event.delta {
             ScrollDelta::Pixels(p) => f32::from(p.y),
             ScrollDelta::Lines(l) => l.y * 30.0,
@@ -483,8 +503,8 @@ impl ScoreVideoApp {
             let rel = (mouse_x - origin_x).max(0.0);
             self.track_scroll = (anchor_t - (rel / self.px_per_sec) as f64).max(0.0);
         } else {
-            self.track_scroll = (self.track_scroll - (delta_y as f64) / self.px_per_sec.max(0.01) as f64)
-                .max(0.0);
+            self.track_scroll =
+                (self.track_scroll - (delta_y as f64) / self.px_per_sec.max(0.01) as f64).max(0.0);
         }
         cx.notify();
     }
@@ -511,8 +531,8 @@ impl ScoreVideoApp {
             let follow_margin = 24.0f32.min(width * 0.15);
             let raw_x = ((self.timeline.playhead - self.track_scroll) as f32) * self.px_per_sec;
             if raw_x > width - follow_margin {
-                let target = self.timeline.playhead
-                    - ((width - follow_margin) / self.px_per_sec) as f64;
+                let target =
+                    self.timeline.playhead - ((width - follow_margin) / self.px_per_sec) as f64;
                 self.track_scroll = target.clamp(0.0, max_scroll);
             }
         }
@@ -549,7 +569,12 @@ impl ScoreVideoApp {
     }
 
     /// 拖动缩放条滑块左端圆点: 改变可视窗口左边界 (=缩放), 锚定右边界时刻.
-    pub(super) fn apply_track_bar_zoom_left(&mut self, mouse_x: f32, anchor_end_t: f64, cx: &mut Context<Self>) {
+    pub(super) fn apply_track_bar_zoom_left(
+        &mut self,
+        mouse_x: f32,
+        anchor_end_t: f64,
+        cx: &mut Context<Self>,
+    ) {
         let width_px = f32::from(self.tracks_bounds.size.width).max(1.0);
         let t = self.track_bar_x_to_time(mouse_x);
         let max_start = (anchor_end_t - MIN_VISIBLE_SECS).max(0.0);
@@ -582,7 +607,11 @@ impl ScoreVideoApp {
 
     /// 音频波形峰值 (命中缓存则直接返回; 否则后台解码一次并缓存, 本次先
     /// 返回 `None`, 解码完成后会自行 `cx.notify()` 刷新).
-    pub(super) fn waveform_for(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> Option<CachedWaveform> {
+    pub(super) fn waveform_for(
+        &mut self,
+        path: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Option<CachedWaveform> {
         if let Some(w) = self.waveform_cache.get(path) {
             return Some(w.clone());
         }
@@ -711,9 +740,9 @@ impl ScoreVideoApp {
                             let x = f32::from(ev.position.x);
                             let t = this.track_bar_x_to_time(x);
                             let half = this.visible_secs() * 0.5;
-                            let max_scroll =
-                                (this.timeline.timeline_end().max(1.0) - this.visible_secs())
-                                    .max(0.0);
+                            let max_scroll = (this.timeline.timeline_end().max(1.0)
+                                - this.visible_secs())
+                            .max(0.0);
                             this.track_scroll = (t - half).clamp(0.0, max_scroll);
                             this.track_user_zoomed = true;
                             cx.notify();
@@ -761,8 +790,9 @@ impl ScoreVideoApp {
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    this.drag =
-                                        Some(VideoDrag::TrackBarZoomLeft { anchor_end_t: end_t });
+                                    this.drag = Some(VideoDrag::TrackBarZoomLeft {
+                                        anchor_end_t: end_t,
+                                    });
                                     cx.notify();
                                 }),
                             ),
@@ -794,5 +824,4 @@ impl ScoreVideoApp {
                     ),
             )
     }
-
 }

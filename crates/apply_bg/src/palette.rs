@@ -149,17 +149,23 @@ pub fn palette_panel<T: 'static>(
         .flex()
         .flex_col()
         .gap_2()
-        .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+        )
         .on_mouse_move(cx.listener({
             let on_move = on_move.clone();
             move |this, ev: &MouseMoveEvent, _, cx| {
                 on_move(this, f32::from(ev.position.x), f32::from(ev.position.y), cx);
             }
         }))
-        .on_mouse_up(MouseButton::Left, cx.listener({
-            let on_up = on_up.clone();
-            move |this, _: &MouseUpEvent, _, cx| on_up(this, cx)
-        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener({
+                let on_up = on_up.clone();
+                move |this, _: &MouseUpEvent, _, cx| on_up(this, cx)
+            }),
+        )
         .child(
             div()
                 .w_full()
@@ -183,10 +189,13 @@ pub fn palette_panel<T: 'static>(
                         .border_1()
                         .border_color(ui_kit::chrome(0x64748b))
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            on_recent(this, color, cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                on_recent(this, color, cx);
+                            }),
+                        )
                 })),
         )
         .child(
@@ -273,54 +282,57 @@ pub fn checkerboard(cell: f32) -> impl IntoElement {
 /// 线条眼睛. 睁开是显示, 闭上是隐藏.
 pub fn eye_icon(open: bool, color: gpui::Rgba) -> impl IntoElement {
     div().size(px(16.)).flex_shrink_0().child(
-        canvas(|_, _, _| {}, move |bounds, _, window, _| {
-            let ox = f32::from(bounds.origin.x);
-            let oy = f32::from(bounds.origin.y);
-            let s = f32::from(bounds.size.width)
-                .min(f32::from(bounds.size.height))
-                .max(1.0);
-            let p = |x: f32, y: f32| point(px(ox + x / 16.0 * s), px(oy + y / 16.0 * s));
-            let thick = px((1.35_f32 * s / 16.0).max(1.0));
-            let mut lid = PathBuilder::stroke(thick);
-            if open {
-                lid.move_to(p(1.5, 8.2));
-                lid.curve_to(p(14.5, 8.2), p(8.0, 2.2));
-                lid.move_to(p(1.5, 8.2));
-                lid.curve_to(p(14.5, 8.2), p(8.0, 14.2));
-            } else {
-                lid.move_to(p(1.8, 8.0));
-                lid.curve_to(p(14.2, 8.0), p(8.0, 5.6));
-                lid.move_to(p(1.8, 8.0));
-                lid.curve_to(p(14.2, 8.0), p(8.0, 10.4));
-            }
-            if let Ok(path) = lid.build() {
-                window.paint_path(path, color);
-            }
-            if open {
-                let center = p(8.0, 8.2);
-                let r = 1.55 / 16.0 * s;
-                let mut pupil = PathBuilder::stroke(thick);
-                pupil.move_to(point(center.x + px(r), center.y));
-                pupil.arc_to(
-                    point(px(r), px(r)),
-                    px(0.),
-                    false,
-                    false,
-                    point(center.x - px(r), center.y),
-                );
-                pupil.arc_to(
-                    point(px(r), px(r)),
-                    px(0.),
-                    false,
-                    false,
-                    point(center.x + px(r), center.y),
-                );
-                pupil.close();
-                if let Ok(path) = pupil.build() {
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let ox = f32::from(bounds.origin.x);
+                let oy = f32::from(bounds.origin.y);
+                let s = f32::from(bounds.size.width)
+                    .min(f32::from(bounds.size.height))
+                    .max(1.0);
+                let p = |x: f32, y: f32| point(px(ox + x / 16.0 * s), px(oy + y / 16.0 * s));
+                let thick = px((1.35_f32 * s / 16.0).max(1.0));
+                let mut lid = PathBuilder::stroke(thick);
+                if open {
+                    lid.move_to(p(1.5, 8.2));
+                    lid.curve_to(p(14.5, 8.2), p(8.0, 2.2));
+                    lid.move_to(p(1.5, 8.2));
+                    lid.curve_to(p(14.5, 8.2), p(8.0, 14.2));
+                } else {
+                    lid.move_to(p(1.8, 8.0));
+                    lid.curve_to(p(14.2, 8.0), p(8.0, 5.6));
+                    lid.move_to(p(1.8, 8.0));
+                    lid.curve_to(p(14.2, 8.0), p(8.0, 10.4));
+                }
+                if let Ok(path) = lid.build() {
                     window.paint_path(path, color);
                 }
-            }
-        })
+                if open {
+                    let center = p(8.0, 8.2);
+                    let r = 1.55 / 16.0 * s;
+                    let mut pupil = PathBuilder::stroke(thick);
+                    pupil.move_to(point(center.x + px(r), center.y));
+                    pupil.arc_to(
+                        point(px(r), px(r)),
+                        px(0.),
+                        false,
+                        false,
+                        point(center.x - px(r), center.y),
+                    );
+                    pupil.arc_to(
+                        point(px(r), px(r)),
+                        px(0.),
+                        false,
+                        false,
+                        point(center.x + px(r), center.y),
+                    );
+                    pupil.close();
+                    if let Ok(path) = pupil.build() {
+                        window.paint_path(path, color);
+                    }
+                }
+            },
+        )
         .size_full(),
     )
 }
@@ -341,10 +353,13 @@ fn preset_chip<T: 'static>(
         .border_1()
         .border_color(ui_kit::chrome(0x64748b))
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            cx.stop_propagation();
-            on_preset(this, color, cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                on_preset(this, color, cx);
+            }),
+        )
 }
 
 fn sb_square<T: 'static>(
@@ -378,7 +393,8 @@ fn sb_square<T: 'static>(
                 },
                 move |bounds, _, window, _| {
                     if let Some(ref img) = img {
-                        let _ = window.paint_image(bounds, Corners::default(), img.clone(), 0, false);
+                        let _ =
+                            window.paint_image(bounds, Corners::default(), img.clone(), 0, false);
                     }
                     let mx = bounds.origin.x + px(s * f32::from(bounds.size.width));
                     let my = bounds.origin.y + px((1.0 - v) * f32::from(bounds.size.height));
@@ -397,10 +413,13 @@ fn sb_square<T: 'static>(
             )
             .size_full(),
         )
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-            cx.stop_propagation();
-            on_sb(this, f32::from(ev.position.x), f32::from(ev.position.y), cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_sb(this, f32::from(ev.position.x), f32::from(ev.position.y), cx);
+            }),
+        )
 }
 
 fn hue_bar<T: 'static>(
@@ -430,7 +449,8 @@ fn hue_bar<T: 'static>(
                 },
                 move |bounds, _, window, _| {
                     if let Some(ref img) = img {
-                        let _ = window.paint_image(bounds, Corners::default(), img.clone(), 0, false);
+                        let _ =
+                            window.paint_image(bounds, Corners::default(), img.clone(), 0, false);
                     }
                     let hy = bounds.origin.y
                         + px((hue / 360.0).clamp(0.0, 1.0) * f32::from(bounds.size.height));
@@ -449,10 +469,13 @@ fn hue_bar<T: 'static>(
             )
             .size_full(),
         )
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-            cx.stop_propagation();
-            on_hue(this, f32::from(ev.position.y), cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_hue(this, f32::from(ev.position.y), cx);
+            }),
+        )
 }
 
 fn rgb_row(
@@ -484,7 +507,10 @@ fn alpha_row<T: 'static>(
 ) -> impl IntoElement {
     let t = alpha_t.clamp(0.0, 1.0);
     let fill = rgba(
-        (u32::from(swatch[0]) << 24) | (u32::from(swatch[1]) << 16) | (u32::from(swatch[2]) << 8) | 255,
+        (u32::from(swatch[0]) << 24)
+            | (u32::from(swatch[1]) << 16)
+            | (u32::from(swatch[2]) << 8)
+            | 255,
     );
     div()
         .w_full()
@@ -547,16 +573,14 @@ fn alpha_row<T: 'static>(
                     }),
                 ),
         )
-        .child(
-            div()
-                .w(px(40.))
-                .h(px(20.))
-                .flex_shrink_0()
-                .child(a_in),
-        )
+        .child(div().w(px(40.)).h(px(20.)).flex_shrink_0().child(a_in))
 }
 
-fn channel(id_prefix: &'static str, label: &'static str, input: Entity<TextInput>) -> impl IntoElement {
+fn channel(
+    id_prefix: &'static str,
+    label: &'static str,
+    input: Entity<TextInput>,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -564,7 +588,12 @@ fn channel(id_prefix: &'static str, label: &'static str, input: Entity<TextInput
         .gap_1()
         .flex_1()
         .min_w(px(0.))
-        .child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child(label))
+        .child(
+            div()
+                .text_xs()
+                .text_color(ui_kit::chrome(0x94a3b8))
+                .child(label),
+        )
         .child(
             div()
                 .id(SharedString::from(format!("{id_prefix}-rgb-{label}")))

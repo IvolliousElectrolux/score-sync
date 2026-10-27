@@ -101,13 +101,22 @@ pub fn obj_bounds(obj: &Obj) -> Option<Rect> {
     match &obj.kind {
         ObjKind::Path(p) => {
             let r = subpaths_bounds(&p.subpaths)?;
-            let pad = p.stroke.as_ref().map(|s| s.width.max(0.0) * 0.5).unwrap_or(0.0);
+            let pad = p
+                .stroke
+                .as_ref()
+                .map(|s| s.width.max(0.0) * 0.5)
+                .unwrap_or(0.0);
             Some(r.pad(pad))
         }
         ObjKind::Text(t) => {
             let w = (t.text.chars().count().max(1) as f32) * t.size * 0.55;
             let h = t.size.max(1.0);
-            Some(Rect::new(t.origin.0, t.origin.1 - h, t.origin.0 + w, t.origin.1))
+            Some(Rect::new(
+                t.origin.0,
+                t.origin.1 - h,
+                t.origin.0 + w,
+                t.origin.1,
+            ))
         }
         ObjKind::Image(im) => Some(Rect::new(im.x, im.y, im.x + im.w, im.y + im.h)),
     }
@@ -331,7 +340,8 @@ pub fn split_cubic(
     p3: (f32, f32),
     t: f32,
 ) -> ([(f32, f32); 4], [(f32, f32); 4]) {
-    let lerp = |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+    let lerp =
+        |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
     let a = lerp(p0, p1, t);
     let b = lerp(p1, p2, t);
     let c = lerp(p2, p3, t);
@@ -651,7 +661,13 @@ pub fn closest_on_path(subs: &[Subpath], x: f32, y: f32) -> Option<(usize, usize
     best.map(|(_, si, gi, t)| (si, gi, t))
 }
 
-pub fn cubic_at(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
+pub fn cubic_at(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    p3: (f32, f32),
+    t: f32,
+) -> (f32, f32) {
     let u = 1.0 - t;
     let b0 = u * u * u;
     let b1 = 3.0 * u * u * t;
@@ -688,14 +704,8 @@ pub fn fit_cubics(pts: &[(f32, f32)]) -> Vec<Seg> {
         } else {
             simp[i + 1]
         };
-        let c1 = (
-            p1.0 + (p2.0 - p0.0) / 6.0,
-            p1.1 + (p2.1 - p0.1) / 6.0,
-        );
-        let c2 = (
-            p2.0 - (p3.0 - p1.0) / 6.0,
-            p2.1 - (p3.1 - p1.1) / 6.0,
-        );
+        let c1 = (p1.0 + (p2.0 - p0.0) / 6.0, p1.1 + (p2.1 - p0.1) / 6.0);
+        let c2 = (p2.0 - (p3.0 - p1.0) / 6.0, p2.1 - (p3.1 - p1.1) / 6.0);
         segs.push(Seg::Cubic {
             p0: p1,
             p1: c1,
@@ -733,7 +743,11 @@ fn rdp(pts: &[(f32, f32)], eps: f32) -> Vec<(f32, f32)> {
 }
 
 /// 用笔画把路径擦出缺口. 没擦到返回 None, 擦到则返回新的子路径 (被擦断的曲线改成折线).
-pub fn carve_subpaths(subs: &[Subpath], stroke: &[(f32, f32)], radius: f32) -> Option<Vec<Subpath>> {
+pub fn carve_subpaths(
+    subs: &[Subpath],
+    stroke: &[(f32, f32)],
+    radius: f32,
+) -> Option<Vec<Subpath>> {
     if stroke.is_empty() || radius <= 0.0 {
         return None;
     }
@@ -828,7 +842,7 @@ fn dist_to_stroke(p: (f32, f32), stroke: &[(f32, f32)]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Obj, PathObj, Seg, Stroke, Paint, FillRule, LineCap, LineJoin, Subpath};
+    use crate::document::{FillRule, LineCap, LineJoin, Obj, Paint, PathObj, Seg, Stroke, Subpath};
 
     fn line_obj(a: (f32, f32), b: (f32, f32)) -> Obj {
         Obj::path(PathObj {

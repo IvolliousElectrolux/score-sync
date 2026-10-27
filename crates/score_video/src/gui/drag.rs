@@ -10,9 +10,7 @@ impl ScoreVideoApp {
     /// 由宿主在窗口外 / 跨面板时转发: 处理当前所有拖拽种类.
     pub fn root_mouse_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         match &mut self.drag {
-            Some(VideoDrag::PoolDrop {
-                last_x, last_y, ..
-            }) => {
+            Some(VideoDrag::PoolDrop { last_x, last_y, .. }) => {
                 *last_x = x;
                 *last_y = y;
                 cx.notify();
@@ -91,9 +89,7 @@ impl ScoreVideoApp {
 
     pub(super) fn apply_left_drag_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         match &self.drag {
-            None
-            | Some(VideoDrag::PoolDrop { .. })
-            | Some(VideoDrag::PoolScroll { .. }) => return,
+            None | Some(VideoDrag::PoolDrop { .. }) | Some(VideoDrag::PoolScroll { .. }) => return,
             _ => {}
         }
         match self.drag.clone() {
@@ -116,13 +112,12 @@ impl ScoreVideoApp {
                 self.ensure_drag_undo();
                 let t = self.x_to_time(x);
                 let delta = t - last_t;
-                let (final_delta, adj) = if let Some(c) =
-                    self.timeline.video_clips.iter().find(|c| c.id == id)
-                {
-                    self.snap_body_delta(c.start, c.end, delta, SnapExclude::Video(id))
-                } else {
-                    (delta, 0.0)
-                };
+                let (final_delta, adj) =
+                    if let Some(c) = self.timeline.video_clips.iter().find(|c| c.id == id) {
+                        self.snap_body_delta(c.start, c.end, delta, SnapExclude::Video(id))
+                    } else {
+                        (delta, 0.0)
+                    };
                 self.timeline.drag_body(id, final_delta);
                 self.drag = Some(VideoDrag::Body {
                     id,
@@ -235,9 +230,7 @@ impl ScoreVideoApp {
     pub(super) fn end_left_drag(&mut self, x: f32, cx: &mut Context<Self>) {
         let finish_scrub = matches!(self.drag, Some(VideoDrag::Seek));
         match &self.drag {
-            None
-            | Some(VideoDrag::PoolDrop { .. })
-            | Some(VideoDrag::PoolScroll { .. }) => return,
+            None | Some(VideoDrag::PoolDrop { .. }) | Some(VideoDrag::PoolScroll { .. }) => return,
             _ => {}
         }
         if let Some(VideoDrag::FadeSelect { anchor }) = self.drag {
@@ -304,7 +297,12 @@ impl ScoreVideoApp {
     }
 
     /// 拖动素材池自定义滚动条滑块 (可能由宿主跨面板转发调用).
-    pub(super) fn apply_pool_scroll_drag(&mut self, mouse_y: f32, grab: f32, cx: &mut Context<Self>) {
+    pub(super) fn apply_pool_scroll_drag(
+        &mut self,
+        mouse_y: f32,
+        grab: f32,
+        cx: &mut Context<Self>,
+    ) {
         let handle = self.pool_scroll.clone();
         let max_y = f32::from(handle.max_offset().height);
         if max_y <= 0.5 {

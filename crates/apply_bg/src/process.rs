@@ -776,7 +776,10 @@ mod tests {
         assert_eq!(out.dimensions(), (2560, 1440));
         assert_eq!(*out.get_pixel(0, 0), Rgb([10, 20, 30]));
         assert_eq!(*out.get_pixel(0, frame.voff as u32), Rgb([200, 200, 200]));
-        assert_eq!(*out.get_pixel(2559, frame.voff as u32), Rgb([200, 200, 200]));
+        assert_eq!(
+            *out.get_pixel(2559, frame.voff as u32),
+            Rgb([200, 200, 200])
+        );
     }
 
     #[test]

@@ -61,15 +61,32 @@ impl VectorEditApp {
             ));
         if !self.standalone {
             row = row
-                .child(self.action_btn(ui_kit::t_src("应用"), "v-apply", cx, |this, cx| this.request_apply(cx)))
-                .child(self.action_btn(ui_kit::t_src("还原"), "v-restore", cx, |this, cx| this.request_restore(cx)))
-                .child(self.action_btn(ui_kit::menu_label(ui_kit::t("vector.cancel"), "vector.cancel"), "v-cancel", cx, |this, cx| {
-                    this.host_cmd = Some(HostCmd::Cancel);
-                    cx.notify();
-                }));
+                .child(
+                    self.action_btn(ui_kit::t_src("应用"), "v-apply", cx, |this, cx| {
+                        this.request_apply(cx)
+                    }),
+                )
+                .child(
+                    self.action_btn(ui_kit::t_src("还原"), "v-restore", cx, |this, cx| {
+                        this.request_restore(cx)
+                    }),
+                )
+                .child(self.action_btn(
+                    ui_kit::menu_label(ui_kit::t("vector.cancel"), "vector.cancel"),
+                    "v-cancel",
+                    cx,
+                    |this, cx| {
+                        this.host_cmd = Some(HostCmd::Cancel);
+                        cx.notify();
+                    },
+                ));
         } else {
             row = row
-                .child(self.action_btn(ui_kit::t_src("保存"), "v-save", cx, |this, cx| this.request_apply(cx)))
+                .child(
+                    self.action_btn(ui_kit::t_src("保存"), "v-save", cx, |this, cx| {
+                        this.request_apply(cx)
+                    }),
+                )
                 .child(self.action_btn("PNG", "v-png", cx, |this, cx| this.export_png(cx)))
                 .child(self.action_btn("SVG", "v-svg", cx, |this, cx| this.export_svg(cx)));
         }
@@ -89,9 +106,14 @@ impl VectorEditApp {
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .when(on, |d| d.bg(ui_kit::card()).font_weight(gpui::FontWeight::SEMIBOLD))
+            .when(on, |d| {
+                d.bg(ui_kit::card()).font_weight(gpui::FontWeight::SEMIBOLD)
+            })
             .hover(|s| s.bg(ui_kit::chrome(0xd8e0ea)))
-            .child(ui_kit::menu_label(ui_kit::t(mode.command_id()), mode.command_id()))
+            .child(ui_kit::menu_label(
+                ui_kit::t(mode.command_id()),
+                mode.command_id(),
+            ))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -144,20 +166,17 @@ impl VectorEditApp {
             .p_2()
             .gap_2()
             .overflow_y_scroll();
-        bottom = bottom.child(div().text_sm().child(ui_kit::t_src("外观"))).child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(self.paint_proxy(cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(self.stroke_slider(cx)),
-                ),
-        );
+        bottom = bottom
+            .child(div().text_sm().child(ui_kit::t_src("外观")))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(self.paint_proxy(cx))
+                    .child(div().flex_1().min_w(px(0.)).child(self.stroke_slider(cx))),
+            );
         bottom = bottom.child(
             div()
                 .text_xs()
@@ -235,34 +254,40 @@ impl VectorEditApp {
                 }
                 this.palette_pointer_move(f32::from(ev.position.x), f32::from(ev.position.y), cx);
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.suppress_outline_click = false;
-                if matches!(this.drag, Some(DragKind::OutlineScroll { .. })) {
-                    this.drag = None;
-                    cx.notify();
-                    return;
-                }
-                if matches!(this.drag, Some(DragKind::Slider(_))) {
-                    this.finish_slider(cx);
-                    return;
-                }
-                if matches!(this.drag, Some(DragKind::LayerReorder { .. })) {
-                    this.finish_layer_reorder(cx);
-                    return;
-                }
-                this.palette_pointer_up(cx);
-            }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.suppress_outline_click = false;
-                if matches!(this.drag, Some(DragKind::OutlineScroll { .. })) {
-                    this.drag = None;
-                    cx.notify();
-                    return;
-                }
-                if matches!(this.drag, Some(DragKind::LayerReorder { .. })) {
-                    this.finish_layer_reorder(cx);
-                }
-            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.suppress_outline_click = false;
+                    if matches!(this.drag, Some(DragKind::OutlineScroll { .. })) {
+                        this.drag = None;
+                        cx.notify();
+                        return;
+                    }
+                    if matches!(this.drag, Some(DragKind::Slider(_))) {
+                        this.finish_slider(cx);
+                        return;
+                    }
+                    if matches!(this.drag, Some(DragKind::LayerReorder { .. })) {
+                        this.finish_layer_reorder(cx);
+                        return;
+                    }
+                    this.palette_pointer_up(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.suppress_outline_click = false;
+                    if matches!(this.drag, Some(DragKind::OutlineScroll { .. })) {
+                        this.drag = None;
+                        cx.notify();
+                        return;
+                    }
+                    if matches!(this.drag, Some(DragKind::LayerReorder { .. })) {
+                        this.finish_layer_reorder(cx);
+                    }
+                }),
+            )
             .child({
                 let entity = cx.entity().clone();
                 canvas(
@@ -276,7 +301,8 @@ impl VectorEditApp {
                         move |_, _, window, cx| {
                             let open_menu = entity.clone();
                             window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
-                                if phase != DispatchPhase::Capture || ev.button != MouseButton::Right
+                                if phase != DispatchPhase::Capture
+                                    || ev.button != MouseButton::Right
                                 {
                                     return;
                                 }
@@ -310,7 +336,8 @@ impl VectorEditApp {
                                         return;
                                     }
                                     up.update(cx, |this, cx| {
-                                        if matches!(this.drag, Some(DragKind::OutlineScroll { .. })) {
+                                        if matches!(this.drag, Some(DragKind::OutlineScroll { .. }))
+                                        {
                                             this.drag = None;
                                             cx.notify();
                                         }
@@ -351,7 +378,9 @@ impl VectorEditApp {
             .child(self.outline_body(cx))
             .child(bottom)
             .child(self.layer_drag_ghost())
-            .when(self.palette_open, |d| d.child(self.color_picker_floating(cx)))
+            .when(self.palette_open, |d| {
+                d.child(self.color_picker_floating(cx))
+            })
             .child(self.outline_context_menu(cx))
     }
 
@@ -430,12 +459,22 @@ impl VectorEditApp {
                 MouseButton::Right,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             )
-            .child(self.menu_row("vmenu-rename", ui_kit::t_src("重命名"), menu_key("vector.rename", "F2"), cx, |this, window, cx| {
-                this.begin_rename(window, cx);
-            }))
+            .child(self.menu_row(
+                "vmenu-rename",
+                ui_kit::t_src("重命名"),
+                menu_key("vector.rename", "F2"),
+                cx,
+                |this, window, cx| {
+                    this.begin_rename(window, cx);
+                },
+            ))
             .child(self.menu_row(
                 "vmenu-vis",
-                if shown { ui_kit::t_src("隐藏") } else { ui_kit::t_src("显示") },
+                if shown {
+                    ui_kit::t_src("隐藏")
+                } else {
+                    ui_kit::t_src("显示")
+                },
                 "",
                 cx,
                 {
@@ -447,19 +486,34 @@ impl VectorEditApp {
             .child(self.menu_row(
                 "vmenu-all",
                 ui_kit::t_src("全选"),
-                menu_key("vector.select_all", &format!("{}A", apply_bg::primary_mod())),
+                menu_key(
+                    "vector.select_all",
+                    &format!("{}A", apply_bg::primary_mod()),
+                ),
                 cx,
                 |this, window, cx| this.select_all(window, cx),
             ))
-            .child(self.menu_row("vmenu-del", ui_kit::t_src("删除"), menu_key("vector.delete", "Del"), cx, |this, window, cx| {
-                this.delete_selection(window, cx);
-            }));
+            .child(self.menu_row(
+                "vmenu-del",
+                ui_kit::t_src("删除"),
+                menu_key("vector.delete", "Del"),
+                cx,
+                |this, window, cx| {
+                    this.delete_selection(window, cx);
+                },
+            ));
         if can_group || can_ungroup || can_regroup {
             col = col.child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)));
             if can_group {
-                col = col.child(self.menu_row("vmenu-group", ui_kit::t_src("组合"), group_hint.clone(), cx, |this, _, cx| {
-                    this.group_selected(cx);
-                }));
+                col = col.child(self.menu_row(
+                    "vmenu-group",
+                    ui_kit::t_src("组合"),
+                    group_hint.clone(),
+                    cx,
+                    |this, _, cx| {
+                        this.group_selected(cx);
+                    },
+                ));
             }
             if can_ungroup {
                 col = col.child(self.menu_row(
@@ -482,14 +536,20 @@ impl VectorEditApp {
         }
         col = col
             .child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)))
-            .child(self.menu_row("vmenu-copy", ui_kit::t_src("复制"), copy_hint, cx, |this, window, cx| {
-                if this.selected.is_empty() {
-                    this.clip_on_canvas = false;
-                    this.copy_layer(window, cx);
-                } else {
-                    this.copy_selection(cx);
-                }
-            }));
+            .child(self.menu_row(
+                "vmenu-copy",
+                ui_kit::t_src("复制"),
+                copy_hint,
+                cx,
+                |this, window, cx| {
+                    if this.selected.is_empty() {
+                        this.clip_on_canvas = false;
+                        this.copy_layer(window, cx);
+                    } else {
+                        this.copy_selection(cx);
+                    }
+                },
+            ));
         if can_paste_obj {
             col = col.child(self.menu_row(
                 "vmenu-paste-obj",
@@ -506,7 +566,11 @@ impl VectorEditApp {
             col = col.child(self.menu_row(
                 "vmenu-paste-layer",
                 ui_kit::t_src("粘贴图层"),
-                if can_paste_obj { String::new() } else { paste_hint },
+                if can_paste_obj {
+                    String::new()
+                } else {
+                    paste_hint
+                },
                 cx,
                 |this, window, cx| {
                     this.clip_on_canvas = false;
@@ -517,15 +581,17 @@ impl VectorEditApp {
         if can_extract {
             col = col
                 .child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)))
-                .child(self.menu_row("vmenu-extract", ui_kit::t_src("取出到新图层"), menu_key("vector.extract", "J"), cx, |this, _, cx| {
-                    this.extract_selection(cx);
-                }));
+                .child(self.menu_row(
+                    "vmenu-extract",
+                    ui_kit::t_src("取出到新图层"),
+                    menu_key("vector.extract", "J"),
+                    cx,
+                    |this, _, cx| {
+                        this.extract_selection(cx);
+                    },
+                ));
         }
-        div()
-            .absolute()
-            .inset_0()
-            .child(col)
-            .into_any_element()
+        div().absolute().inset_0().child(col).into_any_element()
     }
 
     pub(crate) fn canvas_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -582,21 +648,36 @@ impl VectorEditApp {
             .child(self.menu_row(
                 "cmenu-all",
                 ui_kit::t_src("全选"),
-                menu_key("vector.select_all", &format!("{}A", apply_bg::primary_mod())),
+                menu_key(
+                    "vector.select_all",
+                    &format!("{}A", apply_bg::primary_mod()),
+                ),
                 cx,
                 |this, window, cx| this.select_all(window, cx),
             ));
         if has_sel {
-            col = col.child(self.menu_row("cmenu-del", ui_kit::t_src("删除"), menu_key("vector.delete", "Del"), cx, |this, window, cx| {
-                this.delete_selection(window, cx);
-            }));
+            col = col.child(self.menu_row(
+                "cmenu-del",
+                ui_kit::t_src("删除"),
+                menu_key("vector.delete", "Del"),
+                cx,
+                |this, window, cx| {
+                    this.delete_selection(window, cx);
+                },
+            ));
         }
         if can_group || can_ungroup || can_regroup {
             col = col.child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)));
             if can_group {
-                col = col.child(self.menu_row("cmenu-group", ui_kit::t_src("组合"), group_hint, cx, |this, _, cx| {
-                    this.group_selected(cx);
-                }));
+                col = col.child(self.menu_row(
+                    "cmenu-group",
+                    ui_kit::t_src("组合"),
+                    group_hint,
+                    cx,
+                    |this, _, cx| {
+                        this.group_selected(cx);
+                    },
+                ));
             }
             if can_ungroup {
                 col = col.child(self.menu_row(
@@ -621,9 +702,15 @@ impl VectorEditApp {
             col = col.child(div().my(px(4.)).h(px(1.)).bg(ui_kit::chrome(0xe2e8f0)));
         }
         if has_sel {
-            col = col.child(self.menu_row("cmenu-copy", ui_kit::t_src("复制"), copy_hint, cx, |this, _, cx| {
-                this.copy_selection(cx);
-            }));
+            col = col.child(self.menu_row(
+                "cmenu-copy",
+                ui_kit::t_src("复制"),
+                copy_hint,
+                cx,
+                |this, _, cx| {
+                    this.copy_selection(cx);
+                },
+            ));
         }
         if can_paste_obj {
             col = col.child(self.menu_row(
@@ -638,9 +725,15 @@ impl VectorEditApp {
             ));
         }
         if has_sel {
-            col = col.child(self.menu_row("cmenu-extract", ui_kit::t_src("取出到新图层"), menu_key("vector.extract", "J"), cx, |this, _, cx| {
-                this.extract_selection(cx);
-            }));
+            col = col.child(self.menu_row(
+                "cmenu-extract",
+                ui_kit::t_src("取出到新图层"),
+                menu_key("vector.extract", "J"),
+                cx,
+                |this, _, cx| {
+                    this.extract_selection(cx);
+                },
+            ));
         }
         div().absolute().inset_0().child(col).into_any_element()
     }
@@ -668,7 +761,12 @@ impl VectorEditApp {
             .hover(|s| s.bg(ui_kit::chrome(0xdbeafe)))
             .child(div().text_xs().child(label.into()))
             .when(show_hint, |d| {
-                d.child(div().text_xs().text_color(ui_kit::chrome(0x94a3b8)).child(hint))
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(ui_kit::chrome(0x94a3b8))
+                        .child(hint),
+                )
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -710,7 +808,10 @@ impl VectorEditApp {
             pin_col = pin_col.child(self.outline_row(row, cx));
         }
         if !pinned.is_empty() {
-            pin_col = pin_col.border_b_1().border_color(ui_kit::chrome(0xe2e8f0)).pb_1();
+            pin_col = pin_col
+                .border_b_1()
+                .border_color(ui_kit::chrome(0xe2e8f0))
+                .pb_1();
         }
         div()
             .flex_1()
@@ -722,7 +823,11 @@ impl VectorEditApp {
             .into_any_element()
     }
 
-    fn outline_scroller(&self, rows: Vec<crate::outline::OutlineRow>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn outline_scroller(
+        &self,
+        rows: Vec<crate::outline::OutlineRow>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let entity = cx.entity().clone();
         let scroll = gpui::UniformListScrollHandle(self.outline_scroll.0.clone());
         let list = if rows.is_empty() {
@@ -853,7 +958,11 @@ impl VectorEditApp {
                             let travel = (th - thumb).max(1.0);
                             let track_top = f32::from(b.origin.y);
                             let off = -f32::from(handle.offset().y);
-                            let frac = if max > 0.5 { (off / max).clamp(0.0, 1.0) } else { 0.0 };
+                            let frac = if max > 0.5 {
+                                (off / max).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
                             let cur_top = track_top + frac * travel;
                             this.drag = Some(DragKind::OutlineScroll {
                                 grab: (y - cur_top).clamp(0.0, thumb),
@@ -865,20 +974,33 @@ impl VectorEditApp {
             .into_any_element()
     }
 
-    fn outline_row(&self, row: &crate::outline::OutlineRow, cx: &mut Context<Self>) -> impl IntoElement {
+    fn outline_row(
+        &self,
+        row: &crate::outline::OutlineRow,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         use crate::outline::RowKind;
         let n = self.doc.as_ref().map(|d| d.layers.len()).unwrap_or(0);
         let display = n.saturating_sub(1).saturating_sub(row.layer_index);
         let active_layer = row.kind == RowKind::Layer
-            && self.doc.as_ref().is_some_and(|d| d.active == row.layer_index);
+            && self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.active == row.layer_index);
         let direct = self.selected.iter().any(|s| s == &row.id);
         let layer_is_selection = active_layer && self.selected.is_empty();
         let holds_selection = self.pin_ids().iter().any(|id| id == &row.id);
         let nested = !direct
             && !layer_is_selection
-            && (holds_selection || row.ancestors.iter().any(|a| self.selected.iter().any(|s| s == a)));
+            && (holds_selection
+                || row
+                    .ancestors
+                    .iter()
+                    .any(|a| self.selected.iter().any(|s| s == a)));
         let drag_from = match &self.drag {
-            Some(DragKind::LayerReorder { from, armed: true, .. }) => Some(*from),
+            Some(DragKind::LayerReorder {
+                from, armed: true, ..
+            }) => Some(*from),
             _ => None,
         };
         let (line_at, line_after) = match &self.drag {
@@ -912,14 +1034,21 @@ impl VectorEditApp {
             .pl(px(row.depth as f32 * 12.0))
             .pr_1()
             .rounded_sm()
-            .when(direct || layer_is_selection, |d| d.bg(ui_kit::chrome(0xdbeafe)))
-            .when(nested, |d| d.bg(ui_kit::chrome(0xeff6ff)))
-            .when(active_layer && !direct && !layer_is_selection && !holds_selection, |d| {
-                d.bg(ui_kit::chrome(0xe2e8f0))
+            .when(direct || layer_is_selection, |d| {
+                d.bg(ui_kit::chrome(0xdbeafe))
             })
+            .when(nested, |d| d.bg(ui_kit::chrome(0xeff6ff)))
+            .when(
+                active_layer && !direct && !layer_is_selection && !holds_selection,
+                |d| d.bg(ui_kit::chrome(0xe2e8f0)),
+            )
             .when(dragging, |d| d.opacity(0.35))
-            .when(show_line && !line_after, |d| d.border_t_2().border_color(ui_kit::chrome(0xf59e0b)))
-            .when(show_line && line_after, |d| d.border_b_2().border_color(ui_kit::chrome(0xf59e0b)))
+            .when(show_line && !line_after, |d| {
+                d.border_t_2().border_color(ui_kit::chrome(0xf59e0b))
+            })
+            .when(show_line && line_after, |d| {
+                d.border_b_2().border_color(ui_kit::chrome(0xf59e0b))
+            })
             .when(row.kind == RowKind::Layer, |d| {
                 d.child(Self::measure_layer_bounds(cx.entity(), display))
             })
@@ -948,7 +1077,10 @@ impl VectorEditApp {
             .child(self.outline_twist(id.clone(), expandable, open, cx))
             .child(self.outline_eye(&id, visible, cx))
             .child(self.outline_thumb(row).when(!row.shown, |d| d.opacity(0.4)))
-            .child(self.outline_label(row, display, kind, cx).when(!row.shown, |d| d.opacity(0.45)))
+            .child(
+                self.outline_label(row, display, kind, cx)
+                    .when(!row.shown, |d| d.opacity(0.45)),
+            )
             .on_mouse_up(
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
@@ -996,7 +1128,13 @@ impl VectorEditApp {
             })
     }
 
-    fn outline_twist(&self, id: String, expandable: bool, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn outline_twist(
+        &self,
+        id: String,
+        expandable: bool,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .id(SharedString::from(format!("vtw-{id}")))
             .w(px(14.))
@@ -1006,7 +1144,9 @@ impl VectorEditApp {
             .justify_center()
             .flex_shrink_0()
             .text_xs()
-            .when(expandable, |d| d.cursor_pointer().child(if open { "▾" } else { "▸" }))
+            .when(expandable, |d| {
+                d.cursor_pointer().child(if open { "▾" } else { "▸" })
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
@@ -1285,7 +1425,8 @@ impl VectorEditApp {
                             {
                                 let entity = cx.entity().clone();
                                 move |bounds, _, cx| {
-                                    entity.update(cx, |this, _| this.note_slider_track(kind, bounds));
+                                    entity
+                                        .update(cx, |this, _| this.note_slider_track(kind, bounds));
                                 }
                             },
                             |_, _, _, _| {},
@@ -1387,7 +1528,8 @@ impl VectorEditApp {
                         entity.update(cx, |this, cx| {
                             let prev = this.proxy_bounds;
                             this.proxy_bounds = bounds;
-                            let moved = (f32::from(prev.origin.x) - f32::from(bounds.origin.x)).abs()
+                            let moved = (f32::from(prev.origin.x) - f32::from(bounds.origin.x))
+                                .abs()
                                 > 0.5
                                 || (f32::from(prev.origin.y) - f32::from(bounds.origin.y)).abs()
                                     > 0.5;
@@ -1406,11 +1548,19 @@ impl VectorEditApp {
     }
 
     fn paint_square(&self, fill: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let rgba = if fill { self.style.fill } else { self.style.stroke };
+        let rgba = if fill {
+            self.style.fill
+        } else {
+            self.style.stroke
+        };
         let (left, top) = if fill { (0.0, 0.0) } else { (12.0, 12.0) };
         // 填充铺满内部. 描边只留一圈, 中间永远是格子, 白和透明也看得出是框.
         let mut square = div()
-            .id(if fill { "v-proxy-fill" } else { "v-proxy-stroke" })
+            .id(if fill {
+                "v-proxy-fill"
+            } else {
+                "v-proxy-stroke"
+            })
             .absolute()
             .left(px(left))
             .top(px(top))
@@ -1450,7 +1600,10 @@ impl VectorEditApp {
 
 fn chip_rgba(c: [u8; 4]) -> gpui::Rgba {
     gpui::rgba(
-        (u32::from(c[0]) << 24) | (u32::from(c[1]) << 16) | (u32::from(c[2]) << 8) | u32::from(c[3]),
+        (u32::from(c[0]) << 24)
+            | (u32::from(c[1]) << 16)
+            | (u32::from(c[2]) << 8)
+            | u32::from(c[3]),
     )
 }
 

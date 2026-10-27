@@ -12,7 +12,9 @@ pub enum Error {
     AudioProbe { path: PathBuf, detail: String },
     #[error("无法播放音频 ({}):\n{detail}", .path.display())]
     AudioPlay { path: PathBuf, detail: String },
-    #[error("启动 ffmpeg 失败 ({step}): {source}\n请确认程序同目录下有 ffmpeg, 或已加入系统 PATH.")]
+    #[error(
+        "启动 ffmpeg 失败 ({step}): {source}\n请确认程序同目录下有 ffmpeg, 或已加入系统 PATH."
+    )]
     FfmpegSpawn {
         step: String,
         #[source]

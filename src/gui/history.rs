@@ -173,7 +173,10 @@ impl ScoreSyncApp {
     /// 画布上正在显示的像素. 页 id 可以变 (粘贴出的新页和源页共用同一份图).
     pub(super) fn shown_page_token(&self) -> Option<(usize, u32, u32)> {
         let page = self.doc.current_page()?;
-        let ptr = page.image.as_ref().map(|img| std::sync::Arc::as_ptr(img) as usize)?;
+        let ptr = page
+            .image
+            .as_ref()
+            .map(|img| std::sync::Arc::as_ptr(img) as usize)?;
         if self.render_image.is_none() {
             return None;
         }
@@ -192,9 +195,10 @@ impl ScoreSyncApp {
     ) {
         let after = self.shown_page_token();
         let same = before.is_some() && before == after;
-        let size_changed = self.doc.current_page().is_some_and(|page| {
-            page.width() != self.img_w || page.height() != self.img_h
-        });
+        let size_changed = self
+            .doc
+            .current_page()
+            .is_some_and(|page| page.width() != self.img_w || page.height() != self.img_h);
         self.request_page_window(cx);
         if self.page_organize.is_some() {
             self.sync_organize_after_doc(cx);

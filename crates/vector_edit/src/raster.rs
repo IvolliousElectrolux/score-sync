@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 use fontdue::Font;
 use image::RgbaImage;
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8,
-    Stroke, StrokeDash, Transform,
+    FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint,
+    PremultipliedColorU8, Stroke, StrokeDash, Transform,
 };
 
 use crate::document::{Obj, ObjKind, Seg, Subpath, VecDocument};
@@ -157,7 +157,8 @@ pub fn rasterize_thumb(doc: &VecDocument, ids: &[String], max_px: u32) -> Option
     let mut pixmap = Pixmap::new(tex_w, tex_h)?;
     let bg = thumb_bg(ink);
     pixmap.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], 255));
-    let transform = Transform::from_translate(-b.x0, -b.y0).post_scale(tex_w as f32 / bw, tex_h as f32 / bh);
+    let transform =
+        Transform::from_translate(-b.x0, -b.y0).post_scale(tex_w as f32 / bw, tex_h as f32 / bh);
     for layer in &doc.layers {
         for obj in &layer.objects {
             if set.contains(obj.id.as_str()) {
@@ -220,7 +221,12 @@ fn paint_obj(pixmap: &mut Pixmap, doc: &VecDocument, obj: &Obj, transform: Trans
             if let Some(st) = &path.stroke {
                 let mut paint = Paint::default();
                 paint.anti_alias = true;
-                paint.set_color_rgba8(st.paint.rgba[0], st.paint.rgba[1], st.paint.rgba[2], st.paint.rgba[3]);
+                paint.set_color_rgba8(
+                    st.paint.rgba[0],
+                    st.paint.rgba[1],
+                    st.paint.rgba[2],
+                    st.paint.rgba[3],
+                );
                 let mut stroke = Stroke {
                     width: st.width.max(0.15),
                     miter_limit: 4.0,
@@ -246,12 +252,27 @@ fn paint_obj(pixmap: &mut Pixmap, doc: &VecDocument, obj: &Obj, transform: Trans
             if !text.edited {
                 if let Some(id) = &text.baked_id {
                     if let Some(img) = doc.images.get(id) {
-                        blit_image(pixmap, img, text.origin.0, text.origin.1 - text.size, text.size * 0.6 * text.text.chars().count().max(1) as f32, text.size, transform);
+                        blit_image(
+                            pixmap,
+                            img,
+                            text.origin.0,
+                            text.origin.1 - text.size,
+                            text.size * 0.6 * text.text.chars().count().max(1) as f32,
+                            text.size,
+                            transform,
+                        );
                         return;
                     }
                 }
             }
-            draw_text(pixmap, &text.text, text.size, text.origin, text.fill.rgba, transform);
+            draw_text(
+                pixmap,
+                &text.text,
+                text.size,
+                text.origin,
+                text.fill.rgba,
+                transform,
+            );
         }
         ObjKind::Image(im) => {
             if let Some(img) = doc.images.get(&im.png_id) {
@@ -307,7 +328,15 @@ fn clip_mask(w: u32, h: u32, clip: &[Subpath], transform: Transform) -> Option<M
     Some(mask)
 }
 
-fn blit_image(pixmap: &mut Pixmap, img: &RgbaImage, x: f32, y: f32, w: f32, h: f32, transform: Transform) {
+fn blit_image(
+    pixmap: &mut Pixmap,
+    img: &RgbaImage,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    transform: Transform,
+) {
     let (iw, ih) = img.dimensions();
     if iw == 0 || ih == 0 || w < 0.2 || h < 0.2 {
         return;
@@ -381,7 +410,14 @@ fn draw_text(
         }
         let gx = (pen_x + metrics.xmin as f32).round() as i32;
         let gy = (baseline - metrics.ymin as f32 - metrics.height as f32).round() as i32;
-        pixmap.draw_pixmap(gx, gy, glyph.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        pixmap.draw_pixmap(
+            gx,
+            gy,
+            glyph.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
         pen_x += metrics.advance_width;
     }
 }
@@ -444,10 +480,22 @@ mod tests {
                 subpaths: vec![Subpath {
                     closed: true,
                     segs: vec![
-                        Seg::Line { a: (5.0, 4.0), b: (30.0, 4.0) },
-                        Seg::Line { a: (30.0, 4.0), b: (30.0, 16.0) },
-                        Seg::Line { a: (30.0, 16.0), b: (5.0, 16.0) },
-                        Seg::Line { a: (5.0, 16.0), b: (5.0, 4.0) },
+                        Seg::Line {
+                            a: (5.0, 4.0),
+                            b: (30.0, 4.0),
+                        },
+                        Seg::Line {
+                            a: (30.0, 4.0),
+                            b: (30.0, 16.0),
+                        },
+                        Seg::Line {
+                            a: (30.0, 16.0),
+                            b: (5.0, 16.0),
+                        },
+                        Seg::Line {
+                            a: (5.0, 16.0),
+                            b: (5.0, 4.0),
+                        },
                     ],
                 }],
                 fill: Some(Paint::rgb(0, 0, 0)),

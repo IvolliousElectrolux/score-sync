@@ -51,7 +51,10 @@ pub fn flatten(doc: &VecDocument, expanded: &HashSet<String>) -> Vec<OutlineRow>
             expandable,
             open: expanded.contains(&layer.id),
             ancestors: Vec::new(),
-            ink: layer.objects.iter().find_map(|o| crate::document::obj_ink(o)),
+            ink: layer
+                .objects
+                .iter()
+                .find_map(|o| crate::document::obj_ink(o)),
         });
         if expandable && expanded.contains(&layer.id) {
             let roots = roots_bottom_to_top(layer);
@@ -263,7 +266,10 @@ pub fn group_selection(doc: &mut VecDocument, ids: &[String]) -> Result<String, 
     bind_group(doc, li, name, children, parent)
 }
 
-pub fn ungroup_selection(doc: &mut VecDocument, ids: &[String]) -> Result<Vec<DissolvedGroup>, String> {
+pub fn ungroup_selection(
+    doc: &mut VecDocument,
+    ids: &[String],
+) -> Result<Vec<DissolvedGroup>, String> {
     let mut targets = Vec::new();
     for id in outermost(doc, ids) {
         if doc.find_group(&id).is_some() {
@@ -314,7 +320,11 @@ pub fn regroup(
     let Some((index, mut children)) = pick else {
         return Err("这些对象没法重新组合".into());
     };
-    let Some(li) = doc.layers.iter().position(|l| l.id == memory[index].layer_id) else {
+    let Some(li) = doc
+        .layers
+        .iter()
+        .position(|l| l.id == memory[index].layer_id)
+    else {
         return Err("原来的图层已经不在了".into());
     };
     let dissolved = memory.remove(index);
@@ -518,9 +528,14 @@ fn duplicate_object(doc: &mut VecDocument, id: &str, dx: f32, dy: f32) -> Option
     obj.id = new_id();
     crate::geom::translate_obj(&mut obj, dx, dy);
     let nid = obj.id.clone();
-    let parent = doc.parent_of(id).filter(|(pli, _)| *pli == li).map(|(_, p)| p);
+    let parent = doc
+        .parent_of(id)
+        .filter(|(pli, _)| *pli == li)
+        .map(|(_, p)| p);
     if li == doc.active {
-        doc.layers[li].objects.insert(oi + 1, std::sync::Arc::new(obj));
+        doc.layers[li]
+            .objects
+            .insert(oi + 1, std::sync::Arc::new(obj));
         if let Some(pid) = parent {
             if let Some(group) = doc.layers[li].groups.iter_mut().find(|g| g.id == pid) {
                 if let Some(at) = group.children.iter().position(|c| c == id) {
@@ -529,7 +544,10 @@ fn duplicate_object(doc: &mut VecDocument, id: &str, dx: f32, dy: f32) -> Option
             }
         }
     } else {
-        doc.layers.get_mut(doc.active)?.objects.push(std::sync::Arc::new(obj));
+        doc.layers
+            .get_mut(doc.active)?
+            .objects
+            .push(std::sync::Arc::new(obj));
     }
     Some(nid)
 }
@@ -548,7 +566,9 @@ fn duplicate_group(doc: &mut VecDocument, gid: &str, dx: f32, dy: f32) -> Option
         return None;
     }
     let parent = if dest == li {
-        doc.parent_of(gid).filter(|(pli, _)| *pli == li).map(|(_, p)| p)
+        doc.parent_of(gid)
+            .filter(|(pli, _)| *pli == li)
+            .map(|(_, p)| p)
     } else {
         None
     };
@@ -620,7 +640,11 @@ fn clone_subtree(layer: &LayerRuntime, gid: &str, dx: f32, dy: f32) -> Option<Cl
             id: map.get(&group.id).cloned().unwrap_or_else(new_id),
             name: group.name.clone(),
             visible: group.visible,
-            children: group.children.iter().filter_map(|c| map.get(c).cloned()).collect(),
+            children: group
+                .children
+                .iter()
+                .filter_map(|c| map.get(c).cloned())
+                .collect(),
         });
     }
     Some(ClonedTree {
@@ -791,7 +815,11 @@ fn kind_label(obj: &Obj) -> String {
         ObjKind::Text(text) => {
             let flat: String = text.text.split_whitespace().collect::<Vec<_>>().join(" ");
             let flat: String = flat.chars().take(18).collect();
-            if flat.is_empty() { "文字".into() } else { flat }
+            if flat.is_empty() {
+                "文字".into()
+            } else {
+                flat
+            }
         }
         ObjKind::Image(_) => "图像".into(),
         ObjKind::Path(path) => path_label(path).into(),
@@ -808,7 +836,10 @@ fn path_label(path: &crate::document::PathObj) -> &'static str {
     if sub.closed {
         return "形状";
     }
-    let curve = sub.segs.iter().any(|seg| matches!(seg, crate::document::Seg::Cubic { .. }));
+    let curve = sub
+        .segs
+        .iter()
+        .any(|seg| matches!(seg, crate::document::Seg::Cubic { .. }));
     if !curve && sub.segs.len() <= 1 {
         "线段"
     } else if curve {
@@ -848,7 +879,11 @@ mod tests {
         let mut doc = VecDocument::from_objects(
             30.0,
             10.0,
-            vec![line((0.0, 0.0), (1.0, 0.0)), line((2.0, 0.0), (3.0, 0.0)), line((4.0, 0.0), (5.0, 0.0))],
+            vec![
+                line((0.0, 0.0), (1.0, 0.0)),
+                line((2.0, 0.0), (3.0, 0.0)),
+                line((4.0, 0.0), (5.0, 0.0)),
+            ],
         );
         let a = doc.layers[0].objects[0].id.clone();
         let b = doc.layers[0].objects[1].id.clone();

@@ -1,9 +1,9 @@
-//! 视频时间轴数据模型: 素材 (静态谱面图) 片段 / 转场 (淡入淡出 / 刷入) / 音频片段.
+//! 视频时间轴数据模型: 素材 (静态谱面图) 片段 / 转场 (淡入淡出 / 刷入 / 交叠) / 音频片段.
 //!
 //! 三条轨道共用同一条时间轴 (单位: 秒, f64):
 //! - `video_clips`: 彼此首尾相接、按时间升序, 覆盖 `[0, video_end())`.
 //! - `fades`: 互不重叠的转场区间. 淡入/淡出可落在任意时刻; 刷入 (`WipeLtr`)
-//!   必须依附翻页边界 (下一页起点), 不能单独刷在页内.
+//!   与交叠 (`Dissolve`) 必须依附翻页边界 (下一页起点), 不能单独落在页内.
 //! - `audio_clips`: 顺序播放, 不单独存起点, 由前面片段时长累加得出.
 //!
 //! 时间轴总长取当前非空音/视频轨的较短末端; 删短一轨时会把较长轨裁齐.
@@ -84,22 +84,29 @@ pub enum FadeKind {
     Out,
     /// 下一页从左到右盖住上一页 (硬切擦除, 不是整页滑入).
     WipeLtr,
+    /// 上一页按进度溶进下一页 (线性叠化).
+    Dissolve,
 }
 
 impl FadeKind {
     pub fn is_wipe(self) -> bool {
         matches!(self, Self::WipeLtr)
     }
+
+    /// 钉在翻页点、同时用到上一页和下一页的转场.
+    pub fn is_page_cut(self) -> bool {
+        matches!(self, Self::WipeLtr | Self::Dissolve)
+    }
 }
 
-/// 转场轴上的一段: 淡入/淡出按时长线性叠黑 (或底色); 刷入按水平进度擦除.
+/// 转场轴上的一段: 淡入/淡出按时长线性叠黑 (或底色); 刷入按水平进度擦除; 交叠按进度叠化两页.
 #[derive(Clone)]
 pub struct FadeSpan {
     pub id: Uuid,
     pub start: f64,
     pub end: f64,
     pub kind: FadeKind,
-    /// true: 淡向工程底色 (只淡乐谱内容); false: 淡向纯黑. 刷入忽略此字段.
+    /// true: 淡向工程底色 (只淡乐谱内容); false: 淡向纯黑. 刷入和交叠忽略此字段.
     pub keep_bg: bool,
 }
 
@@ -119,7 +126,7 @@ pub struct AudioClip {
 
 /// 片段最小时长钳制, 避免拖出零宽/负宽片段.
 pub const MIN_CLIP_DUR: f64 = 0.1;
-/// 刷入转场默认时长 (秒): 快捷键切到下一页时从翻页边界起刷这么久.
+/// 刷入 / 交叠默认时长 (秒): 快捷键切到下一页时从翻页边界起持续这么久.
 pub const DEFAULT_WIPE_DUR: f64 = 1.0;
 /// 普通播放预览刷新间隔 (毫秒).
 pub const PLAY_TICK_MS: u64 = 33;
@@ -244,7 +251,8 @@ impl Timeline {
                 f.end = end.max(f.start + MIN_CLIP_DUR);
             }
         }
-        self.fades.retain(|f| f.end - f.start >= MIN_CLIP_DUR - 1e-9);
+        self.fades
+            .retain(|f| f.end - f.start >= MIN_CLIP_DUR - 1e-9);
     }
 
     /// 两轨都有内容时, 把较长轨裁到较短轨末端, 淡入淡出与播放头一并钳制.
@@ -285,25 +293,23 @@ impl Timeline {
         self.video_clips
             .iter()
             .find(|c| t >= c.start && t < c.end)
-            .or_else(|| {
-                self.video_clips
-                    .last()
-                    .filter(|c| (t - c.end).abs() < 1e-6)
-            })
+            .or_else(|| self.video_clips.last().filter(|c| (t - c.end).abs() < 1e-6))
     }
 
     pub fn covering_clip_index(&self, t: f64) -> Option<usize> {
-        self.video_clips.iter().position(|c| t >= c.start && t < c.end)
+        self.video_clips
+            .iter()
+            .position(|c| t >= c.start && t < c.end)
     }
 
     pub fn covering_fade(&self, t: f64) -> Option<&FadeSpan> {
         self.fades.iter().find(|f| t >= f.start && t < f.end)
     }
 
-    /// 刷入转场当前画面: `(上一页 gid, 下一页 gid, 0..=1 进度)`.
-    /// 进度 0 仍是整张上一页, 1 已完全盖住.
-    pub fn wipe_at(&self, t: f64) -> Option<(&str, &str, f64)> {
-        let fade = self.covering_fade(t).filter(|f| f.kind.is_wipe())?;
+    /// 刷入或交叠当前画面: `(上一页 gid, 下一页 gid, 0..=1 进度, 种类)`.
+    /// 进度 0 仍是整张上一页, 1 已完全换成下一页.
+    pub fn page_blend_at(&self, t: f64) -> Option<(&str, &str, f64, FadeKind)> {
+        let fade = self.covering_fade(t).filter(|f| f.kind.is_page_cut())?;
         let idx = self.covering_clip_index(t)?;
         if idx == 0 {
             return None;
@@ -314,7 +320,15 @@ impl Timeline {
             self.video_clips[idx - 1].group_id.as_str(),
             self.video_clips[idx].group_id.as_str(),
             p,
+            fade.kind,
         ))
+    }
+
+    /// 刷入转场当前画面: `(上一页 gid, 下一页 gid, 0..=1 进度)`.
+    /// 进度 0 仍是整张上一页, 1 已完全盖住.
+    pub fn wipe_at(&self, t: f64) -> Option<(&str, &str, f64)> {
+        let (prev, next, p, kind) = self.page_blend_at(t)?;
+        kind.is_wipe().then_some((prev, next, p))
     }
 
     /// 播放预览刷新间隔: 刷入硬边用 ~120Hz, 淡入淡出用 ~60Hz, 静止页保持 33ms.
@@ -422,8 +436,26 @@ impl Timeline {
     }
 
     /// 在播放头切到下一张组合, 并在翻页边界挂上默认 1 秒的左→右刷入转场.
-    /// 刷入不能落在第一页之前, 也不能和已有淡入淡出叠置.
     pub fn insert_next_with_wipe(&mut self, pool: &[MaterialItem]) -> Result<(), String> {
+        self.insert_next_with_page_cut(pool, FadeKind::WipeLtr)
+    }
+
+    /// 在播放头切到下一张组合, 并在翻页边界挂上默认 1 秒的交叠 (上一页溶进下一页).
+    pub fn insert_next_with_dissolve(&mut self, pool: &[MaterialItem]) -> Result<(), String> {
+        self.insert_next_with_page_cut(pool, FadeKind::Dissolve)
+    }
+
+    /// 刷入和交叠都钉在翻页点: 不能落在第一页之前, 也不能和淡入淡出叠置.
+    fn insert_next_with_page_cut(
+        &mut self,
+        pool: &[MaterialItem],
+        kind: FadeKind,
+    ) -> Result<(), String> {
+        let name = match kind {
+            FadeKind::WipeLtr => "刷入",
+            FadeKind::Dissolve => "交叠",
+            FadeKind::In | FadeKind::Out => return Err("不是翻页转场".to_string()),
+        };
         if pool.is_empty() {
             return Err("素材池为空, 请先在右侧生成输出组合".to_string());
         }
@@ -431,8 +463,8 @@ impl Timeline {
             return Err("还没有上一页, 请先插入第一张组合".to_string());
         }
         let t = self.playhead.max(0.0);
-        if self.covering_fade(t).is_some_and(|f| !f.kind.is_wipe()) {
-            return Err("此处已有淡入淡出, 不能叠置刷入转场".to_string());
+        if self.covering_fade(t).is_some_and(|f| !f.kind.is_page_cut()) {
+            return Err(format!("此处已有淡入淡出, 不能叠置{name}转场"));
         }
         let last_idx = self.video_clips.len() - 1;
         let last_end = self.video_clips[last_idx].end;
@@ -447,16 +479,16 @@ impl Timeline {
             }
             self.video_clips[idx].end
         };
-        let covering_wipe = self
+        let covering = self
             .covering_fade(t)
-            .filter(|f| f.kind.is_wipe())
+            .filter(|f| f.kind.is_page_cut())
             .map(|f| f.id);
-        let wipe_end = self
-            .wipe_end_for(t, page_end, covering_wipe)
-            .ok_or_else(|| "翻页后剩余时间太短, 或与已有转场冲突, 无法放下刷入".to_string())?;
+        let span_end = self
+            .wipe_end_for(t, page_end, covering)
+            .ok_or_else(|| format!("翻页后剩余时间太短, 或与已有转场冲突, 无法放下{name}"))?;
         self.insert_next(pool)?;
         self.truncate_wipe_before(t);
-        self.push_wipe_span(t, wipe_end);
+        self.push_page_cut_span(t, span_end, kind);
         self.clamp_wipe_spans();
         Ok(())
     }
@@ -628,7 +660,7 @@ impl Timeline {
     }
 
     fn push_fade_span(&mut self, a: f64, b: f64, kind: FadeKind) {
-        if kind.is_wipe() {
+        if kind.is_page_cut() {
             return;
         }
         let (start, end) = if a <= b { (a, b) } else { (b, a) };
@@ -741,12 +773,12 @@ impl Timeline {
         let all_on = self
             .fades
             .iter()
-            .filter(|f| ids.contains(&f.id) && !f.kind.is_wipe())
+            .filter(|f| ids.contains(&f.id) && !f.kind.is_page_cut())
             .all(|f| f.keep_bg);
         let keep = !all_on;
         let mut any = false;
         for f in &mut self.fades {
-            if ids.contains(&f.id) && !f.kind.is_wipe() {
+            if ids.contains(&f.id) && !f.kind.is_page_cut() {
                 f.keep_bg = keep;
                 any = true;
             }
@@ -760,22 +792,23 @@ impl Timeline {
             && self
                 .fades
                 .iter()
-                .filter(|f| ids.contains(&f.id) && !f.kind.is_wipe())
+                .filter(|f| ids.contains(&f.id) && !f.kind.is_page_cut())
                 .all(|f| f.keep_bg)
             && self
                 .fades
                 .iter()
-                .any(|f| ids.contains(&f.id) && !f.kind.is_wipe())
+                .any(|f| ids.contains(&f.id) && !f.kind.is_page_cut())
     }
 
-    pub fn selected_fades_are_all_wipes(&self) -> bool {
+    /// 选中项全是刷入或交叠时, 右键没有「保持背景」可改.
+    pub fn selected_fades_are_all_page_cuts(&self) -> bool {
         let ids = self.selected_fade_ids();
         !ids.is_empty()
             && self
                 .fades
                 .iter()
                 .filter(|f| ids.contains(&f.id))
-                .all(|f| f.kind.is_wipe())
+                .all(|f| f.kind.is_page_cut())
     }
 
     pub fn remove_audio(&mut self, id: Uuid) {
@@ -788,7 +821,8 @@ impl Timeline {
             return;
         }
         let item = self.audio_clips.remove(from);
-        self.audio_clips.insert(to.min(self.audio_clips.len()), item);
+        self.audio_clips
+            .insert(to.min(self.audio_clips.len()), item);
     }
 
     /// 按鼠标当前落点时刻重新排序音频片段 (轨道内直接拖动排序, 而非上下移按钮):
@@ -845,14 +879,17 @@ impl Timeline {
     }
 
     fn sort_fades(&mut self) {
-        self.fades
-            .sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+        self.fades.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     fn interval_overlaps_fades(&self, start: f64, end: f64, except: Option<Uuid>) -> bool {
-        self.fades.iter().any(|f| {
-            Some(f.id) != except && f.start < end - 1e-9 && start < f.end - 1e-9
-        })
+        self.fades
+            .iter()
+            .any(|f| Some(f.id) != except && f.start < end - 1e-9 && start < f.end - 1e-9)
     }
 
     /// 刷入终点: 默认 1 秒, 不超过本页终点, 也不越过后面的转场.
@@ -875,8 +912,8 @@ impl Timeline {
         }
     }
 
-    fn push_wipe_span(&mut self, start: f64, end: f64) {
-        if end - start < MIN_CLIP_DUR {
+    fn push_page_cut_span(&mut self, start: f64, end: f64, kind: FadeKind) {
+        if !kind.is_page_cut() || end - start < MIN_CLIP_DUR {
             return;
         }
         if self.interval_overlaps_fades(start, end, None) {
@@ -886,17 +923,17 @@ impl Timeline {
             id: Uuid::new_v4(),
             start,
             end,
-            kind: FadeKind::WipeLtr,
+            kind,
             keep_bg: false,
         });
         self.sort_fades();
     }
 
-    /// 新翻页落在既有刷入中间时, 把旧刷入截到翻页点 (相邻可以, 叠置不行).
+    /// 新翻页落在既有刷入或交叠中间时, 把旧转场截到翻页点 (相邻可以, 叠置不行).
     fn truncate_wipe_before(&mut self, t: f64) {
         let mut drop_ids = Vec::new();
         for f in &mut self.fades {
-            if !f.kind.is_wipe() {
+            if !f.kind.is_page_cut() {
                 continue;
             }
             if f.start < t - 1e-9 && f.end > t + 1e-9 {
@@ -916,7 +953,7 @@ impl Timeline {
             return;
         }
         for f in &mut self.fades {
-            if f.kind.is_wipe() && (f.start - old_t).abs() < 1e-6 {
+            if f.kind.is_page_cut() && (f.start - old_t).abs() < 1e-6 {
                 let dur = f.end - f.start;
                 f.start = new_t;
                 f.end = new_t + dur;
@@ -924,7 +961,7 @@ impl Timeline {
         }
     }
 
-    /// 刷入必须钉在某一页 (非首页) 的起点; 超出本页或叠上别的转场则缩短/丢掉.
+    /// 刷入和交叠必须钉在某一页 (非首页) 的起点; 超出本页或叠上别的转场则缩短/丢掉.
     fn clamp_wipe_spans(&mut self) {
         let anchors: Vec<(f64, f64)> = self
             .video_clips
@@ -932,20 +969,16 @@ impl Timeline {
             .skip(1)
             .map(|c| (c.start, c.end))
             .collect();
-        let others: Vec<(Uuid, f64, f64)> = self
-            .fades
-            .iter()
-            .map(|f| (f.id, f.start, f.end))
-            .collect();
+        let others: Vec<(Uuid, f64, f64)> =
+            self.fades.iter().map(|f| (f.id, f.start, f.end)).collect();
         let mut keep = Vec::with_capacity(self.fades.len());
         for mut f in self.fades.drain(..) {
-            if !f.kind.is_wipe() {
+            if !f.kind.is_page_cut() {
                 keep.push(f);
                 continue;
             }
-            let Some(&(start, page_end)) = anchors
-                .iter()
-                .find(|(s, _)| (f.start - *s).abs() < 1e-4)
+            let Some(&(start, page_end)) =
+                anchors.iter().find(|(s, _)| (f.start - *s).abs() < 1e-4)
             else {
                 continue;
             };
@@ -979,7 +1012,7 @@ impl Timeline {
     /// 刷入的左边界就是翻页点: 拖它等于拖下一页的左边缘.
     pub fn trim_fade_left(&mut self, id: Uuid, new_start: f64) {
         let Some(idx) = self.fade_idx(id) else { return };
-        if self.fades[idx].kind.is_wipe() {
+        if self.fades[idx].kind.is_page_cut() {
             let start = self.fades[idx].start;
             if let Some(clip) = self
                 .video_clips
@@ -991,7 +1024,11 @@ impl Timeline {
             }
             return;
         }
-        let min = if idx == 0 { 0.0 } else { self.fades[idx - 1].end };
+        let min = if idx == 0 {
+            0.0
+        } else {
+            self.fades[idx - 1].end
+        };
         let max = self.fades[idx].end - MIN_CLIP_DUR;
         self.fades[idx].start = new_start.clamp(min, max.max(min));
     }
@@ -1006,7 +1043,7 @@ impl Timeline {
         } else {
             f64::MAX
         };
-        if self.fades[idx].kind.is_wipe() {
+        if self.fades[idx].kind.is_page_cut() {
             let start = self.fades[idx].start;
             if let Some(clip) = self
                 .video_clips
@@ -1023,10 +1060,14 @@ impl Timeline {
     /// 刷入不能离开翻页边界, 中间拖动无效.
     pub fn drag_fade_body(&mut self, id: Uuid, delta: f64) {
         let Some(idx) = self.fade_idx(id) else { return };
-        if self.fades[idx].kind.is_wipe() {
+        if self.fades[idx].kind.is_page_cut() {
             return;
         }
-        let min_start = if idx == 0 { 0.0 } else { self.fades[idx - 1].end };
+        let min_start = if idx == 0 {
+            0.0
+        } else {
+            self.fades[idx - 1].end
+        };
         let max_end = if idx + 1 < self.fades.len() {
             self.fades[idx + 1].start
         } else {
@@ -1583,5 +1624,58 @@ mod tests {
         tl.fade_selection = Some((8.0, 9.0));
         tl.mark_fade(FadeKind::Out, 0.0);
         assert_eq!(tl.playback_tick_ms(8.5), FADE_TICK_MS);
+    }
+
+    #[test]
+    fn insert_next_with_dissolve_blends_across_the_cut() {
+        let mut tl = Timeline::new();
+        let pool = vec![item("a"), item("b")];
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 5.0;
+        tl.insert_next_with_dissolve(&pool).unwrap();
+        assert_eq!(tl.fades.len(), 1);
+        assert_eq!(tl.fades[0].kind, FadeKind::Dissolve);
+        assert!((tl.fades[0].start - 5.0).abs() < 1e-9);
+        assert!((tl.fades[0].end - 6.0).abs() < 1e-9);
+        let (prev, next, p, kind) = tl.page_blend_at(5.5).unwrap();
+        assert_eq!(prev, "a");
+        assert_eq!(next, "b");
+        assert_eq!(kind, FadeKind::Dissolve);
+        assert!((p - 0.5).abs() < 1e-9);
+        assert!(tl.wipe_at(5.5).is_none());
+        assert_eq!(tl.playback_tick_ms(5.5), FADE_TICK_MS);
+    }
+
+    #[test]
+    fn dissolve_rejected_on_fade_and_cannot_be_marked_as_a_fade() {
+        let mut tl = Timeline::new();
+        let pool = vec![item("a"), item("b")];
+        assert!(tl.insert_next_with_dissolve(&pool).is_err());
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 5.0;
+        tl.fade_selection = Some((4.5, 6.5));
+        tl.mark_fade(FadeKind::Out, 0.0);
+        assert!(tl.insert_next_with_dissolve(&pool).is_err());
+        assert_eq!(tl.video_clips.len(), 1);
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 5.0;
+        tl.insert_next_with_dissolve(&pool).unwrap();
+        tl.fade_selection = Some((5.2, 6.5));
+        tl.mark_fade(FadeKind::In, 0.0);
+        assert_eq!(tl.fades.len(), 1);
+        assert_eq!(tl.fades[0].kind, FadeKind::Dissolve);
+        let id = tl.fades[0].id;
+        tl.trim_fade_right(id, 7.0);
+        assert!((tl.fades[0].start - 5.0).abs() < 1e-9);
+        assert!((tl.fades[0].end - 7.0).abs() < 1e-9);
+        tl.drag_fade_body(id, 1.0);
+        assert!((tl.fades[0].start - 5.0).abs() < 1e-9);
+        let snap = tl.snapshot();
+        assert_eq!(snap.fades[0].2, FadeKind::Dissolve);
+        let mut tl2 = Timeline::new();
+        tl2.load_snapshot(snap);
+        assert_eq!(tl2.fades[0].kind, FadeKind::Dissolve);
     }
 }

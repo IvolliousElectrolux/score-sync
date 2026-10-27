@@ -91,12 +91,7 @@ pub fn import_page(page: &PdfPage<'_>, req: &ImportRequest) -> Result<ImportRepo
         truncated: 0,
         text_slots: Vec::new(),
     };
-    walk(
-        page.objects().iter(),
-        PdfMatrix::IDENTITY,
-        &mut acc,
-        0,
-    );
+    walk(page.objects().iter(), PdfMatrix::IDENTITY, &mut acc, 0);
     bake_isolated_text(page, &mut acc);
     let canvas = Rect::new(0.0, 0.0, canvas_w, canvas_h);
     let mut objects = Vec::new();
@@ -204,11 +199,7 @@ fn push_path(obj: &PdfPageObject<'_>, parent: PdfMatrix, acc: &mut Collector) {
     } else {
         paint_of(obj.fill_color().ok())
     };
-    let stroke = if stroked {
-        stroke_of(obj, scale)
-    } else {
-        None
-    };
+    let stroke = if stroked { stroke_of(obj, scale) } else { None };
     let clip = read_clip(obj, &acc_m, acc);
     let rule = if fill_mode == PdfPathFillMode::EvenOdd {
         FillRule::EvenOdd
@@ -247,7 +238,9 @@ fn push_text(obj: &PdfPageObject<'_>, parent: PdfMatrix, acc: &mut Collector) {
     let size = (text.unscaled_font_size().value * matrix_scale(&m)).max(0.5);
     let fill = paint_of(obj.fill_color().ok()).unwrap_or(Paint::rgb(0, 0, 0));
     let font_name = text.font().family();
-    let obj = Obj::bare(new_id(), ObjKind::Text(TextObj {
+    let obj = Obj::bare(
+        new_id(),
+        ObjKind::Text(TextObj {
             text: s,
             font_name,
             size,
@@ -255,7 +248,8 @@ fn push_text(obj: &PdfPageObject<'_>, parent: PdfMatrix, acc: &mut Collector) {
             origin: (local.x0, local.y1),
             baked_id: None,
             edited: false,
-        }));
+        }),
+    );
     acc.text_slots.push(TextSlot {
         obj_index: acc.objects.len(),
         page_bounds,
@@ -297,12 +291,14 @@ fn bake_isolated_text(page: &PdfPage<'_>, acc: &mut Collector) {
         .objects
         .iter()
         .filter_map(|o| match &o.kind {
-            ObjKind::Path(_) => o.bounds().map(|b| Rect::new(
-                b.x0 + acc.x_start,
-                b.y0 + acc.y_start,
-                b.x1 + acc.x_start,
-                b.y1 + acc.y_start,
-            )),
+            ObjKind::Path(_) => o.bounds().map(|b| {
+                Rect::new(
+                    b.x0 + acc.x_start,
+                    b.y0 + acc.y_start,
+                    b.x1 + acc.x_start,
+                    b.y1 + acc.y_start,
+                )
+            }),
             _ => None,
         })
         .collect();
@@ -531,13 +527,14 @@ fn matrix_scale(m: &PdfMatrix) -> f32 {
 }
 
 fn apply_matrix(m: &PdfMatrix, x: f32, y: f32) -> (f32, f32) {
-    (
-        m.a() * x + m.c() * y + m.e(),
-        m.b() * x + m.d() * y + m.f(),
-    )
+    (m.a() * x + m.c() * y + m.e(), m.b() * x + m.d() * y + m.f())
 }
 
-fn mapped_bounds(obj: &PdfPageObject<'_>, parent: &PdfMatrix, page_h: f32) -> Option<(f32, f32, f32, f32)> {
+fn mapped_bounds(
+    obj: &PdfPageObject<'_>,
+    parent: &PdfMatrix,
+    page_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
     let q = obj.bounds().ok()?;
     let corners = [
         (q.left().value, q.bottom().value),
@@ -705,8 +702,8 @@ mod tests {
         let pdfium = bind_pdfium().unwrap();
         let document = pdfium.load_pdf_from_file(&path, None).unwrap();
         let page = document.pages().get(0).unwrap();
-        let theirs = render_page_rect(&page, 0.0, 0.0, 200.0, 80.0, ours.width(), ours.height())
-            .unwrap();
+        let theirs =
+            render_page_rect(&page, 0.0, 0.0, 200.0, 80.0, ours.width(), ours.height()).unwrap();
         let mut ink_miss = 0u32;
         let mut ink_hit = 0u32;
         for (a, b) in ours.pixels().zip(theirs.pixels()) {

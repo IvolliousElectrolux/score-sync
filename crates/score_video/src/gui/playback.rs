@@ -157,12 +157,11 @@ impl ScoreVideoApp {
     /// 只预热轨道邻页的话, 下一张要等按下之后才开始解码, 画面会空一拍.
     pub(super) fn prefetch_preview_pages(&mut self, t: f64, cx: &mut Context<Self>) {
         let mut gids = Vec::new();
-        if let Some(idx) = self.timeline.covering_clip_index(t).or_else(|| {
-            self.timeline
-                .video_clips
-                .iter()
-                .rposition(|c| t >= c.start)
-        }) {
+        if let Some(idx) = self
+            .timeline
+            .covering_clip_index(t)
+            .or_else(|| self.timeline.video_clips.iter().rposition(|c| t >= c.start))
+        {
             let last = self.timeline.video_clips.len().saturating_sub(1);
             let lo = idx.saturating_sub(1);
             let hi = (idx + 1).min(last);
@@ -208,7 +207,11 @@ impl ScoreVideoApp {
     /// 落盘素材图可达四五千像素见方, `image::open`+`to_rgba8`+缩放单张
     /// 就要上百毫秒, 若在界面线程上做 (原实现如此), 播放头移到新素材、
     /// 切入视频面板等操作都会明显卡一拍.
-    pub(super) fn image_for(&mut self, group_id: &str, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
+    pub(super) fn image_for(
+        &mut self,
+        group_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
         if let Some(img) = self.render_cache.get(group_id) {
             return Some(img.clone());
         }
@@ -229,22 +232,24 @@ impl ScoreVideoApp {
         std::thread::spawn(move || {
             const MAX_PREVIEW_DIM: u32 = 2048;
             let render = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                item.load_preview_rgba(MAX_PREVIEW_DIM).ok().map(|mut rgba| {
-                    let (w, h) = rgba.dimensions();
-                    if w > MAX_PREVIEW_DIM || h > MAX_PREVIEW_DIM {
-                        let m = w.max(h).max(1);
-                        let nw = ((w as u64).saturating_mul(MAX_PREVIEW_DIM as u64) / m as u64).max(1)
-                            as u32;
-                        let nh = ((h as u64).saturating_mul(MAX_PREVIEW_DIM as u64) / m as u64).max(1)
-                            as u32;
-                        rgba = image::imageops::thumbnail(&rgba, nw, nh);
-                    }
-                    // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素.
-                    for px in rgba.chunks_exact_mut(4) {
-                        px.swap(0, 2);
-                    }
-                    Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]))
-                })
+                item.load_preview_rgba(MAX_PREVIEW_DIM)
+                    .ok()
+                    .map(|mut rgba| {
+                        let (w, h) = rgba.dimensions();
+                        if w > MAX_PREVIEW_DIM || h > MAX_PREVIEW_DIM {
+                            let m = w.max(h).max(1);
+                            let nw = ((w as u64).saturating_mul(MAX_PREVIEW_DIM as u64) / m as u64)
+                                .max(1) as u32;
+                            let nh = ((h as u64).saturating_mul(MAX_PREVIEW_DIM as u64) / m as u64)
+                                .max(1) as u32;
+                            rgba = image::imageops::thumbnail(&rgba, nw, nh);
+                        }
+                        // GPUI 的 `RenderImage` 内部按 BGRA 排布读取像素.
+                        for px in rgba.chunks_exact_mut(4) {
+                            px.swap(0, 2);
+                        }
+                        Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]))
+                    })
             }))
             .ok()
             .flatten();
@@ -253,8 +258,7 @@ impl ScoreVideoApp {
         cx.spawn(async move |this, cx| {
             let render = rx.recv().await.ok().flatten();
             this.update(cx, |view, cx| {
-                if view.pool_gen != gen
-                    || view.item_gen.get(&gid).copied().unwrap_or(0) != item_gen
+                if view.pool_gen != gen || view.item_gen.get(&gid).copied().unwrap_or(0) != item_gen
                 {
                     view.image_loading.remove(&gid); // 素材池已整体刷新, 这份结果作废
                     return;
@@ -368,9 +372,7 @@ impl ScoreVideoApp {
                 .audio_clips
                 .iter()
                 .filter(|c| !c.path.is_file())
-                .map(|c| {
-                    crate::error::Error::AudioMissing(c.path.clone()).to_string()
-                })
+                .map(|c| crate::error::Error::AudioMissing(c.path.clone()).to_string())
                 .collect();
             if !missing.is_empty() {
                 self.show_error("无法播放音频", missing.join("\n"), cx);
@@ -428,18 +430,36 @@ impl ScoreVideoApp {
     }
 
     pub fn insert_next_wipe(&mut self, cx: &mut Context<Self>) {
+        self.insert_next_page_cut(true, cx);
+    }
+
+    pub fn insert_next_dissolve(&mut self, cx: &mut Context<Self>) {
+        self.insert_next_page_cut(false, cx);
+    }
+
+    fn insert_next_page_cut(&mut self, wipe: bool, cx: &mut Context<Self>) {
         if gpui::is_key_repeat() {
             return;
         }
         self.latch_playhead();
         self.push_undo();
-        match self.timeline.insert_next_with_wipe(&self.pool) {
+        let result = if wipe {
+            self.timeline.insert_next_with_wipe(&self.pool)
+        } else {
+            self.timeline.insert_next_with_dissolve(&self.pool)
+        };
+        match result {
             Ok(()) => {
                 self.prefetch_preview_pages(self.timeline.playhead, cx);
             }
             Err(e) => {
                 self.undo_stack.pop();
-                self.show_error("无法刷入下一张组合", e, cx);
+                let title = if wipe {
+                    "无法刷入下一张组合"
+                } else {
+                    "无法交叠下一张组合"
+                };
+                self.show_error(title, e, cx);
             }
         }
         cx.notify();
@@ -447,7 +467,8 @@ impl ScoreVideoApp {
 
     pub fn mark_fade_in(&mut self, cx: &mut Context<Self>) {
         self.push_undo();
-        self.timeline.mark_fade(FadeKind::In, self.timeline.playhead);
+        self.timeline
+            .mark_fade(FadeKind::In, self.timeline.playhead);
         cx.notify();
     }
 

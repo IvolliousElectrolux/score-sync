@@ -172,6 +172,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     cmd("video.seek_forward_big", Group::Video, &["shift-right"]),
     cmd("video.insert", Group::Video, &["n"]),
     cmd("video.wipe", Group::Video, &["w"]),
+    cmd("video.dissolve", Group::Video, &["x"]),
     cmd("video.fade_in", Group::Video, &["i"]),
     cmd("video.fade_out", Group::Video, &["o"]),
     cmd("video.delete", Group::Video, &["delete", "backspace"]),
@@ -186,6 +187,7 @@ const INSTALL_ORDER: &[&str] = &[
     "video.seek_forward_big",
     "video.insert",
     "video.wipe",
+    "video.dissolve",
     "video.fade_in",
     "video.fade_out",
     "video.delete",
@@ -593,14 +595,23 @@ pub(crate) fn command_matches(
     if query.is_empty() {
         return true;
     }
-    if text_hit(label, query) || text_hit(id, query) || text_hit(group, query) || keys_hit(keys, query)
+    if text_hit(label, query)
+        || text_hit(id, query)
+        || text_hit(group, query)
+        || keys_hit(keys, query)
     {
         return true;
     }
-    let words: Vec<&str> = query.split_whitespace().filter(|word| !word.is_empty()).collect();
+    let words: Vec<&str> = query
+        .split_whitespace()
+        .filter(|word| !word.is_empty())
+        .collect();
     words.len() > 1
         && words.iter().all(|word| {
-            text_hit(label, word) || text_hit(id, word) || text_hit(group, word) || keys_hit(keys, word)
+            text_hit(label, word)
+                || text_hit(id, word)
+                || text_hit(group, word)
+                || keys_hit(keys, word)
         })
 }
 
@@ -721,9 +732,11 @@ fn chord_contains(hay: &str, query: &str) -> bool {
         return false;
     }
     hay.windows(query.len()).any(|window| {
-        window.iter().zip(query.iter()).enumerate().all(|(index, (left, right))| {
-            token_eq(left, right, index + 1 == query.len())
-        })
+        window
+            .iter()
+            .zip(query.iter())
+            .enumerate()
+            .all(|(index, (left, right))| token_eq(left, right, index + 1 == query.len()))
     })
 }
 
@@ -735,7 +748,9 @@ fn token_eq(hay: &str, query: &str, prefix_ok: bool) -> bool {
         return false;
     }
     let function_key = |token: &str| {
-        token.starts_with('f') && token[1..].chars().all(|ch| ch.is_ascii_digit()) && token.len() > 1
+        token.starts_with('f')
+            && token[1..].chars().all(|ch| ch.is_ascii_digit())
+            && token.len() > 1
     };
     if function_key(hay) && function_key(query) {
         return false;
@@ -882,6 +897,7 @@ fn bind_id(id: &str, keys: &[String], out: &mut Vec<KeyBinding>) {
         "video.seek_forward_big" => bind_same(out, id, keys, score_video::gui::SeekForwardBig),
         "video.insert" => bind_same(out, id, keys, score_video::gui::InsertNext),
         "video.wipe" => bind_same(out, id, keys, score_video::gui::InsertNextWipe),
+        "video.dissolve" => bind_same(out, id, keys, score_video::gui::InsertNextDissolve),
         "video.fade_in" => bind_same(out, id, keys, score_video::gui::MarkFadeIn),
         "video.fade_out" => bind_same(out, id, keys, score_video::gui::MarkFadeOut),
         "video.delete" => bind_same(out, id, keys, score_video::gui::DeleteSelected),
@@ -969,26 +985,110 @@ mod tests {
     fn search_matches_name_id_and_chord() {
         let save = ["primary-s".to_string()];
         assert!(command_matches("保存工程", "app.save", "全局", &save, ""));
-        assert!(command_matches("保存工程", "app.save", "全局", &save, "保存"));
-        assert!(command_matches("保存工程", "app.save", "全局", &save, "save"));
-        assert!(command_matches("保存工程", "app.save", "全局", &save, "全局"));
-        assert!(command_matches("保存工程", "app.save", "全局", &save, "ctrl+s"));
-        assert!(command_matches("保存工程", "app.save", "全局", &save, "Ctrl + S"));
-        assert!(command_matches("保存工程", "app.save", "全局", &save, "cmd+s"));
-        assert!(command_matches("保存工程", "app.save", "全局", &save, "primary-s"));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "保存"
+        ));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "save"
+        ));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "全局"
+        ));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "ctrl+s"
+        ));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "Ctrl + S"
+        ));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "cmd+s"
+        ));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "primary-s"
+        ));
         assert!(command_matches("保存工程", "app.save", "全局", &save, "⌘s"));
-        assert!(!command_matches("保存工程", "app.save", "全局", &save, "识别"));
-        assert!(!command_matches("识别", "crop.detect", "分块", &["d".into()], "ctrl+s"));
+        assert!(!command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &save,
+            "识别"
+        ));
+        assert!(!command_matches(
+            "识别",
+            "crop.detect",
+            "分块",
+            &["d".into()],
+            "ctrl+s"
+        ));
     }
 
     #[test]
     fn search_chord_does_not_swallow_extra_modifiers() {
         let shifted = ["primary-shift-s".to_string()];
-        assert!(command_matches("另存", "app.save_as", "全局", &shifted, "ctrl+shift+s"));
-        assert!(command_matches("另存", "app.save_as", "全局", &shifted, "shift+s"));
-        assert!(command_matches("另存", "app.save_as", "全局", &shifted, "ctrl shift"));
-        assert!(!command_matches("另存", "app.save_as", "全局", &shifted, "ctrl+s"));
-        assert!(!command_matches("向左", "crop.prev", "分块", &["left".into()], "s"));
+        assert!(command_matches(
+            "另存",
+            "app.save_as",
+            "全局",
+            &shifted,
+            "ctrl+shift+s"
+        ));
+        assert!(command_matches(
+            "另存",
+            "app.save_as",
+            "全局",
+            &shifted,
+            "shift+s"
+        ));
+        assert!(command_matches(
+            "另存",
+            "app.save_as",
+            "全局",
+            &shifted,
+            "ctrl shift"
+        ));
+        assert!(!command_matches(
+            "另存",
+            "app.save_as",
+            "全局",
+            &shifted,
+            "ctrl+s"
+        ));
+        assert!(!command_matches(
+            "向左",
+            "crop.prev",
+            "分块",
+            &["left".into()],
+            "s"
+        ));
         assert!(command_matches(
             "向左",
             "crop.prev",
@@ -996,11 +1096,47 @@ mod tests {
             &["shift-left".into()],
             "shift+left"
         ));
-        assert!(command_matches("向左", "crop.prev", "分块", &["shift-left".into()], "←"));
-        assert!(!command_matches("向左", "crop.prev", "分块", &["shift-left".into()], "s"));
-        assert!(command_matches("播放", "video.play", "视频", &["space".into()], "空格"));
-        assert!(command_matches("播放", "video.play", "视频", &["space".into()], "space"));
-        assert!(!command_matches("帮助", "app.help", "全局", &["f1".into()], "f12"));
-        assert!(command_matches("保存工程", "app.save", "全局", &["primary-s".into()], "保存 工程"));
+        assert!(command_matches(
+            "向左",
+            "crop.prev",
+            "分块",
+            &["shift-left".into()],
+            "←"
+        ));
+        assert!(!command_matches(
+            "向左",
+            "crop.prev",
+            "分块",
+            &["shift-left".into()],
+            "s"
+        ));
+        assert!(command_matches(
+            "播放",
+            "video.play",
+            "视频",
+            &["space".into()],
+            "空格"
+        ));
+        assert!(command_matches(
+            "播放",
+            "video.play",
+            "视频",
+            &["space".into()],
+            "space"
+        ));
+        assert!(!command_matches(
+            "帮助",
+            "app.help",
+            "全局",
+            &["f1".into()],
+            "f12"
+        ));
+        assert!(command_matches(
+            "保存工程",
+            "app.save",
+            "全局",
+            &["primary-s".into()],
+            "保存 工程"
+        ));
     }
 }

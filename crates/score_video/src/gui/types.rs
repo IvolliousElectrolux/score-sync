@@ -103,13 +103,19 @@ pub(crate) enum VideoDrag {
         last_y: f32,
     },
     /// 拖动底部横向缩放条滑块本体 = 平移 (对应 `track_scroll`).
-    TrackBarPan { grab: f32 },
+    TrackBarPan {
+        grab: f32,
+    },
     /// 拖动底部横向缩放条滑块左端圆点 = 改变可视窗口左边界从而改变缩放,
     /// 锚定右边界时刻不动 (PR 时间轴缩放条手感).
-    TrackBarZoomLeft { anchor_end_t: f64 },
+    TrackBarZoomLeft {
+        anchor_end_t: f64,
+    },
     /// 拖动底部横向缩放条滑块右端圆点 = 改变可视窗口右边界从而改变缩放,
     /// 锚定左边界时刻不动.
-    TrackBarZoomRight { anchor_start_t: f64 },
+    TrackBarZoomRight {
+        anchor_start_t: f64,
+    },
     /// 调整"待定淡入淡出预框选区"(拖选出来但尚未按 I/O 提交) 的左/右边界,
     /// 而不必重新拖选一次.
     FadeSelectTrimLeft,

@@ -190,7 +190,11 @@ pub(crate) fn reorder_slop_exceeded(dx: f32, dy: f32) -> bool {
 /// 显示列表里, 把 `from` 插到 `anchor` 的上沿或下沿之后的新下标.
 pub(crate) fn reorder_to_index(from: usize, anchor: usize, after: bool) -> usize {
     if after {
-        if from <= anchor { anchor } else { anchor + 1 }
+        if from <= anchor {
+            anchor
+        } else {
+            anchor + 1
+        }
     } else if from < anchor {
         anchor - 1
     } else {

@@ -751,10 +751,7 @@ fn pump_atempo_pipe(mut stdout: BufReader<ChildStdout>, pipe: Arc<AtempoPipe>) {
         let mut queue = pipe.queue.lock().unwrap_or_else(|err| err.into_inner());
         while queue.len() + samples.len() > ATEMPO_QUEUE_CAP && !pipe.cancel.load(Ordering::Relaxed)
         {
-            queue = pipe
-                .cv
-                .wait(queue)
-                .unwrap_or_else(|err| err.into_inner());
+            queue = pipe.cv.wait(queue).unwrap_or_else(|err| err.into_inner());
         }
         if pipe.cancel.load(Ordering::Relaxed) {
             break;
@@ -1489,7 +1486,8 @@ mod tests {
             eprintln!("skip: ffmpeg missing");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("sv_flac_play_{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("sv_flac_play_{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let wav = dir.join("tone.wav");
         let flac = dir.join("tone.flac");
@@ -1510,7 +1508,8 @@ mod tests {
         }
         let encoders = [
             crate::export::ffmpeg_path(),
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/ffmpeg.full.bak"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vendor/ffmpeg.full.bak"),
             std::path::PathBuf::from(
                 r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe",
             ),
@@ -1569,7 +1568,10 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         assert!(got >= want, "flac pipe ended early: {got}");
-        assert!(nonzero > want / 2, "flac pipe was mostly silence: {nonzero}");
+        assert!(
+            nonzero > want / 2,
+            "flac pipe was mostly silence: {nonzero}"
+        );
         assert!(
             slowest_ms < 40.0,
             "reading decoded flac blocked the consumer for {slowest_ms:.1} ms"

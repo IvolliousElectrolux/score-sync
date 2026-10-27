@@ -321,7 +321,16 @@ impl MaskToolApp {
         }
         let cs = self.content_scale_or_1();
         let sheet_space = (cs - 1.0).abs() > 0.001;
-        let to_sheet = |canvas: i64| ((canvas as f32 - if sheet_space { self.block_voff as f32 } else { 0.0 }) / cs).round() as i32;
+        let to_sheet = |canvas: i64| {
+            ((canvas as f32
+                - if sheet_space {
+                    self.block_voff as f32
+                } else {
+                    0.0
+                })
+                / cs)
+                .round() as i32
+        };
         Some((
             crate::staff::AlignGroupInput {
                 heights: self.block_heights.clone(),
@@ -342,7 +351,12 @@ impl MaskToolApp {
                 },
                 anchors: self.current_block_align_anchors(),
                 guide_lines: if sheet_space {
-                    self.guides.lines.iter().copied().map(|y| to_sheet(y as i64)).collect()
+                    self.guides
+                        .lines
+                        .iter()
+                        .copied()
+                        .map(|y| to_sheet(y as i64))
+                        .collect()
                 } else {
                     self.guides.lines.clone()
                 },

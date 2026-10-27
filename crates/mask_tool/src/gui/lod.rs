@@ -136,7 +136,11 @@ impl MaskToolApp {
                 continue;
             };
             let sharp = src.raster.is_some();
-            let per = if sharp { screen_per } else { screen_per.min(1.0) };
+            let per = if sharp {
+                screen_per
+            } else {
+                screen_per.min(1.0)
+            };
             let src_w = source_span(job.w, tile.width, src.page_w.max(1));
             let src_span_h = if src.flat { src.page_h } else { src.band_h };
             let src_h = source_span(job.h, tile.height, src_span_h.max(1));
@@ -160,7 +164,11 @@ impl MaskToolApp {
             job.raster = src.raster.clone();
             let mut vis_need = vis;
             vis_need.region_id = tile.region_id.clone();
-            let tight_per = if sharp { screen_per } else { screen_per.min(1.0) };
+            let tight_per = if sharp {
+                screen_per
+            } else {
+                screen_per.min(1.0)
+            };
             if sharp {
                 let (tw, th) = uniform_tex(vis_need.w as f32, vis_need.h as f32, tight_per, 4096.0);
                 vis_need.tex_w = tw;

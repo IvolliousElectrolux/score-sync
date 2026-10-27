@@ -9,12 +9,18 @@ use crate::geom::Rect;
 
 impl VectorEditApp {
     pub fn image_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let base = self.base_tex.as_ref().map(|t| {
-            (t.tex.clone(), t.doc_x, t.doc_y, t.doc_w, t.doc_h)
-        });
+        let base = self
+            .base_tex
+            .as_ref()
+            .map(|t| (t.tex.clone(), t.doc_x, t.doc_y, t.doc_w, t.doc_h));
         let node_drag = matches!(self.drag, Some(DragKind::Node { .. }));
         let scale_live = match &self.drag {
-            Some(DragKind::Scale { handle, bounds, sx, sy }) => {
+            Some(DragKind::Scale {
+                handle,
+                bounds,
+                sx,
+                sy,
+            }) => {
                 let (ox, oy) = scale_anchor(*handle, *bounds);
                 Some((ox, oy, *sx, *sy))
             }
@@ -48,11 +54,12 @@ impl VectorEditApp {
         let doc_bounds = tools::selection_rect(self);
         let group_frame = tools::drilled_frame(self);
         let pen = self.pen.clone();
-        let pen_cursor = if self.pen.is_some() && !matches!(self.drag, Some(DragKind::PenPull { .. })) {
-            self.hover_doc.map(|(x, y)| self.pen_point(x, y))
-        } else {
-            None
-        };
+        let pen_cursor =
+            if self.pen.is_some() && !matches!(self.drag, Some(DragKind::PenPull { .. })) {
+                self.hover_doc.map(|(x, y)| self.pen_point(x, y))
+            } else {
+                None
+            };
         let lasso = self.lasso.clone();
         let mode = self.mode;
         let drag_box = match &self.drag {
@@ -193,9 +200,22 @@ impl VectorEditApp {
                                 frame.y0 = oy + (frame.y0 - oy) * sy;
                                 frame.y1 = oy + (frame.y1 - oy) * sy;
                             }
-                            paint_rect_outline(window, bounds, &xform, frame, ui_kit::chrome(0x2563eb));
+                            paint_rect_outline(
+                                window,
+                                bounds,
+                                &xform,
+                                frame,
+                                ui_kit::chrome(0x2563eb),
+                            );
                             for (hx, hy) in tools::handle_points(frame) {
-                                paint_handle(window, bounds, &xform, hx, hy, ui_kit::chrome(0x2563eb));
+                                paint_handle(
+                                    window,
+                                    bounds,
+                                    &xform,
+                                    hx,
+                                    hy,
+                                    ui_kit::chrome(0x2563eb),
+                                );
                             }
                             let rot = (frame.cx(), frame.y0 - 14.0 / xform.scale.max(0.2));
                             paint_handle(window, bounds, &xform, rot.0, rot.1, rgb(0x16a34a));
@@ -213,22 +233,38 @@ impl VectorEditApp {
                                     b.y0 += sel_off.1;
                                     b.y1 += sel_off.1;
                                 }
-                                paint_rect_outline(window, bounds, &xform, b, ui_kit::chrome(0x2563eb));
+                                paint_rect_outline(
+                                    window,
+                                    bounds,
+                                    &xform,
+                                    b,
+                                    ui_kit::chrome(0x2563eb),
+                                );
                                 for (hx, hy) in tools::handle_points(b) {
-                                    paint_handle(window, bounds, &xform, hx, hy, ui_kit::chrome(0x2563eb));
+                                    paint_handle(
+                                        window,
+                                        bounds,
+                                        &xform,
+                                        hx,
+                                        hy,
+                                        ui_kit::chrome(0x2563eb),
+                                    );
                                 }
                                 let rot = (b.cx(), b.y0 - 14.0 / xform.scale.max(0.2));
                                 paint_handle(window, bounds, &xform, rot.0, rot.1, rgb(0x16a34a));
                             }
                             paint_entity.update(app, |this, _| {
-                                paint_selection_edges(this, window, bounds, &xform, sel_off, scale_live);
+                                paint_selection_edges(
+                                    this, window, bounds, &xform, sel_off, scale_live,
+                                );
                             });
                         }
                         if mode == ToolMode::Node {
                             paint_entity.update(app, |this, _| {
-                                let id = this.node_target.as_deref().or_else(|| {
-                                    this.selected.first().map(String::as_str)
-                                });
+                                let id = this
+                                    .node_target
+                                    .as_deref()
+                                    .or_else(|| this.selected.first().map(String::as_str));
                                 let Some(id) = id else {
                                     return;
                                 };
@@ -284,14 +320,16 @@ impl VectorEditApp {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .cursor(self.canvas_cursor())
-            .on_modifiers_changed(cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _, cx| {
-                this.note_pointer_modifiers(
-                    ev.modifiers.shift,
-                    ev.modifiers.alt,
-                    apply_bg::is_primary_mod(&ev.modifiers),
-                    cx,
-                );
-            }))
+            .on_modifiers_changed(
+                cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _, cx| {
+                    this.note_pointer_modifiers(
+                        ev.modifiers.shift,
+                        ev.modifiers.alt,
+                        apply_bg::is_primary_mod(&ev.modifiers),
+                        cx,
+                    );
+                }),
+            )
             .child(self.canvas_context_menu(cx))
     }
 
@@ -343,7 +381,13 @@ impl VectorEditApp {
         cx.notify();
     }
 
-    pub(crate) fn note_pointer_modifiers(&mut self, shift: bool, alt: bool, ctrl: bool, cx: &mut Context<Self>) {
+    pub(crate) fn note_pointer_modifiers(
+        &mut self,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.shift_down == shift && self.alt_down == alt && self.ctrl_down == ctrl {
             return;
         }
@@ -362,7 +406,12 @@ impl VectorEditApp {
         match self.drag.clone() {
             Some(DragKind::Scale { handle, bounds, .. }) => {
                 let (sx, sy) = scale_factors(handle, bounds, x, y, self.shift_down);
-                self.drag = Some(DragKind::Scale { handle, bounds, sx, sy });
+                self.drag = Some(DragKind::Scale {
+                    handle,
+                    bounds,
+                    sx,
+                    sy,
+                });
             }
             Some(DragKind::Move { origin, .. }) => {
                 let (dx, dy) = axis_lock(self.shift_down, x - origin.0, y - origin.1);
@@ -398,7 +447,14 @@ impl VectorEditApp {
             .as_ref()
             .map(|d| (d.canvas_w, d.canvas_h))
             .unwrap_or((1.0, 1.0));
-        Xform::compute(cw, ch, self.view_bounds, self.zoom, self.pan, self.user_zoomed)
+        Xform::compute(
+            cw,
+            ch,
+            self.view_bounds,
+            self.zoom,
+            self.pan,
+            self.user_zoomed,
+        )
     }
 
     pub(crate) fn hit_tol(&self) -> f32 {
@@ -490,7 +546,9 @@ impl VectorEditApp {
         }
         if self.mode == ToolMode::Canvas {
             return match self.hover_edge {
-                Some(CanvasEdge::Left) | Some(CanvasEdge::Right) => gpui::CursorStyle::ResizeLeftRight,
+                Some(CanvasEdge::Left) | Some(CanvasEdge::Right) => {
+                    gpui::CursorStyle::ResizeLeftRight
+                }
                 Some(CanvasEdge::Top) | Some(CanvasEdge::Bottom) => gpui::CursorStyle::ResizeUpDown,
                 None => gpui::CursorStyle::Arrow,
             };
@@ -511,9 +569,7 @@ impl VectorEditApp {
                     gpui::CursorStyle::Crosshair
                 }
             }
-            ToolMode::Pencil | ToolMode::Eraser | ToolMode::Lasso => {
-                gpui::CursorStyle::Crosshair
-            }
+            ToolMode::Pencil | ToolMode::Eraser | ToolMode::Lasso => gpui::CursorStyle::Crosshair,
             _ => gpui::CursorStyle::Arrow,
         }
     }
@@ -555,7 +611,9 @@ impl VectorEditApp {
             self.notify_nav(cx);
             return;
         }
-        if self.alt_down && matches!(self.mode, ToolMode::Pen | ToolMode::Pencil) && tools::sample_style(self, x, y)
+        if self.alt_down
+            && matches!(self.mode, ToolMode::Pen | ToolMode::Pencil)
+            && tools::sample_style(self, x, y)
         {
             self.palette_a = self.active_alpha();
             if self.palette_open {
@@ -570,11 +628,9 @@ impl VectorEditApp {
             ToolMode::Hand => {}
             ToolMode::Select => self.down_select(x, y, cx),
             ToolMode::Node => self.down_node(x, y, ev.click_count, cx),
-            ToolMode::Canvas => self.down_canvas(
-                x,
-                y,
-                (f32::from(ev.position.x), f32::from(ev.position.y)),
-            ),
+            ToolMode::Canvas => {
+                self.down_canvas(x, y, (f32::from(ev.position.x), f32::from(ev.position.y)))
+            }
             ToolMode::Pen => self.down_pen(x, y, cx),
             ToolMode::Pencil => {
                 self.drag = Some(DragKind::Pencil { pts: vec![(x, y)] });
@@ -582,7 +638,9 @@ impl VectorEditApp {
             ToolMode::Eraser => tools::erase_at(self, x, y, cx),
             ToolMode::Lasso => {
                 self.lasso.push((x, y));
-                self.drag = Some(DragKind::Lasso { pts: self.lasso.clone() });
+                self.drag = Some(DragKind::Lasso {
+                    pts: self.lasso.clone(),
+                });
             }
         }
         if self.selected != before {
@@ -683,17 +741,27 @@ impl VectorEditApp {
 
     fn down_node(&mut self, x: f32, y: f32, clicks: usize, cx: &mut Context<Self>) {
         let tol = self.hit_tol();
-        let current = self.node_target.clone().or_else(|| self.selected.first().cloned());
+        let current = self
+            .node_target
+            .clone()
+            .or_else(|| self.selected.first().cloned());
         if let Some(id) = current.clone() {
             if let Some(obj) = self.doc.as_ref().and_then(|d| d.object(&id)).cloned() {
                 if let Some((sub, seg, role)) = tools::node_at(&obj, x, y, tol) {
                     self.node_target = Some(id.clone());
                     self.selected = vec![id.clone()];
                     self.adopt_object_style(&id, cx);
-                    if matches!(role, super::types::NodeRole::Anchor | super::types::NodeRole::Head) {
+                    if matches!(
+                        role,
+                        super::types::NodeRole::Anchor | super::types::NodeRole::Head
+                    ) {
                         self.node_hit = Some((sub, seg, role));
                     }
-                    if clicks >= 2 && matches!(role, super::types::NodeRole::Anchor | super::types::NodeRole::Head)
+                    if clicks >= 2
+                        && matches!(
+                            role,
+                            super::types::NodeRole::Anchor | super::types::NodeRole::Head
+                        )
                     {
                         self.push_undo();
                         tools::toggle_anchor_smooth(self, &id, sub, seg, role);
@@ -726,7 +794,10 @@ impl VectorEditApp {
         self.node_hit = None;
         if let Some(obj) = self.doc.as_ref().and_then(|d| d.object(&id)).cloned() {
             if let Some((sub, seg, role)) = tools::node_at(&obj, x, y, tol) {
-                if matches!(role, super::types::NodeRole::Anchor | super::types::NodeRole::Head) {
+                if matches!(
+                    role,
+                    super::types::NodeRole::Anchor | super::types::NodeRole::Head
+                ) {
                     self.node_hit = Some((sub, seg, role));
                 }
                 self.push_undo();
@@ -930,7 +1001,14 @@ impl VectorEditApp {
                     pan.y + f32::from(ev.position.y) - origin.y,
                 );
             }
-            DragKind::Marquee { x0, y0, add, sub, toggle, .. } => {
+            DragKind::Marquee {
+                x0,
+                y0,
+                add,
+                sub,
+                toggle,
+                ..
+            } => {
                 self.drag = Some(DragKind::Marquee {
                     x0,
                     y0,
@@ -951,9 +1029,18 @@ impl VectorEditApp {
             }
             DragKind::Scale { handle, bounds, .. } => {
                 let (sx, sy) = scale_factors(handle, bounds, x, y, self.shift_down);
-                self.drag = Some(DragKind::Scale { handle, bounds, sx, sy });
+                self.drag = Some(DragKind::Scale {
+                    handle,
+                    bounds,
+                    sx,
+                    sy,
+                });
             }
-            DragKind::Rotate { center, start_ang, acc: _ } => {
+            DragKind::Rotate {
+                center,
+                start_ang,
+                acc: _,
+            } => {
                 self.preview_from_undo();
                 let ang = (y - center.1).atan2(x - center.0);
                 let mut delta = (ang - start_ang).to_degrees();
@@ -972,7 +1059,13 @@ impl VectorEditApp {
                 });
                 self.dirty = true;
             }
-            DragKind::Node { id, sub, seg, role, last } => {
+            DragKind::Node {
+                id,
+                sub,
+                seg,
+                role,
+                last,
+            } => {
                 tools::move_node(self, &id, sub, seg, role, x - last.0, y - last.1);
                 self.drag = Some(DragKind::Node {
                     id,
@@ -1159,11 +1252,21 @@ impl VectorEditApp {
                         CanvasEdge::Right | CanvasEdge::Bottom => {}
                     }
                     self.dirty = true;
-                    self.status = format!("画布 {:.0} × {:.0}", self.doc.as_ref().map(|d| d.canvas_w).unwrap_or(span), self.doc.as_ref().map(|d| d.canvas_h).unwrap_or(span)).into();
+                    self.status = format!(
+                        "画布 {:.0} × {:.0}",
+                        self.doc.as_ref().map(|d| d.canvas_w).unwrap_or(span),
+                        self.doc.as_ref().map(|d| d.canvas_h).unwrap_or(span)
+                    )
+                    .into();
                 }
                 self.rebuild_raster(cx);
             }
-            Some(DragKind::Scale { handle, bounds, sx, sy }) => {
+            Some(DragKind::Scale {
+                handle,
+                bounds,
+                sx,
+                sy,
+            }) => {
                 if (sx - 1.0).abs() < 0.002 && (sy - 1.0).abs() < 0.002 {
                     self.undo_stack.pop();
                 } else {
@@ -1222,7 +1325,11 @@ impl VectorEditApp {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(p) => (p.x * 32.0, p.y * 32.0),
         };
-        let wheel = if delta_y.abs() >= delta_x.abs() { delta_y } else { delta_x };
+        let wheel = if delta_y.abs() >= delta_x.abs() {
+            delta_y
+        } else {
+            delta_x
+        };
         if ev.modifiers.alt || self.alt_down {
             if wheel.abs() > 0.01 {
                 self.bump_stroke_width(wheel > 0.0, cx);
@@ -1246,7 +1353,11 @@ impl VectorEditApp {
         }
         self.lock_user_view();
         if ev.modifiers.shift {
-            self.pan.x += if delta_x.abs() > 0.01 { delta_x } else { delta_y };
+            self.pan.x += if delta_x.abs() > 0.01 {
+                delta_x
+            } else {
+                delta_y
+            };
         } else {
             self.pan.x += delta_x;
             self.pan.y += delta_y;
@@ -1364,7 +1475,14 @@ impl Xform {
         ((x - self.ox) / self.scale, (y - self.oy) / self.scale)
     }
 
-    fn doc_bounds(&self, view: Bounds<gpui::Pixels>, x: f32, y: f32, w: f32, h: f32) -> Bounds<gpui::Pixels> {
+    fn doc_bounds(
+        &self,
+        view: Bounds<gpui::Pixels>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Bounds<gpui::Pixels> {
         let (sx, sy) = self.doc_to_screen(x, y);
         Bounds {
             origin: point(view.origin.x + px(sx), view.origin.y + px(sy)),
@@ -1374,7 +1492,14 @@ impl Xform {
 }
 
 fn paint_checker(window: &mut Window, bounds: Bounds<gpui::Pixels>, color: gpui::Rgba) {
-    let _ = window.paint_quad(quad(bounds, px(0.), color, px(0.), color, Default::default()));
+    let _ = window.paint_quad(quad(
+        bounds,
+        px(0.),
+        color,
+        px(0.),
+        color,
+        Default::default(),
+    ));
 }
 
 fn paint_selection_edges(
@@ -1405,8 +1530,24 @@ fn paint_selection_edges(
         };
         match &obj.kind {
             crate::document::ObjKind::Path(path) => {
-                paint_mapped_subs(window, view, xform, &path.subpaths, &map, px(3.0), rgb(0xffffff));
-                paint_mapped_subs(window, view, xform, &path.subpaths, &map, px(1.25), ui_kit::chrome(0x2563eb));
+                paint_mapped_subs(
+                    window,
+                    view,
+                    xform,
+                    &path.subpaths,
+                    &map,
+                    px(3.0),
+                    rgb(0xffffff),
+                );
+                paint_mapped_subs(
+                    window,
+                    view,
+                    xform,
+                    &path.subpaths,
+                    &map,
+                    px(1.25),
+                    ui_kit::chrome(0x2563eb),
+                );
             }
             _ => {
                 if let Some(b) = obj.bounds() {
@@ -1414,7 +1555,14 @@ fn paint_selection_edges(
                     let (x1, y1) = map(b.x1, b.y1);
                     let r = Rect::new(x0, y0, x1, y1);
                     paint_rect_outline_w(window, view, xform, r, px(3.0), rgb(0xffffff));
-                    paint_rect_outline_w(window, view, xform, r, px(1.25), ui_kit::chrome(0x2563eb));
+                    paint_rect_outline_w(
+                        window,
+                        view,
+                        xform,
+                        r,
+                        px(1.25),
+                        ui_kit::chrome(0x2563eb),
+                    );
                 }
             }
         }
@@ -1473,7 +1621,13 @@ fn paint_mapped_subs(
     }
 }
 
-fn paint_rect_outline(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, r: Rect, color: gpui::Rgba) {
+fn paint_rect_outline(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    r: Rect,
+    color: gpui::Rgba,
+) {
     paint_rect_outline_w(window, view, xform, r, px(1.), color);
 }
 
@@ -1491,10 +1645,24 @@ fn paint_rect_outline_w(
         origin: point(view.origin.x + px(x0), view.origin.y + px(y0)),
         size: size(px((x1 - x0).abs()), px((y1 - y0).abs())),
     };
-    let _ = window.paint_quad(quad(b, px(0.), gpui::transparent_black(), width, color, Default::default()));
+    let _ = window.paint_quad(quad(
+        b,
+        px(0.),
+        gpui::transparent_black(),
+        width,
+        color,
+        Default::default(),
+    ));
 }
 
-fn paint_handle(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, x: f32, y: f32, color: gpui::Rgba) {
+fn paint_handle(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    x: f32,
+    y: f32,
+    color: gpui::Rgba,
+) {
     paint_handle_sized(window, view, xform, x, y, 3.0, color);
 }
 
@@ -1512,10 +1680,22 @@ fn paint_handle_sized(
         origin: point(view.origin.x + px(sx - half), view.origin.y + px(sy - half)),
         size: size(px(half * 2.0), px(half * 2.0)),
     };
-    let _ = window.paint_quad(quad(b, px(1.), rgb(0xffffff), px(1.), color, Default::default()));
+    let _ = window.paint_quad(quad(
+        b,
+        px(1.),
+        rgb(0xffffff),
+        px(1.),
+        color,
+        Default::default(),
+    ));
 }
 
-fn paint_obj_preview(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, obj: &crate::document::Obj) {
+fn paint_obj_preview(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    obj: &crate::document::Obj,
+) {
     let crate::document::ObjKind::Path(path) = &obj.kind else {
         return;
     };
@@ -1535,7 +1715,11 @@ fn paint_obj_preview(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xf
         let width = (st.width * xform.scale).max(0.75);
         let mut b = PathBuilder::stroke(px(width));
         if !st.dash.is_empty() {
-            let dashes: Vec<gpui::Pixels> = st.dash.iter().map(|d| px((*d * xform.scale).max(0.4))).collect();
+            let dashes: Vec<gpui::Pixels> = st
+                .dash
+                .iter()
+                .map(|d| px((*d * xform.scale).max(0.4)))
+                .collect();
             b = b.dash_array(&dashes);
         }
         append_subpaths(&mut b, view, xform, &path.subpaths);
@@ -1591,7 +1775,12 @@ fn bytes_rgba(c: [u8; 4]) -> gpui::Rgba {
     }
 }
 
-fn paint_nodes(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, obj: &crate::document::Obj) {
+fn paint_nodes(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    obj: &crate::document::Obj,
+) {
     let crate::document::ObjKind::Path(path) = &obj.kind else {
         return;
     };
@@ -1633,14 +1822,20 @@ fn paint_pen(
 ) {
     let mut nodes = pen.nodes.clone();
     let closing = cursor.is_some_and(|p| {
-        nodes.len() >= 2 && nodes.first().is_some_and(|n| (n.p.0 - p.0).hypot(n.p.1 - p.1) < 0.2)
+        nodes.len() >= 2
+            && nodes
+                .first()
+                .is_some_and(|n| (n.p.0 - p.0).hypot(n.p.1 - p.1) < 0.2)
     });
     if let Some(p) = cursor {
         if closing {
             if let Some(first) = nodes.first().cloned() {
                 nodes.push(first);
             }
-        } else if nodes.last().is_none_or(|n| (n.p.0 - p.0).hypot(n.p.1 - p.1) > 0.5) {
+        } else if nodes
+            .last()
+            .is_none_or(|n| (n.p.0 - p.0).hypot(n.p.1 - p.1) > 0.5)
+        {
             nodes.push(PenNode {
                 p,
                 hin: None,
@@ -1666,7 +1861,12 @@ fn paint_pen(
     }
 }
 
-fn paint_draft_segs(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, segs: &[crate::document::Seg]) {
+fn paint_draft_segs(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    segs: &[crate::document::Seg],
+) {
     let Some(first) = segs.first() else {
         return;
     };
@@ -1697,11 +1897,24 @@ fn paint_draft_segs(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xfo
     }
 }
 
-fn paint_seg(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, a: (f32, f32), b: (f32, f32)) {
+fn paint_seg(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    a: (f32, f32),
+    b: (f32, f32),
+) {
     paint_poly(window, view, xform, &[a, b], false);
 }
 
-fn paint_edge(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, edge: CanvasEdge, cw: f32, ch: f32) {
+fn paint_edge(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    edge: CanvasEdge,
+    cw: f32,
+    ch: f32,
+) {
     let (a, b) = match edge {
         CanvasEdge::Left => ((0.0, 0.0), (0.0, ch)),
         CanvasEdge::Right => ((cw, 0.0), (cw, ch)),
@@ -1718,7 +1931,14 @@ fn paint_edge(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, ed
     }
 }
 
-fn paint_brush(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, x: f32, y: f32, radius: f32) {
+fn paint_brush(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    x: f32,
+    y: f32,
+    radius: f32,
+) {
     let r = (radius * xform.scale).clamp(2.0, 80.0);
     let (sx, sy) = xform.doc_to_screen(x, y);
     let b = Bounds {
@@ -1751,10 +1971,7 @@ fn snap_device_bounds(b: Bounds<gpui::Pixels>, device_scale: f32) -> Bounds<gpui
     let sy1 = (y1 * sf).round() / sf;
     Bounds {
         origin: point(px(sx0), px(sy0)),
-        size: size(
-            px((sx1 - sx0).max(1.0 / sf)),
-            px((sy1 - sy0).max(1.0 / sf)),
-        ),
+        size: size(px((sx1 - sx0).max(1.0 / sf)), px((sy1 - sy0).max(1.0 / sf))),
     }
 }
 
@@ -1832,7 +2049,13 @@ pub(crate) fn plan_raster(
     }
 }
 
-fn paint_poly(window: &mut Window, view: Bounds<gpui::Pixels>, xform: &Xform, pts: &[(f32, f32)], _close: bool) {
+fn paint_poly(
+    window: &mut Window,
+    view: Bounds<gpui::Pixels>,
+    xform: &Xform,
+    pts: &[(f32, f32)],
+    _close: bool,
+) {
     if pts.len() < 2 {
         return;
     }

@@ -116,7 +116,7 @@ struct ProjectFadeSpan {
     /// 淡向工程底色而不是纯黑; 旧工程没有该字段, 视为 false.
     #[serde(default)]
     keep_bg: bool,
-    /// `"wipe_ltr"` = 左→右刷入; 缺省则按 `fade_in` 当淡入/淡出.
+    /// `"wipe_ltr"` = 左→右刷入, `"dissolve"` = 交叠; 缺省则按 `fade_in` 当淡入/淡出.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
 }
@@ -419,7 +419,8 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
                 keep_bg: *keep_bg,
                 kind: match kind {
                     FadeKind::WipeLtr => Some("wipe_ltr".into()),
-                    _ => None,
+                    FadeKind::Dissolve => Some("dissolve".into()),
+                    FadeKind::In | FadeKind::Out => None,
                 },
             })
             .collect(),
@@ -815,6 +816,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
                 .map(|f| {
                     let kind = match f.kind.as_deref() {
                         Some("wipe_ltr") => FadeKind::WipeLtr,
+                        Some("dissolve") => FadeKind::Dissolve,
                         _ if f.fade_in => FadeKind::In,
                         _ => FadeKind::Out,
                     };

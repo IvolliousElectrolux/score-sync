@@ -260,5 +260,4 @@ impl ScoreVideoApp {
             .child(div().text_sm().min_w(px(90.)).text_center().child(label))
             .child(self.btn(plus_id, "+", false, on_plus, cx))
     }
-
 }

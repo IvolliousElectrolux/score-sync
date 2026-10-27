@@ -533,18 +533,8 @@ pub fn spread_layout(
             b.origin_y -= min_y;
         }
     }
-    let canvas_w = raw
-        .iter()
-        .map(|b| b.x + b.w)
-        .max()
-        .unwrap_or(1)
-        .max(1) as u32;
-    let canvas_h = raw
-        .iter()
-        .map(|b| b.y + b.h)
-        .max()
-        .unwrap_or(1)
-        .max(1) as u32;
+    let canvas_w = raw.iter().map(|b| b.x + b.w).max().unwrap_or(1).max(1) as u32;
+    let canvas_h = raw.iter().map(|b| b.y + b.h).max().unwrap_or(1).max(1) as u32;
     (raw, canvas_w, canvas_h)
 }
 
@@ -588,8 +578,7 @@ pub fn stitch_spread(
         .map(|(id, img)| (id.clone(), img.width(), img.height()))
         .collect();
     let (boxes, canvas_w, canvas_h) = spread_layout(&sizes, layout);
-    let mut combined =
-        RgbImage::from_pixel(canvas_w, canvas_h, image::Rgb([255, 255, 255]));
+    let mut combined = RgbImage::from_pixel(canvas_w, canvas_h, image::Rgb([255, 255, 255]));
     for (i, b) in boxes.iter().enumerate() {
         let Some((_, img)) = parts.iter().find(|(id, _)| id == &b.region_id) else {
             continue;
@@ -644,10 +633,7 @@ pub fn spread_content_shifts(
             .unwrap_or((1, 1));
         let (trim_l, _, _, _, _) = effective_h_metrics(_tw, &adj);
         let (_, _, _, _, trim_top) = effective_metrics(th, &adj);
-        Some((
-            b.origin_x + trim_l as i64,
-            b.origin_y + trim_top as i64,
-        ))
+        Some((b.origin_x + trim_l as i64, b.origin_y + trim_top as i64))
     };
     let mut deltas = std::collections::HashMap::new();
     for (id, _, _) in sizes {
@@ -829,19 +815,14 @@ pub fn apply_spread_drag(
     };
     let mut layout = start_layout.to_vec();
     let new_shift = (start_shift as i64 + visual_dx).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    set_spread_shift(
-        &mut layout,
-        region_id,
-        new_shift,
-        Some(shift_y),
-    );
+    set_spread_shift(&mut layout, region_id, new_shift, Some(shift_y));
     if visual_dx != 0 {
         if let Some(partner) = mirror_partner {
             let partner_shift = BlockAdjust::find(start_layout, partner)
                 .map(|a| a.shift_x)
                 .unwrap_or(0);
-            let mirrored = (partner_shift as i64 - visual_dx)
-                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            let mirrored =
+                (partner_shift as i64 - visual_dx).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             set_spread_shift(&mut layout, partner, mirrored, None);
         }
     }
@@ -2604,10 +2585,7 @@ mod tests {
         let mut right = RgbImage::from_pixel(3, 2, Rgb([0, 10, 0]));
         right.put_pixel(0, 0, Rgb([0, 1, 0]));
         right.put_pixel(2, 0, Rgb([0, 2, 0]));
-        let parts = vec![
-            ("L".to_string(), left),
-            ("R".to_string(), right),
-        ];
+        let parts = vec![("L".to_string(), left), ("R".to_string(), right)];
         let stats = vec![PieceStats::default(), PieceStats::default()];
         let combined = stitch_spread(&parts, &stats, &[]);
         assert_eq!(combined.dimensions(), (7, 2));
@@ -2678,10 +2656,7 @@ mod tests {
             ..Default::default()
         }];
         let clamped = clamp_spread_shift_y(&sizes, &layout);
-        assert_eq!(
-            BlockAdjust::find(&clamped, "L").map(|a| a.shift_y),
-            Some(0)
-        );
+        assert_eq!(BlockAdjust::find(&clamped, "L").map(|a| a.shift_y), Some(0));
 
         let sizes = vec![("L".into(), 4u32, 10u32), ("R".into(), 4u32, 6u32)];
         let down = vec![BlockAdjust {
@@ -2690,20 +2665,14 @@ mod tests {
             ..Default::default()
         }];
         let clamped = clamp_spread_shift_y(&sizes, &down);
-        assert_eq!(
-            BlockAdjust::find(&clamped, "R").map(|a| a.shift_y),
-            Some(4)
-        );
+        assert_eq!(BlockAdjust::find(&clamped, "R").map(|a| a.shift_y), Some(4));
         let up = vec![BlockAdjust {
             region_id: "R".into(),
             shift_y: -3,
             ..Default::default()
         }];
         let clamped = clamp_spread_shift_y(&sizes, &up);
-        assert_eq!(
-            BlockAdjust::find(&clamped, "R").map(|a| a.shift_y),
-            Some(0)
-        );
+        assert_eq!(BlockAdjust::find(&clamped, "R").map(|a| a.shift_y), Some(0));
     }
 
     fn raw_origin(sizes: &[(String, u32, u32)], layout: &[BlockAdjust], id: &str) -> i64 {
@@ -2721,10 +2690,7 @@ mod tests {
         let right = apply_spread_drag(&sizes, &[], "L", 2, 0, None, ident);
         assert_eq!(raw_origin(&sizes, &right, "L"), 2);
         assert_eq!(raw_origin(&sizes, &right, "R"), 4);
-        assert_eq!(
-            BlockAdjust::find(&right, "R").map(|a| a.shift_x),
-            None
-        );
+        assert_eq!(BlockAdjust::find(&right, "R").map(|a| a.shift_x), None);
 
         let left = apply_spread_drag(&sizes, &[], "L", -1, 0, None, ident);
         assert_eq!(raw_origin(&sizes, &left, "L"), -1);

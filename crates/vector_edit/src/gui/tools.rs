@@ -37,7 +37,11 @@ pub(crate) fn commit_pen(
     app.rebuild_raster(cx);
 }
 
-pub(crate) fn finish_pencil(app: &mut VectorEditApp, pts: &[(f32, f32)], cx: &mut gpui::Context<VectorEditApp>) {
+pub(crate) fn finish_pencil(
+    app: &mut VectorEditApp,
+    pts: &[(f32, f32)],
+    cx: &mut gpui::Context<VectorEditApp>,
+) {
     if pts.len() < 2 {
         return;
     }
@@ -49,7 +53,13 @@ pub(crate) fn finish_pencil(app: &mut VectorEditApp, pts: &[(f32, f32)], cx: &mu
     let mut style = app.style.clone();
     style.width = app.brush.max(0.2);
     if let Some(doc) = app.doc.as_mut() {
-        let obj = styled_path(vec![Subpath { closed: false, segs }], &style);
+        let obj = styled_path(
+            vec![Subpath {
+                closed: false,
+                segs,
+            }],
+            &style,
+        );
         let id = obj.id.clone();
         if let Some(layer) = doc.active_layer_mut() {
             layer.objects.push(std::sync::Arc::new(obj));
@@ -60,7 +70,12 @@ pub(crate) fn finish_pencil(app: &mut VectorEditApp, pts: &[(f32, f32)], cx: &mu
     app.rebuild_raster(cx);
 }
 
-pub(crate) fn erase_at(app: &mut VectorEditApp, x: f32, y: f32, cx: &mut gpui::Context<VectorEditApp>) {
+pub(crate) fn erase_at(
+    app: &mut VectorEditApp,
+    x: f32,
+    y: f32,
+    cx: &mut gpui::Context<VectorEditApp>,
+) {
     let tol = app.hit_tol();
     let Some(target) = app.doc.as_ref().and_then(|d| d.hit_test(x, y, tol)) else {
         return;
@@ -85,7 +100,13 @@ pub(crate) fn erase_at(app: &mut VectorEditApp, x: f32, y: f32, cx: &mut gpui::C
     app.notify_chrome(cx);
 }
 
-pub(crate) fn apply_marquee(app: &mut VectorEditApp, rect: Rect, add: bool, sub: bool, toggle: bool) {
+pub(crate) fn apply_marquee(
+    app: &mut VectorEditApp,
+    rect: Rect,
+    add: bool,
+    sub: bool,
+    toggle: bool,
+) {
     let Some(doc) = app.doc.as_ref() else {
         return;
     };
@@ -405,46 +426,52 @@ pub(crate) fn toggle_anchor_smooth(
     });
 }
 
-pub(crate) fn delete_anchor(app: &mut VectorEditApp, id: &str, sub_i: usize, seg_i: usize, role: NodeRole) {
+pub(crate) fn delete_anchor(
+    app: &mut VectorEditApp,
+    id: &str,
+    sub_i: usize,
+    seg_i: usize,
+    role: NodeRole,
+) {
     let mut empty = false;
     if let Some(doc) = app.doc.as_mut() {
-    doc.mutate(id, |o| {
-        let ObjKind::Path(path) = &mut o.kind else {
-            return;
-        };
-        let Some(sub) = path.subpaths.get_mut(sub_i) else {
-            return;
-        };
-        match role {
-            NodeRole::Head => {
-                if !sub.segs.is_empty() {
-                    sub.segs.remove(0);
+        doc.mutate(id, |o| {
+            let ObjKind::Path(path) = &mut o.kind else {
+                return;
+            };
+            let Some(sub) = path.subpaths.get_mut(sub_i) else {
+                return;
+            };
+            match role {
+                NodeRole::Head => {
+                    if !sub.segs.is_empty() {
+                        sub.segs.remove(0);
+                    }
                 }
-            }
-            NodeRole::Anchor if seg_i + 1 < sub.segs.len() => {
-                let far = sub.segs[seg_i + 1].end();
-                let far_in = match sub.segs[seg_i + 1] {
-                    Seg::Cubic { p2, .. } => Some(p2),
-                    Seg::Line { .. } => None,
-                };
-                sub.segs[seg_i].set_end(far);
-                if let (Some(h), Seg::Cubic { p2, .. }) = (far_in, &mut sub.segs[seg_i]) {
-                    *p2 = h;
+                NodeRole::Anchor if seg_i + 1 < sub.segs.len() => {
+                    let far = sub.segs[seg_i + 1].end();
+                    let far_in = match sub.segs[seg_i + 1] {
+                        Seg::Cubic { p2, .. } => Some(p2),
+                        Seg::Line { .. } => None,
+                    };
+                    sub.segs[seg_i].set_end(far);
+                    if let (Some(h), Seg::Cubic { p2, .. }) = (far_in, &mut sub.segs[seg_i]) {
+                        *p2 = h;
+                    }
+                    sub.segs.remove(seg_i + 1);
                 }
-                sub.segs.remove(seg_i + 1);
-            }
-            NodeRole::Anchor => {
-                if seg_i < sub.segs.len() {
-                    sub.segs.remove(seg_i);
+                NodeRole::Anchor => {
+                    if seg_i < sub.segs.len() {
+                        sub.segs.remove(seg_i);
+                    }
                 }
+                NodeRole::In | NodeRole::Out => return,
             }
-            NodeRole::In | NodeRole::Out => return,
-        }
-        if sub.segs.is_empty() {
-            path.subpaths.remove(sub_i);
-        }
-        empty = path.subpaths.iter().all(|s| s.segs.is_empty());
-    });
+            if sub.segs.is_empty() {
+                path.subpaths.remove(sub_i);
+            }
+            empty = path.subpaths.iter().all(|s| s.segs.is_empty());
+        });
     }
     if empty {
         let owned = id.to_string();
@@ -470,7 +497,13 @@ pub(crate) fn node_at(obj: &Obj, x: f32, y: f32, tol: f32) -> Option<(usize, usi
     for (si, sub) in path.subpaths.iter().enumerate() {
         for (gi, seg) in sub.segs.iter().enumerate() {
             let end = seg.end();
-            consider(&mut best, (end.0 - x).hypot(end.1 - y), si, gi, NodeRole::Anchor);
+            consider(
+                &mut best,
+                (end.0 - x).hypot(end.1 - y),
+                si,
+                gi,
+                NodeRole::Anchor,
+            );
             if gi == 0 {
                 let st = seg.start();
                 let closed_on_end = sub.closed
@@ -577,7 +610,11 @@ fn apply_style(obj: &mut Obj, style: &StyleBuf) {
                 width: style.width.max(0.15),
                 cap: style.cap,
                 join: style.join,
-                dash: p.stroke.as_ref().map(|s| s.dash.clone()).unwrap_or_default(),
+                dash: p
+                    .stroke
+                    .as_ref()
+                    .map(|s| s.dash.clone())
+                    .unwrap_or_default(),
                 dash_phase: p.stroke.as_ref().map(|s| s.dash_phase).unwrap_or(0.0),
             });
         }

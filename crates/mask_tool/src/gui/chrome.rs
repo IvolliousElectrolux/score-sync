@@ -116,7 +116,11 @@ impl MaskToolApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x334155) };
+        let fg = if active {
+            ui_kit::chrome(0x0f172a)
+        } else {
+            ui_kit::chrome(0x334155)
+        };
         div()
             .id(id.into())
             .flex_shrink_0()
@@ -125,13 +129,20 @@ impl MaskToolApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(ui_kit::chrome(0xd8e0ea))
+                }
+            })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -148,7 +159,11 @@ impl MaskToolApp {
         on_right: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let fg = if active { ui_kit::chrome(0x0f172a) } else { ui_kit::chrome(0x334155) };
+        let fg = if active {
+            ui_kit::chrome(0x0f172a)
+        } else {
+            ui_kit::chrome(0x334155)
+        };
         div()
             .id(id.into())
             .flex_shrink_0()
@@ -157,13 +172,20 @@ impl MaskToolApp {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.bg(ui_kit::chrome(0xd8e0ea)).font_weight(gpui::FontWeight::SEMIBOLD)
+                d.bg(ui_kit::chrome(0xd8e0ea))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
             })
             .text_color(fg)
             .text_xs()
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |s| if active { s } else { s.bg(ui_kit::chrome(0xd8e0ea)) })
+            .hover(move |s| {
+                if active {
+                    s
+                } else {
+                    s.bg(ui_kit::chrome(0xd8e0ea))
+                }
+            })
             .child(label.into())
             .on_mouse_up(
                 MouseButton::Left,
@@ -187,9 +209,21 @@ impl MaskToolApp {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
-        let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
-        let hover = if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) };
+        let bg = if active {
+            ui_kit::chrome(0x2563eb)
+        } else {
+            ui_kit::chrome(0xe2e8f0)
+        };
+        let fg = if active {
+            rgb(0xffffff)
+        } else {
+            ui_kit::chrome(0x0f172a)
+        };
+        let hover = if active {
+            ui_kit::chrome(0x1d4ed8)
+        } else {
+            ui_kit::chrome(0xcbd5e1)
+        };
         let mut el = div()
             .id(id.into())
             .px_3()
@@ -220,9 +254,21 @@ impl MaskToolApp {
         on_right: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg = if active { ui_kit::chrome(0x2563eb) } else { ui_kit::chrome(0xe2e8f0) };
-        let fg = if active { rgb(0xffffff) } else { ui_kit::chrome(0x0f172a) };
-        let hover = if active { ui_kit::chrome(0x1d4ed8) } else { ui_kit::chrome(0xcbd5e1) };
+        let bg = if active {
+            ui_kit::chrome(0x2563eb)
+        } else {
+            ui_kit::chrome(0xe2e8f0)
+        };
+        let fg = if active {
+            rgb(0xffffff)
+        } else {
+            ui_kit::chrome(0x0f172a)
+        };
+        let hover = if active {
+            ui_kit::chrome(0x1d4ed8)
+        } else {
+            ui_kit::chrome(0xcbd5e1)
+        };
         div()
             .id(id.into())
             .px_3()
@@ -256,7 +302,13 @@ impl MaskToolApp {
             .w_full()
             .bg(ui_kit::chrome(0xe2e8f0))
             .child(self.menu_item("open", ui_kit::t_src("打开"), false, Self::open_file, cx))
-            .child(self.menu_item("export", ui_kit::t_src("导出"), false, Self::export_image, cx))
+            .child(self.menu_item(
+                "export",
+                ui_kit::t_src("导出"),
+                false,
+                Self::export_image,
+                cx,
+            ))
             .child(self.menu_item(
                 "fit",
                 ui_kit::t_src("适应窗口"),
@@ -585,7 +637,12 @@ impl MaskToolApp {
                             .items_center()
                             .gap_1()
                             .flex_shrink_0()
-                            .child(div().text_xs().text_color(ui_kit::chrome(0xcbd5e1)).child("RGB"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(ui_kit::chrome(0xcbd5e1))
+                                    .child("RGB"),
+                            )
                             .child(
                                 div()
                                     .id("eyedropper_btn")
@@ -705,7 +762,10 @@ impl MaskToolApp {
         if embedded {
             panel = panel.w_full();
         } else {
-            panel = panel.w(px(side_w)).border_l_1().border_color(ui_kit::chrome(0xcbd5e1));
+            panel = panel
+                .w(px(side_w))
+                .border_l_1()
+                .border_color(ui_kit::chrome(0xcbd5e1));
         }
         panel
             .child(

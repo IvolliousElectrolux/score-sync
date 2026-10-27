@@ -297,11 +297,21 @@ impl ApplyBgApp {
             .items_center()
             .gap_2()
             .w_full()
-            .child(div().w(px(48.)).text_color(ui_kit::chrome(0x334155)).child("比例"))
+            .child(
+                div()
+                    .w(px(48.))
+                    .text_color(ui_kit::chrome(0x334155))
+                    .child("比例"),
+            )
             .child(div().w(px(96.)).child(self.aspect_w_input.clone()))
             .child(div().text_color(ui_kit::chrome(0x64748b)).child(":"))
             .child(div().w(px(96.)).child(self.aspect_h_input.clone()))
-            .child(div().text_sm().text_color(ui_kit::chrome(0x94a3b8)).child("(宽:高)"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(ui_kit::chrome(0x94a3b8))
+                    .child("(宽:高)"),
+            )
             .child(div().flex_1())
             .child(self.btn("aspect_reset", "恢复默认", Self::reset_aspect, cx))
     }
