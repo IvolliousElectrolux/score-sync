@@ -1,0 +1,127 @@
+# Windows 发行包: 在 GitHub 的 windows-2025 runner 上用 release-max 编译并 UPX.
+# ffmpeg 不在本 workflow 里编, 从 sidecars 拉 ffmpeg.yml 编好的裁剪版.
+# 触发: 推送 v* 标签, 或 Actions 页手动 workflow_dispatch (可填已有 tag 把 zip 挂上去).
+
+name: Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "挂到已有 Release 的标签 (如 v1.8.12); 留空只上传 artifact"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x64
+
+      - name: Build score_sync (release-max)
+        run: cargo build --profile release-max -p score_sync
+
+      - name: Install UPX
+        shell: pwsh
+        run: |
+          choco install upx -y --no-progress
+          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Bundle ffmpeg, pdfium
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $match = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw "Cargo.toml has no version" }
+          $ver = $match.Matches[0].Groups[1].Value
+          $stage = "score_sync-$ver-windows-x64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release-max/score_sync.exe" (Join-Path $stage "score_sync.exe")
+          Write-Host "UPX score_sync.exe"
+          & upx --best --lzma (Join-Path $stage "score_sync.exe")
+          if ($LASTEXITCODE -ne 0) { throw "upx failed: $LASTEXITCODE" }
+
+          Write-Host "download pdfium win-x64 (chromium/6406, matches pdfium-render)"
+          curl.exe -fsSL -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F6406/pdfium-win-x64.tgz"
+          if ($LASTEXITCODE -ne 0) { throw "pdfium download failed" }
+          New-Item -ItemType Directory -Force -Path pdfium-extract | Out-Null
+          tar.exe -xzf pdfium.tgz -C pdfium-extract
+          $dll = Get-ChildItem -Path pdfium-extract -Recurse -Filter pdfium.dll | Select-Object -First 1
+          if (-not $dll) { throw "pdfium.dll missing in archive" }
+          Copy-Item $dll.FullName (Join-Path $stage "pdfium.dll")
+
+          Write-Host "download slim ffmpeg ffmpeg-windows-x64.exe (sidecars, from ffmpeg.yml)"
+          $ffUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/ffmpeg-windows-x64.exe"
+          $ff = Join-Path $stage "ffmpeg.exe"
+          $ok = $false
+          for ($i = 1; $i -le 30; $i++) {
+            curl.exe -fsSL -o $ff $ffUrl
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $ff) -and ((Get-Item $ff).Length -gt 0)) {
+              $ok = $true
+              break
+            }
+            Write-Host "waiting for sidecars ffmpeg ($i)"
+            Start-Sleep -Seconds 20
+          }
+          if (-not $ok) { throw "ffmpeg sidecar missing" }
+          curl.exe -fsSL -o (Join-Path $stage "ffmpeg-COPYING.txt") "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/ffmpeg-COPYING.txt"
+          curl.exe -fsSL -o (Join-Path $stage "ffmpeg-SOURCE.txt") "https://github.com/$env:GITHUB_REPOSITORY/releases/download/sidecars/ffmpeg-SOURCE.txt"
+
+          tar.exe -a -c -f "$stage.zip" $stage
+          if ($LASTEXITCODE -ne 0) { throw "zip failed" }
+          "STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
+          Get-ChildItem $stage, "$stage.zip" | Format-Table Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+
+      - name: Attach zip to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = ""
+          if ($env:INPUT_TAG) {
+            $tag = $env:INPUT_TAG
+          } elseif ($env:GITHUB_REF -like "refs/tags/*") {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          if (-not $tag) {
+            Write-Host "no release tag; skip attach"
+            exit 0
+          }
+          $found = $false
+          for ($i = 1; $i -le 20; $i++) {
+            gh release view $tag
+            if ($LASTEXITCODE -eq 0) { $found = $true; break }
+            Write-Host "waiting for release $tag ($i)"
+            Start-Sleep -Seconds 15
+          }
+          if (-not $found) {
+            gh release create $tag --title $tag --notes "Score Sync $tag"
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          }
+          gh release upload $tag "$env:STAGE.zip" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }

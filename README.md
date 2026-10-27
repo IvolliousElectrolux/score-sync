@@ -19,7 +19,7 @@
 
 ## 环境
 
-- Windows / macOS (macOS 包由 GitHub Actions 编译; 本地无 Mac 也可发版)
+- Windows / macOS (两边的安装包都由 GitHub Actions 编译; 打 `v*` 标签即可发版, 不必本机编完再上传)
 - Rust stable (`cargo` / `rustc`)
 - 运行时依赖 pdfium (`pdfium.dll` / `libpdfium.dylib`) 与 ffmpeg
   (`ffmpeg.exe` / `ffmpeg`), 二者都不随源码提交: 优先找程序自身同目录下的那份,
@@ -83,11 +83,11 @@ cd score_sync
 cargo run -r
 ```
 
-日常迭代可用较快的 `release` (已关 LTO); 正式发包可用:
+日常迭代可用较快的 `release` (已关 LTO). 本机若要打和 Windows 发行包相同的本体:
 
 ```bash
 cargo build --profile release-max
-# Windows 本体再压一刀: upx --best --lzma target/release-max/score_sync.exe
+upx --best --lzma target/release-max/score_sync.exe
 ```
 
 也可传入初始文件:
@@ -97,11 +97,15 @@ cargo run -r -- path\to\page.png path\to\score.pdf
 cargo run -r -- path\to\project.staffcrop
 ```
 
-发布构建产物: `target/release/score_sync.exe` (Windows) 或 `target/release/score_sync` (macOS).
-GitHub Actions 工作流 `.github/workflows/macos.yml` 在打 `v*` 标签或手动
-`workflow_dispatch` 时于 macos-14 上编译 arm64 与 x64 (x64 交叉编译, 不再等
-macos-13), 并上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`.
-时间轴对齐小工具只在 v1.3.10 发过, 之后不再随版附带.
+发行包由 Actions 打, 不在本机编完再上传. 推送 `v*` 标签, 或在 Actions 页手动跑
+(可填已有标签把 zip 挂上去):
+
+- `.github/workflows/macos.yml`: macos-14 上用 `release` 编 arm64 与 x64 (x64 交叉编译),
+  上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`
+- `.github/workflows/windows.yml`: windows-2025 上用 `release-max` 编 x64, `upx --best --lzma`
+  后再上传 `score_sync-<ver>-windows-x64.zip`
+
+两边都带上 sidecars 里的裁剪 ffmpeg 和 pdfium 6406. 时间轴对齐小工具只在 v1.3.10 发过, 之后不再随版附带.
 
 ## 工程格式
 
@@ -157,6 +161,7 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 
 ### 1.8.12
 - 视频: 转场轴增加「交叠」 (上一页溶进下一页, 钉在翻页边界, 默认 1 秒); `X` 在播放头切到下一张并附上该转场, 不能与淡入淡出叠置
+- 发布: Windows 安装包改由 Actions 用 `release-max` 编译并 UPX, 打 `v*` 标签后和 macOS 一样挂到 Release
 
 ### 1.8.11
 - 组织页面和双页对开: 悬停两页之间出现竖线, 点一下选中这一节. 对开一对中间的书脊一直显示, 也可以点选. 选中节后, 复制和粘贴插在这两页中间
