@@ -4,7 +4,7 @@
 
 从扫描谱或 PDF 出发, 在同一界面完成 **谱表分块 → 蒙版清理 → 加底色裁切 → 视频剪辑导出**, 支持工程保存/继续编辑, 一路做到可以直接发布的同步曲谱视频 (MP4/MKV).
 
-当前版本: **1.8.12**
+当前版本: **1.9.0**
 
 ## 功能
 
@@ -160,8 +160,10 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 
 ## 版本摘要
 
+### 1.9.0
+- 视频: 导出按本机显卡编码. Intel 核显走 Quick Sync, NVIDIA / AMD 走各自的硬件编码器, macOS 走 VideoToolbox. 探测或编码失败退回 libx264. 裁剪版 ffmpeg 已带上这些编码器. 感谢 [喵喵](https://github.com/shuanglong2) 提出这个方案
+
 ### 1.8.12
-- 视频: 导出按本机显卡编码. Intel 核显走 Quick Sync, NVIDIA / AMD 走各自的硬件编码器, macOS 走 VideoToolbox. 探测或编码失败退回 libx264. 裁剪版 ffmpeg 需由 ffmpeg workflow 重新编过才带这些编码器; 旧 sidecar 仍是纯 CPU
 - 视频: 转场轴增加「交叠」 (上一页溶进下一页, 钉在翻页边界, 默认 1 秒); `X` 在播放头切到下一张并附上该转场, 不能与淡入淡出叠置
 - 发布: Windows 安装包改由 Actions 用 `release-max` 编译并 UPX, 打 `v*` 标签后和 macOS 一样挂到 Release
 

@@ -195,7 +195,7 @@ pub(crate) fn video_codec_args(encoder: VideoEncoder, crf: u32) -> Vec<String> {
 fn candidate_order(host: HostKind, gpus: Gpus) -> Vec<VideoEncoder> {
     let mut out = Vec::new();
     let known = gpus.nvidia || gpus.amd || gpus.intel;
-    let mut push_vendors = |out: &mut Vec<VideoEncoder>| {
+    let push_vendors = |out: &mut Vec<VideoEncoder>| {
         if !known || gpus.nvidia {
             out.push(VideoEncoder::Nvenc);
         }
@@ -255,6 +255,7 @@ fn gpus_from_driver_text(text: &str) -> Gpus {
     gpus
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn gpus_from_pci_vendors(ids: impl IntoIterator<Item = u32>) -> Gpus {
     let mut gpus = Gpus::default();
     for id in ids {
