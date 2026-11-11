@@ -258,6 +258,9 @@ install_libvpl() {
       -DCMAKE_C_COMPILER="$cc"
       -DCMAKE_CXX_COMPILER="$cc"
       -DUSE_MSVC_STATIC_RUNTIME=ON
+      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      "-DCMAKE_C_FLAGS_RELEASE=/MT /O2 /Ob2 /DNDEBUG"
+      "-DCMAKE_CXX_FLAGS_RELEASE=/MT /O2 /Ob2 /DNDEBUG"
     )
     if command -v ninja >/dev/null 2>&1 || command -v ninja.exe >/dev/null 2>&1; then
       gen=(-G Ninja)
