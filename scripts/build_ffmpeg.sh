@@ -254,7 +254,11 @@ install_libvpl() {
     local cc
     cc="$(command -v cl.exe || command -v cl)"
     cc="$(cygpath -w "$cc")"
-    msvc_cc=(-DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cc")
+    msvc_cc=(
+      -DCMAKE_C_COMPILER="$cc"
+      -DCMAKE_CXX_COMPILER="$cc"
+      -DUSE_MSVC_STATIC_RUNTIME=ON
+    )
     if command -v ninja >/dev/null 2>&1 || command -v ninja.exe >/dev/null 2>&1; then
       gen=(-G Ninja)
     else
@@ -293,7 +297,7 @@ install_libvpl() {
     # pkg-config 默认吐出 /d/a 这种 MSYS 路径, cl / link 不认, 探测 mfxvideo.h 会失败.
     awk -v p="$prefix_mix" '
       /^Cflags:/ { print "Cflags: -I" p "/include -I" p "/include/vpl"; next }
-      /^Libs:/ { print "Libs: -L" p "/lib -lvpl -ladvapi32 -lole32 -luuid -lgdi32 -lmsvcprt"; next }
+      /^Libs:/ { print "Libs: -lvpl -ladvapi32 -lole32 -luuid -lgdi32"; next }
       { print }
     ' "$pc" >"$tmp"
     mv "$tmp" "$pc"
