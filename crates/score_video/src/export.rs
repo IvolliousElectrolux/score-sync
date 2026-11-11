@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 
+use crate::hw_encode::{select_video_encoder, video_codec_args, VideoEncoder};
 use crate::model::{AudioClip, FadeKind, MaterialItem, Timeline};
 
 /// ffmpeg 可执行文件路径: 优先找程序自身同目录下的 `ffmpeg(.exe)` (发行包
@@ -478,20 +479,38 @@ fn os_path(p: &Path) -> std::ffi::OsString {
     p.as_os_str().to_owned()
 }
 
+struct EncodeFailure {
+    message: String,
+    /// 编码器拒绝了这条命令. 换 libx264 再试一次.
+    retryable: bool,
+}
+
+impl From<String> for EncodeFailure {
+    fn from(message: String) -> Self {
+        let retryable = message.contains("退出码")
+            || message.contains("写入帧失败")
+            || message.contains("刷新帧数据失败")
+            || message.contains("ffmpeg 执行失败");
+        Self { message, retryable }
+    }
+}
+
 fn encode_raw_video(
     images: &HashMap<String, Vec<u8>>,
     timeline: &Timeline,
     runs: &[FrameRun],
     n_frames: u64,
     opts: &ExportOptions,
+    encoder: VideoEncoder,
     out_path: &Path,
     tx: &async_channel::Sender<ExportMsg>,
-) -> Result<(), String> {
+) -> Result<(), EncodeFailure> {
     let fps = opts.fps.max(1);
     let w = even_dim(opts.width);
     let h = even_dim(opts.height);
     let frame_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-    let args = vec![
+    let label = encoder.label();
+    let mut args = vec![
         os("-y"),
         os("-f"),
         os("rawvideo"),
@@ -505,23 +524,16 @@ fn encode_raw_video(
         os("-"),
         os("-frames:v"),
         os(n_frames.to_string()),
-        os("-vf"),
-        os("format=yuv420p"),
-        os("-c:v"),
-        os("libx264"),
-        os("-pix_fmt"),
-        os("yuv420p"),
-        os("-preset"),
-        os("medium"),
-        os("-crf"),
-        os(opts.crf.to_string()),
-        os("-tune"),
-        os("stillimage"),
+    ];
+    for arg in video_codec_args(encoder, opts.crf) {
+        args.push(os(arg));
+    }
+    args.extend([
         os("-video_track_timescale"),
         os(fps.to_string()),
         os("-an"),
         os_path(out_path),
-    ];
+    ]);
 
     let mut cmd = Command::new(ffmpeg_path());
     cmd.args(&args)
@@ -645,7 +657,7 @@ fn encode_raw_video(
             if last_progress.elapsed() >= Duration::from_millis(200) {
                 last_progress = Instant::now();
                 let _ = tx.send_blocking(ExportMsg::Progress(format!(
-                    "编码 {written}/{n_frames} 帧..."
+                    "编码 {written}/{n_frames} 帧 ({label})..."
                 )));
             }
         }
@@ -673,9 +685,9 @@ fn encode_raw_video(
             .map(|t| t.trim().to_string())
             .unwrap_or_default();
         if detail.is_empty() {
-            return Err(e);
+            return Err(e.into());
         }
-        return Err(format!("{e}\n{detail}"));
+        return Err(format!("{e}\n{detail}").into());
     }
     if !status.success() {
         let detail = tail
@@ -691,7 +703,8 @@ fn encode_raw_video(
             step: "按帧编码".to_string(),
             detail,
         }
-        .to_string());
+        .to_string()
+        .into());
     }
     Ok(())
 }
@@ -836,21 +849,44 @@ fn run_export(
         return Err(crate::error::Error::export("时间轴为空, 无法导出").to_string());
     }
 
+    let _ = tx.send_blocking(ExportMsg::Progress("检测本机视频编码器...".to_string()));
+    let encoder = select_video_encoder();
     let _ = tx.send_blocking(ExportMsg::Progress(format!(
-        "编码 {} 帧 ({} 页切点)...",
+        "编码 {} 帧 ({}), {} 页切点...",
         total_frames,
+        encoder.label(),
         runs.len()
     )));
     let silent_video = work.path().join("silent.mp4");
-    encode_raw_video(
+    match encode_raw_video(
         &images,
         timeline,
         &runs,
         total_frames,
         opts,
+        encoder,
         &silent_video,
         tx,
-    )?;
+    ) {
+        Ok(()) => {}
+        Err(err) if err.retryable && encoder.is_hardware() => {
+            let _ = tx.send_blocking(ExportMsg::Progress(
+                "硬件编码失败, 改用 libx264...".to_string(),
+            ));
+            encode_raw_video(
+                &images,
+                timeline,
+                &runs,
+                total_frames,
+                opts,
+                VideoEncoder::Libx264,
+                &silent_video,
+                tx,
+            )
+            .map_err(|err| err.message)?;
+        }
+        Err(err) => return Err(err.message),
+    }
 
     let video_dur = frames_to_seconds(total_frames, fps);
     let _ = tx.send_blocking(ExportMsg::Progress("合成音频...".to_string()));

@@ -95,7 +95,7 @@ jobs:
         if: matrix.target == 'msvc' && steps.bin.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          choco install nasm pkgconfiglite upx -y --no-progress
+          choco install nasm pkgconfiglite upx ninja -y --no-progress
           echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            nasm make pkg-config upx-ucl zlib1g-dev
+            nasm make pkg-config upx-ucl zlib1g-dev g++ cmake
 
       - name: Install macOS build deps
         if: runner.os == 'macOS' && steps.bin.outputs.cache-hit != 'true'
@@ -125,7 +125,7 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          export PATH="/c/Program Files/NASM:/c/ProgramData/chocolatey/bin:$PATH"
+          export PATH="/c/Program Files/CMake/bin:/c/Program Files/NASM:/c/ProgramData/chocolatey/bin:$PATH"
           bash scripts/build_ffmpeg.sh \
             --out-dir vendor/ffmpeg-slim \
             --work-dir "$RUNNER_TEMP/score_sync-ffmpeg" \

@@ -52,7 +52,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 
 | 场景 | sidecar 做什么 |
 |------|----------------|
-| 导出画面 | stdin `rawvideo` RGBA (`-i -`, 协议必须有 `fd`) → `-vf format=yuv420p` → `libx264` (yuv420p, CRF, preset=medium, tune=stillimage) |
+| 导出画面 | stdin `rawvideo` RGBA (`-i -`, 协议必须有 `fd`) → 按本机显卡选编码器. Windows: 有 NVIDIA 用 `h264_nvenc`, 有 AMD 用 `h264_amf`, 只有 Intel 核显用 `h264_qsv` (ICQ, 刻度同 CRF), 再不行用 `h264_mf`. macOS 用 `h264_videotoolbox`. Linux 同样先看 NVIDIA / AMD / Intel. 探测或正式编码失败退回 `libx264` (yuv420p, CRF, preset=medium, tune=stillimage). `SCORE_SYNC_VIDEO_ENCODER` 可指定 `libx264` / `h264_qsv` / `h264_nvenc` / `h264_amf` / `h264_mf` / `h264_videotoolbox` |
 | 导出音频 | MP4: `aac`; MKV: `flac`. 多段: `filter_complex` 里 `atrim` / `asetpts` / `aformat` / `apad` / `concat`. 无音轨: `lavfi` `anullsrc` |
 | 预览解码 | m4a/aac/mp4/mov 转临时 WAV `pcm_s16le`; 其它非 16-bit WAV (mp3/flac/ogg 等) 走 ffmpeg 管道 `-f wav` |
 | 预览倍速 | `-af atempo` (单级 0.5–2, 3x 拆成两级) 后同样 `-f wav` 喂 rodio; 导出仍是 1x |
@@ -60,7 +60,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 
 **编进去了 (脚本里的列表, 摘常用项):**
 
-- 编码: `libx264`, `aac`, `flac`, `pcm_s16le`
+- 编码: `libx264`, `aac`, `flac`, `pcm_s16le`. 另按平台带上硬件编码器, 只编码不解码: Windows `h264_qsv` (静态 libvpl) / `h264_nvenc` / `h264_amf` / `h264_mf`; macOS `h264_videotoolbox`; Linux `h264_qsv` / `h264_nvenc` / `h264_amf`. 驱动不打进 sidecar, 运行时向本机显卡驱动要
 - 解码: `aac` / HE-AAC / `alac` / `mp3` / `flac` / `vorbis` / `opus` / `speex` / 多种 PCM 与 wav-ADPCM / `rawvideo`. **没有视频解码器** (含 h264)
 - 解复用: `rawvideo`, `lavfi`, `mov` (mp4/m4a/m4b), `mp3`, `aac`, `flac`, `ogg`, `wav`, `w64`, `aiff`, `matroska`
 - 复用: `mp4`, `mov`, `ipod`, `matroska`, `wav`, `pcm_s16le` (CLI `-f s16le`), `flac`, `null`, `adts`
@@ -70,6 +70,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 
 **不要假定能做 (常见踩坑):**
 
+- 硬件编码: 需要本机有对应驱动. 没有, 或画面一边超过编码器上限, 导出会改走 `libx264`. 旧 sidecar 里没有这些编码器名时同样走 `libx264`. 不解码 H.264
 - 抽自己导出的 mp4 帧 / 解码别人的视频: 没有 h264 decoder, 也没有 `ffprobe`
 - 写出 jpg/png: 没有这些图像编码器
 - 视频转场、烧字、叠图: 没有 `xfade` / `overlay` / `fade` / `drawtext`
@@ -160,6 +161,7 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 ## 版本摘要
 
 ### 1.8.12
+- 视频: 导出按本机显卡编码. Intel 核显走 Quick Sync, NVIDIA / AMD 走各自的硬件编码器, macOS 走 VideoToolbox. 探测或编码失败退回 libx264. 裁剪版 ffmpeg 需由 ffmpeg workflow 重新编过才带这些编码器; 旧 sidecar 仍是纯 CPU
 - 视频: 转场轴增加「交叠」 (上一页溶进下一页, 钉在翻页边界, 默认 1 秒); `X` 在播放头切到下一张并附上该转场, 不能与淡入淡出叠置
 - 发布: Windows 安装包改由 Actions 用 `release-max` 编译并 UPX, 打 `v*` 标签后和 macOS 一样挂到 Release
 

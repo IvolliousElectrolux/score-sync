@@ -8,6 +8,13 @@ FFMPEG_TAG="${FFMPEG_TAG:-n7.1.1}"
 X264_REF="${X264_REF:-stable}"
 FFMPEG_URL="https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
 X264_URL="https://github.com/mirror/x264/archive/refs/heads/${X264_REF}.tar.gz"
+# 硬件编码器只加头文件或静态 dispatcher, 运行时再加载本机驱动, 不把驱动打进 sidecar.
+NVENC_TAG="${NVENC_TAG:-n12.2.72.0}"
+AMF_TAG="${AMF_TAG:-v1.4.35}"
+LIBVPL_TAG="${LIBVPL_TAG:-v2.14.0}"
+NVENC_URL="https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/${NVENC_TAG}.tar.gz"
+AMF_URL="https://github.com/GPUOpen-LibrariesAndSDKs/AMF/archive/refs/tags/${AMF_TAG}.tar.gz"
+LIBVPL_URL="https://github.com/intel/libvpl/archive/refs/tags/${LIBVPL_TAG}.tar.gz"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="$ROOT/vendor"
@@ -128,6 +135,12 @@ if is_windows || [ "$MINGW_CROSS" = 1 ] || [ "$MSVC" = 1 ]; then
   TARGET_WIN=1
   EXE_SUFFIX=".exe"
 fi
+WANT_NVENC=0
+WANT_AMF=0
+WANT_QSV=0
+WANT_MF=0
+WANT_D3D11=0
+WANT_VT=0
 if [ -z "$DO_UPX" ]; then
   # Windows / Linux ELF 可以 UPX. macOS Mach-O 不压, 免得 Gatekeeper 拒签.
   if [ "$TARGET_WIN" = 1 ]; then
@@ -196,6 +209,121 @@ wipe_build_tree() {
     -o -name '*.d' -o -name '*.def' -o -name '.depend' -o -name '*.exe' \
     -o -name 'ffmpeg' -o -name 'ffmpeg_g' -o -name 'x264' \
   \) -delete 2>/dev/null || true
+}
+
+# nv-codec-headers 只有头文件. 运行时由驱动提供 nvEncodeAPI.
+install_nvenc_headers() {
+  fetch_tar "$NVENC_URL" "$SRC/nv-codec-headers" "$SRC/nv-codec-headers.ok"
+  echo "==> install nv-codec-headers $NVENC_TAG"
+  make -C "$SRC/nv-codec-headers" PREFIX="$PREFIX" install
+}
+
+# AMF 只有头文件. 运行时 LoadLibrary 驱动里的 amfrt.
+install_amf_headers() {
+  fetch_tar "$AMF_URL" "$SRC/amf" "$SRC/amf.ok"
+  local inc="$SRC/amf/amf/public/include"
+  if [ ! -f "$inc/core/Version.h" ]; then
+    echo "AMF headers missing: $inc" >&2
+    exit 1
+  fi
+  echo "==> install AMF headers $AMF_TAG"
+  rm -rf "$PREFIX/include/AMF"
+  mkdir -p "$PREFIX/include/AMF"
+  cp -a "$inc/." "$PREFIX/include/AMF/"
+}
+
+# oneVPL dispatcher 静态链进 ffmpeg. 运行时再找 Intel 驱动里的实现.
+# 不改 libvpl 源码. MSVC 的上游 pkg-config 不写 ole32/advapi32, 装好后只改 .pc.
+install_libvpl() {
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo "need cmake on PATH" >&2
+    exit 1
+  fi
+  fetch_tar "$LIBVPL_URL" "$SRC/libvpl" "$SRC/libvpl.ok"
+  echo "==> build libvpl $LIBVPL_TAG"
+  rm -rf "$SRC/libvpl/build"
+  local src_arg="$SRC/libvpl"
+  local prefix_arg="$PREFIX"
+  local build_arg="$SRC/libvpl/build"
+  local -a gen=(-G "Unix Makefiles")
+  local -a msvc_cc=()
+  if [ "$MSVC" = 1 ]; then
+    src_arg="$(cygpath -w "$SRC/libvpl")"
+    prefix_arg="$(cygpath -w "$PREFIX")"
+    build_arg="$(cygpath -w "$SRC/libvpl/build")"
+    local cc
+    cc="$(command -v cl.exe || command -v cl)"
+    cc="$(cygpath -w "$cc")"
+    msvc_cc=(-DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cc")
+    if command -v ninja >/dev/null 2>&1 || command -v ninja.exe >/dev/null 2>&1; then
+      gen=(-G Ninja)
+    else
+      gen=(-G "NMake Makefiles")
+    fi
+  fi
+  cmake -S "$src_arg" -B "$build_arg" "${gen[@]}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DBUILD_TESTS=OFF \
+    -DBUILD_EXAMPLES=OFF \
+    -DINSTALL_DEV=ON \
+    -DINSTALL_LIB=ON \
+    -DCMAKE_INSTALL_PREFIX="$prefix_arg" \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -Duse_control_flow_guard=OFF \
+    -Duse_qspectre=OFF \
+    "${msvc_cc[@]}"
+  if [ "$MSVC" = 1 ]; then
+    cmake --build "$build_arg"
+    cmake --install "$build_arg"
+  else
+    cmake --build "$build_arg" -j"$JOBS"
+    cmake --install "$build_arg"
+  fi
+  rm -rf "$SRC/libvpl/build"
+  local pc="$PREFIX/lib/pkgconfig/vpl.pc"
+  if [ ! -f "$pc" ]; then
+    echo "vpl.pc missing: $pc" >&2
+    exit 1
+  fi
+  if [ "$MSVC" = 1 ]; then
+    local tmp="$pc.tmp"
+    awk '
+      /^Libs:/ { print "Libs: -L${libdir} -lvpl -ladvapi32 -lole32 -luuid -lgdi32 -lmsvcprt"; next }
+      { print }
+    ' "$pc" >"$tmp"
+    mv "$tmp" "$pc"
+  fi
+  echo "==> vpl $(${PKG_CONFIG:-pkg-config} --modversion vpl)"
+  "${PKG_CONFIG:-pkg-config}" --libs vpl
+}
+
+install_hw_deps() {
+  if [ "$TARGET_WIN" = 1 ]; then
+    WANT_NVENC=1
+    WANT_AMF=1
+    if [ "$MSVC" = 1 ]; then
+      WANT_QSV=1
+      WANT_MF=1
+      WANT_D3D11=1
+    fi
+  elif is_macos; then
+    WANT_VT=1
+  elif [ "$(uname -s)" = Linux ] && [ "$MINGW_CROSS" != 1 ]; then
+    WANT_NVENC=1
+    WANT_AMF=1
+    WANT_QSV=1
+  fi
+  echo "==> hw nvenc=$WANT_NVENC amf=$WANT_AMF qsv=$WANT_QSV mf=$WANT_MF d3d11=$WANT_D3D11 vt=$WANT_VT"
+  if [ "$WANT_NVENC" = 1 ]; then
+    install_nvenc_headers
+  fi
+  if [ "$WANT_AMF" = 1 ]; then
+    install_amf_headers
+  fi
+  if [ "$WANT_QSV" = 1 ]; then
+    install_libvpl
+  fi
 }
 
 fetch_tar "$X264_URL" "$SRC/x264" "$SRC/x264.ok"
@@ -267,13 +395,21 @@ if [ "$MSVC" = 1 ]; then
   echo "==> x264.pc prefix=$(sed -n 's/^prefix=//p' "$PREFIX/lib/pkgconfig/x264.pc" 2>/dev/null || true)"
 fi
 
+install_hw_deps
+
 echo "==> build ffmpeg $FFMPEG_TAG"
 cd "$SRC/ffmpeg"
 
 # 覆盖现有导入格式的边界: wav (含 24bit/float/adpcm), mp3, flac,
 # ogg (vorbis/opus/speex/flac), m4a/m4b/aac/mp4/mov (aac / HE-AAC / alac).
-# 视频只编码 AVC (libx264), 不解码任何视频.
-ENCODERS="libx264,aac,flac,pcm_s16le"
+# 视频只编码 AVC, 不解码任何视频. 硬件编码器按平台加, 运行时再探测驱动.
+ENCODERS="libx264"
+if [ "$WANT_QSV" = 1 ]; then ENCODERS="$ENCODERS,h264_qsv"; fi
+if [ "$WANT_NVENC" = 1 ]; then ENCODERS="$ENCODERS,h264_nvenc"; fi
+if [ "$WANT_AMF" = 1 ]; then ENCODERS="$ENCODERS,h264_amf"; fi
+if [ "$WANT_MF" = 1 ]; then ENCODERS="$ENCODERS,h264_mf"; fi
+if [ "$WANT_VT" = 1 ]; then ENCODERS="$ENCODERS,h264_videotoolbox"; fi
+ENCODERS="$ENCODERS,aac,flac,pcm_s16le"
 DECODERS="aac,aac_fixed,aac_latm,alac,mp3float,mp3,mp2,flac,vorbis,opus,speex"
 DECODERS="$DECODERS,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be"
 DECODERS="$DECODERS,pcm_f32le,pcm_f32be,pcm_f64le,pcm_u8,pcm_alaw,pcm_mulaw"
@@ -352,7 +488,7 @@ elif [ "$MINGW_CROSS" = 1 ]; then
 fi
 if is_macos; then
   ff_cfg+=(
-    --disable-videotoolbox
+    --enable-videotoolbox
     --disable-audiotoolbox
     --disable-appkit
     --extra-ldflags="-L$PREFIX/lib -Wl,-dead_strip"
@@ -377,6 +513,21 @@ if [ "$(uname -s)" = Linux ] && [ "$MINGW_CROSS" != 1 ]; then
   if command -v "${PKG_CONFIG:-pkg-config}" >/dev/null 2>&1 && "${PKG_CONFIG:-pkg-config}" --exists zlib; then
     ff_cfg+=(--enable-zlib)
   fi
+fi
+if [ "$WANT_NVENC" = 1 ]; then
+  ff_cfg+=(--enable-ffnvcodec --enable-nvenc)
+fi
+if [ "$WANT_AMF" = 1 ]; then
+  ff_cfg+=(--enable-amf)
+fi
+if [ "$WANT_QSV" = 1 ]; then
+  ff_cfg+=(--enable-libvpl)
+fi
+if [ "$WANT_MF" = 1 ]; then
+  ff_cfg+=(--enable-mediafoundation)
+fi
+if [ "$WANT_D3D11" = 1 ]; then
+  ff_cfg+=(--enable-d3d11va)
 fi
 
 ./configure "${ff_cfg[@]}"
@@ -420,6 +571,15 @@ fi
   echo
   echo "FFmpeg ${FFMPEG_TAG}  ${FFMPEG_URL}"
   echo "x264 ${X264_REF}  ${X264_URL}"
+  if [ "$WANT_NVENC" = 1 ]; then
+    echo "nv-codec-headers ${NVENC_TAG}  ${NVENC_URL}"
+  fi
+  if [ "$WANT_AMF" = 1 ]; then
+    echo "AMF ${AMF_TAG}  ${AMF_URL}"
+  fi
+  if [ "$WANT_QSV" = 1 ]; then
+    echo "libvpl ${LIBVPL_TAG}  ${LIBVPL_URL}"
+  fi
   if [ -n "$X264_REV" ]; then
     echo "x264 version: $X264_REV"
   fi
@@ -434,6 +594,16 @@ fi
   echo
   echo "===== x264 ====="
   cat "$SRC/x264/COPYING"
+  if [ -f "$SRC/libvpl/LICENSE" ]; then
+    echo
+    echo "===== libvpl (MIT) ====="
+    cat "$SRC/libvpl/LICENSE"
+  fi
+  if [ -f "$SRC/nv-codec-headers/LICENSE" ]; then
+    echo
+    echo "===== nv-codec-headers ====="
+    cat "$SRC/nv-codec-headers/LICENSE"
+  fi
 } >"$OUT_DIR/ffmpeg-COPYING.txt"
 
 if [ "$CROSS" = 1 ]; then
@@ -441,8 +611,22 @@ if [ "$CROSS" = 1 ]; then
 else
   echo "==> smoke test"
   "$OUT_BIN" -hide_banner -version | head -n 2
-  "$OUT_BIN" -hide_banner -encoders 2>/dev/null | grep -E "libx264|aac|flac" || true
+  enc_list="$("$OUT_BIN" -hide_banner -encoders 2>/dev/null || true)"
+  printf '%s\n' "$enc_list" | grep -E "libx264|aac|flac" || true
   "$OUT_BIN" -hide_banner -decoders 2>/dev/null | grep -E "aac|mp3|flac|vorbis|alac|opus" || true
+  need_encoder() {
+    if ! printf '%s\n' "$enc_list" | grep -F -q " $1"; then
+      echo "missing encoder: $1" >&2
+      printf '%s\n' "$enc_list" >&2
+      exit 1
+    fi
+  }
+  need_encoder libx264
+  if [ "$WANT_QSV" = 1 ]; then need_encoder h264_qsv; fi
+  if [ "$WANT_NVENC" = 1 ]; then need_encoder h264_nvenc; fi
+  if [ "$WANT_AMF" = 1 ]; then need_encoder h264_amf; fi
+  if [ "$WANT_MF" = 1 ]; then need_encoder h264_mf; fi
+  if [ "$WANT_VT" = 1 ]; then need_encoder h264_videotoolbox; fi
   null_out="/dev/null"
   if is_windows; then
     null_out="NUL"
@@ -453,6 +637,13 @@ else
     -f rawvideo -pix_fmt rgba -s 64x64 -framerate 2 -i - \
     -frames:v 2 -vf format=yuv420p -c:v libx264 -preset ultrafast -an -f mp4 "$null_out" \
     </dev/zero
+  if [ "$WANT_VT" = 1 ]; then
+    "$OUT_BIN" -y -hide_banner -loglevel error \
+      -f rawvideo -pix_fmt rgba -s 64x64 -framerate 2 -i - \
+      -frames:v 2 -vf format=yuv420p -c:v h264_videotoolbox -profile:v high -q:v 70 \
+      -an -f mp4 "$null_out" \
+      </dev/zero
+  fi
 fi
 
 bytes="$(wc -c <"$OUT_BIN" | tr -d ' ')"
