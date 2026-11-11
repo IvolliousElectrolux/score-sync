@@ -268,6 +268,10 @@ install_libvpl() {
       gen=(-G "NMake Makefiles")
     fi
   fi
+  if [ "$MSVC" = 1 ]; then
+    # /MT 否则会被 MSYS 收成 D:/.../msys64/MT, cl 把它当成源文件.
+    export MSYS2_ARG_CONV_EXCL='*'
+  fi
   cmake -S "$src_arg" -B "$build_arg" "${gen[@]}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
@@ -286,6 +290,9 @@ install_libvpl() {
   else
     cmake --build "$build_arg" -j"$JOBS"
     cmake --install "$build_arg"
+  fi
+  if [ "$MSVC" = 1 ]; then
+    unset MSYS2_ARG_CONV_EXCL
   fi
   rm -rf "$SRC/libvpl/build"
   local pc="$PREFIX/lib/pkgconfig/vpl.pc"
