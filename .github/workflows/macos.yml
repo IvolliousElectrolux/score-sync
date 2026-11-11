@@ -1,5 +1,5 @@
 # macOS 发行包: 在 GitHub 的 Mac runner 上编译 (维护者没有本地 Mac).
-# 两个架构都在 macos-14 上编 (arm64 本机, x86_64 交叉), 避开排队极久的 macos-13.
+# 两个架构都在 macos-15 上编 (arm64 本机, x86_64 交叉). macos-14 已于 2026-11-02 退役.
 # ffmpeg 不在本 workflow 里编, 从 sidecars 拉 ffmpeg.yml 编好的裁剪版.
 # 触发: 推送 v* 标签, 或 Actions 页手动 workflow_dispatch (可填已有 tag 把 zip 挂上去).
 
@@ -31,7 +31,7 @@ jobs:
           - target: x86_64-apple-darwin
             asset: macos-x64
             pdfium: mac-x64
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 

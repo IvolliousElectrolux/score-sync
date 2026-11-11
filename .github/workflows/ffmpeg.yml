@@ -2,7 +2,7 @@
 # Windows: windows-2025 + MSVC (cl / --toolchain=msvc, 成品无 msys dll).
 #   MSYS2 只提供能认 POSIX 路径的 GNU make; 编译器仍是 cl.
 #   配方参照 fasterthanlime gist: CC=cl 编 x264, ffmpeg --toolchain=msvc.
-# macOS 两个架构在 macos-14 (同配方, 不 UPX, 避免 Mach-O / Gatekeeper).
+# macOS 两个架构在 macos-15 (同配方, 不 UPX, 避免 Mach-O / Gatekeeper).
 # Linux x64 / arm64 同配方, UPX; 即使还没有 Linux 本体也先挂 sidecars.
 # 成品 cache 命中则跳过编译; 源码 tarball 另 cache. 成功后挂到 sidecars release.
 
@@ -36,12 +36,12 @@ jobs:
             target: msvc
             asset: ffmpeg-windows-x64.exe
           - id: macos-arm64
-            os: macos-14
+            os: macos-15
             arch: arm64
             target: native
             asset: ffmpeg-macos-arm64
           - id: macos-x64
-            os: macos-14
+            os: macos-15
             arch: x86_64
             target: native
             asset: ffmpeg-macos-x64

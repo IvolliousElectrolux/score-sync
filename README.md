@@ -101,7 +101,7 @@ cargo run -r -- path\to\project.staffcrop
 发行包由 Actions 打, 不在本机编完再上传. 推送 `v*` 标签, 或在 Actions 页手动跑
 (可填已有标签把 zip 挂上去):
 
-- `.github/workflows/macos.yml`: macos-14 上用 `release` 编 arm64 与 x64 (x64 交叉编译),
+- `.github/workflows/macos.yml`: macos-15 上用 `release` 编 arm64 与 x64 (x64 交叉编译),
   上传 `score_sync-<ver>-macos-arm64.zip` / `macos-x64.zip`
 - `.github/workflows/windows.yml`: windows-2025 上用 `release-max` 编 x64, `upx --best --lzma`
   后再上传 `score_sync-<ver>-windows-x64.zip`
