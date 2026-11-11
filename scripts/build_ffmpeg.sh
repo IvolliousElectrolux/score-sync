@@ -288,8 +288,12 @@ install_libvpl() {
   fi
   if [ "$MSVC" = 1 ]; then
     local tmp="$pc.tmp"
-    awk '
-      /^Libs:/ { print "Libs: -L${libdir} -lvpl -ladvapi32 -lole32 -luuid -lgdi32 -lmsvcprt"; next }
+    local prefix_mix
+    prefix_mix="$(cygpath -m "$PREFIX")"
+    # pkg-config 默认吐出 /d/a 这种 MSYS 路径, cl / link 不认, 探测 mfxvideo.h 会失败.
+    awk -v p="$prefix_mix" '
+      /^Cflags:/ { print "Cflags: -I" p "/include -I" p "/include/vpl"; next }
+      /^Libs:/ { print "Libs: -L" p "/lib -lvpl -ladvapi32 -lole32 -luuid -lgdi32 -lmsvcprt"; next }
       { print }
     ' "$pc" >"$tmp"
     mv "$tmp" "$pc"
@@ -466,7 +470,7 @@ if [ "$MSVC" = 1 ]; then
     --arch=x86_64
     --enable-w32threads
     --pkg-config="${PKG_CONFIG:-pkg-config}"
-    --extra-cflags="//I${PREFIX_WIN}\\include"
+    --extra-cflags="//I${PREFIX_WIN}\\include //I${PREFIX_WIN}\\include\\vpl"
     --extra-ldflags="//LIBPATH:${PREFIX_WIN}\\lib"
   )
 elif [ "$MINGW_CROSS" = 1 ]; then
@@ -530,7 +534,15 @@ if [ "$WANT_D3D11" = 1 ]; then
   ff_cfg+=(--enable-d3d11va)
 fi
 
+set +e
 ./configure "${ff_cfg[@]}"
+cfg_rc=$?
+set -e
+if [ "$cfg_rc" != 0 ]; then
+  echo "==> ffbuild/config.log (tail)"
+  tail -n 120 ffbuild/config.log || true
+  exit "$cfg_rc"
+fi
 make -j"$JOBS"
 make install
 
