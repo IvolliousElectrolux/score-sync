@@ -13,6 +13,9 @@
 //! 一两秒), 这段时间里声音已经在走、计时和播放头还停着. 导出按时间轴对准文件,
 //! 预览里标的切点就会整段偏早. 所以出声前只同步打开眼前这一小段, sink 先暂停,
 //! 全部 append 完再 `play` 并启动墙钟; 更后面的段落在后台逐段准备好再排进队列.
+//!
+//! `OutputStream::try_default` 会绑死打开那一刻的系统默认输出设备. 播放中若
+//! 默认设备变了 (插拔耳机, 切换扬声器), 重开流并从当前时刻继续.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -26,6 +29,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::decoder::Mp4Type;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 
@@ -49,6 +53,9 @@ pub struct AudioEngine {
     pending: Vec<SliceJob>,
     prep_gen: u64,
     prep_rx: Option<Receiver<PrepMsg>>,
+    /// 当前流对应的系统默认输出设备名. 读不到名字时为 None.
+    output_device: Option<String>,
+    output_device_checked: Instant,
 }
 
 impl AudioEngine {
@@ -67,6 +74,8 @@ impl AudioEngine {
                 pending: Vec::new(),
                 prep_gen: 0,
                 prep_rx: None,
+                output_device: default_output_key(),
+                output_device_checked: Instant::now(),
             },
             Err(_) => Self {
                 _stream: None,
@@ -81,6 +90,8 @@ impl AudioEngine {
                 pending: Vec::new(),
                 prep_gen: 0,
                 prep_rx: None,
+                output_device: None,
+                output_device_checked: Instant::now(),
             },
         }
     }
@@ -187,6 +198,12 @@ impl AudioEngine {
         if !self.playing || self.scrubbing {
             return;
         }
+        if self.output_device_changed(false) {
+            let t = self.current_time();
+            self.reopen_default_stream();
+            self.begin_playback_at(t);
+            return;
+        }
         let Some(rx) = self.prep_rx.take() else {
             return;
         };
@@ -225,6 +242,9 @@ impl AudioEngine {
     }
 
     fn restart_from(&mut self, t: f64) {
+        if self.output_device_changed(true) {
+            self.reopen_default_stream();
+        }
         self.cancel_prep();
         if let Some(sink) = self.sink.take() {
             sink.stop();
@@ -256,6 +276,37 @@ impl AudioEngine {
         sink.play();
         self.sink = Some(sink);
         self.spawn_next_prep();
+    }
+
+    /// `force` 用于播放/寻址: 没有流时也再试一次. 播放中的轮询只看设备名,
+    /// 打开失败不会每拍重开, 避免播放头被反复拨回.
+    fn output_device_changed(&mut self, force: bool) -> bool {
+        if !force && self.output_device_checked.elapsed() < OUTPUT_DEVICE_POLL {
+            return false;
+        }
+        self.output_device_checked = Instant::now();
+        let Some(key) = default_output_key() else {
+            return false;
+        };
+        if self.output_device.as_deref() != Some(key.as_str()) {
+            return true;
+        }
+        force && self.handle.is_none()
+    }
+
+    fn reopen_default_stream(&mut self) {
+        let key = default_output_key();
+        self.stop_output();
+        self._stream = None;
+        self.handle = None;
+        self.output_device = key;
+        if let Ok((stream, handle)) = OutputStream::try_default() {
+            self._stream = Some(stream);
+            self.handle = Some(handle);
+            if let Some(key) = default_output_key() {
+                self.output_device = Some(key);
+            }
+        }
     }
 
     fn stop_output(&mut self) {
@@ -299,10 +350,19 @@ impl Default for AudioEngine {
     }
 }
 
+/// 播放中查看系统默认输出设备的间隔.
+const OUTPUT_DEVICE_POLL: Duration = Duration::from_millis(500);
+
 /// 出声前同步打开的音频至少盖住这么久, 给下一段 ffmpeg 启动留余量.
 const SYNC_QUEUE_SECS: f64 = 1.5;
 /// 片段再短, 出声前也不要同步拉起太多路 ffmpeg.
 const SYNC_QUEUE_MAX: usize = 4;
+
+fn default_output_key() -> Option<String> {
+    let host = rodio::cpal::default_host();
+    let device = host.default_output_device()?;
+    device.name().ok().filter(|name| !name.is_empty())
+}
 
 struct SliceJob {
     index: usize,

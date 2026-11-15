@@ -13,6 +13,9 @@ Thumbs.db
 # 找不到再退回系统 PATH.
 /vendor/
 /transition_review/
+
+# 从 GitHub Release 解压到这里, 本机把其中的程序登记为默认打开方式.
+/app/
 ffmpeg.exe
 pdfium.dll
 

@@ -77,19 +77,22 @@ impl PhotoEditApp {
             _ => None,
         };
         let show_handles = self.mode == ToolMode::Move;
-        let show_stamp = self.mode == ToolMode::Clone && self.clone_alt;
+        // 与蒙版滴管一致: 取色时用系统十字, 不要沿用画笔的隐藏光标和笔圈.
+        let color_pick =
+            self.eyedropper_armed || (self.mode == ToolMode::Paint && self.clone_alt);
+        let show_stamp = self.mode == ToolMode::Clone && self.clone_alt && !color_pick;
         let paint_fill = if self.mode == ToolMode::Paint {
             Some(self.paint_color)
         } else {
             None
         };
-        let brush_cursor = if self.mode.uses_brush() && !show_stamp {
+        let brush_cursor = if self.mode.uses_brush() && !show_stamp && !color_pick {
             self.brush_cursor
         } else {
             None
         };
         let stamp_img = if show_stamp { self.brush_cursor } else { None };
-        let clone_mark = if self.mode == ToolMode::Clone && !show_stamp {
+        let clone_mark = if self.mode == ToolMode::Clone && !show_stamp && !color_pick {
             match (self.clone_offset, self.brush_cursor) {
                 (Some((ox, oy)), Some((bx, by))) => Some((bx + ox as f32, by + oy as f32)),
                 _ => None,
@@ -122,7 +125,9 @@ impl PhotoEditApp {
         });
         let show_rotate_cur =
             self.hover_rotate || matches!(self.drag, Some(DragKind::LayerRotate { .. }));
-        let live_cursor = if show_rotate_cur || show_stamp {
+        let live_cursor = if color_pick {
+            CursorStyle::Crosshair
+        } else if show_rotate_cur || show_stamp {
             CursorStyle::None
         } else {
             self.live_cursor()
