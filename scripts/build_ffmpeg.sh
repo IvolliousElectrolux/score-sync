@@ -425,13 +425,20 @@ cmake_static() {
   if [ "$MSVC" = 1 ]; then
     cmake_args+=("${msvc_cc[@]}")
   fi
-  # macos-15 的 x86_64 任务跑在 Apple Silicon 上. 不写架构的话 cmake 会编出 arm64 静态库.
+  # macos-15 的 x86_64 任务跑在 Apple Silicon 上. 只写 -arch 的话, 编译器是 x86_64,
+  # cmake 仍按宿主 arm64 选源文件, SVT 的 cpuinfo 就会缺 x86 那份初始化.
   if [ "$MSVC" != 1 ] && is_macos; then
     cmake_args+=(
       -DCMAKE_OSX_ARCHITECTURES="$ARCH"
       "-DCMAKE_C_FLAGS=-arch $ARCH"
       "-DCMAKE_CXX_FLAGS=-arch $ARCH"
     )
+    if [ "$CROSS" = 1 ]; then
+      cmake_args+=(
+        -DCMAKE_SYSTEM_NAME=Darwin
+        -DCMAKE_SYSTEM_PROCESSOR="$ARCH"
+      )
+    fi
   fi
   cmake_args+=("$@")
   cmake "${cmake_args[@]}"
