@@ -425,6 +425,14 @@ cmake_static() {
   if [ "$MSVC" = 1 ]; then
     cmake_args+=("${msvc_cc[@]}")
   fi
+  # macos-15 的 x86_64 任务跑在 Apple Silicon 上. 不写架构的话 cmake 会编出 arm64 静态库.
+  if [ "$MSVC" != 1 ] && is_macos; then
+    cmake_args+=(
+      -DCMAKE_OSX_ARCHITECTURES="$ARCH"
+      "-DCMAKE_C_FLAGS=-arch $ARCH"
+      "-DCMAKE_CXX_FLAGS=-arch $ARCH"
+    )
+  fi
   cmake_args+=("$@")
   cmake "${cmake_args[@]}"
   if [ "$MSVC" = 1 ]; then
@@ -462,6 +470,12 @@ install_x265() {
     echo "==> build x265 $X265_TAG"
     relax_x265_cmake
     rm -rf "$SRC/x265/build"
+    # Apple Clang 不走 x265 那条 GCC 汇编规则, 强行打开会引用没编进去的符号.
+    # 静止页只编一帧, 关掉汇编不影响画质. Linux / Windows 仍用 nasm.
+    x265_asm=ON
+    if is_macos; then
+      x265_asm=OFF
+    fi
     cmake_static "$SRC/x265/source" "$SRC/x265/build" \
       -DENABLE_SHARED=OFF \
       -DENABLE_CLI=OFF \
@@ -469,7 +483,7 @@ install_x265() {
       -DHIGH_BIT_DEPTH=OFF \
       -DENABLE_HDR10_PLUS=OFF \
       -DENABLE_LIBNUMA=OFF \
-      -DENABLE_ASSEMBLY=ON
+      -DENABLE_ASSEMBLY="$x265_asm"
     rm -rf "$SRC/x265/build"
   fi
   rewrite_msvc_pc "$PREFIX/lib/pkgconfig/x265.pc" x265
