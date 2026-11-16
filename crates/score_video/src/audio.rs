@@ -1021,10 +1021,11 @@ fn open_flac_slice(path: &Path, start: f64, duration: f64) -> Option<FlacSource>
         let Some(chunk) = decoder.pull() else {
             break;
         };
-        let take = chunk.len().min(remaining as usize);
+        let n = chunk.len();
+        let take = n.min(remaining as usize);
         primed.extend(chunk.into_iter().take(take));
         remaining -= take as u64;
-        if take < chunk.len() {
+        if take < n {
             break;
         }
     }

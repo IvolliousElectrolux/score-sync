@@ -14,7 +14,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, Once, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -707,7 +707,7 @@ struct FrameCursor<'a> {
 
 impl FrameCursor<'_> {
     fn fill_to(&mut self, abs_end: u64, done: &AtomicU64) -> bool {
-        while self.base + self.buf.len() as u64 < abs_end && !self.eof {
+        while (self.base + self.buf.len() as u64) < abs_end && !self.eof {
             let mut tmp = [0u8; 64 * 1024];
             match self.reader.read(&mut tmp) {
                 Ok(0) => self.eof = true,
