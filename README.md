@@ -161,20 +161,20 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 ## 版本摘要
 
 ### 1.9.5
-- 视频: 导出的静止页和转场都走本机硬件编码器. 静止页仍只编一帧, 再把这一帧撑成这一页的时长. 硬件失败则整段改回同编码的软件编码器
+- 视频: 导出的静止页和转场都走本机硬件编码器. 静止页仍只编一帧, 再把这一帧撑成这一页的时长. 硬件失败则整段改回同编码的软件编码器. 编码画面显示剩余时间. 感谢 [喵喵](https://github.com/shuanglong2)
 
 ### 1.9.4
-- 视频: 导出可以选择 AVC, HEVC, AV1. 只有这台电脑探测通过的硬件编码器才会出现; 没有 AV1 硬件就不会列出 AV1. 静止页仍只编一帧
+- 视频: 导出可以选择 AVC, HEVC, AV1. 只有这台电脑探测通过的硬件编码器才会出现; 没有 AV1 硬件就不会列出 AV1. 静止页仍只编一帧. 感谢 [喵喵](https://github.com/shuanglong2)
 
 ### 1.9.3
 - 视频: 导出不再把整池谱页展开留在内存里, 同时只留当前页和转场要用的另一页. 静止页只编码一帧, 再按这一页的帧数撑住时长; 淡入淡出, 刷入和交叠仍逐帧. 裁剪版 ffmpeg 带上 `concat`, 用来把这些段复制拼起来. 感谢 [喵喵](https://github.com/shuanglong2) 的优化思路
 
 ### 1.9.2
-- 导入: 锁定宽高比时, 内容框裁完后把每页宽度拉到目标宽, 高度随该页比例. 不锁定则拉到目标宽高. 同组里内容框更窄的页不再短一截
+- 导入: 锁定宽高比时, 内容框裁完后把每页宽度拉到目标宽, 高度随该页比例. 不锁定则拉到目标宽高. 同组里内容框更窄的页不再短一截. 感谢 [喵喵](https://github.com/shuanglong2)
 
 ### 1.9.1
-- 视频: 播放中若系统默认输出设备变了 (插拔耳机, 切换扬声器), 预览会改到新设备并从当前时刻继续. 暂停时换设备, 下次播放或拖动播放头也会跟上
-- 修图: 调色盘滴管, 以及画笔按住 Alt 取色, 光标改为十字, 与蒙版取色一致
+- 视频: 播放中若系统默认输出设备变了 (插拔耳机, 切换扬声器), 预览会改到新设备并从当前时刻继续. 暂停时换设备, 下次播放或拖动播放头也会跟上. 感谢 [喵喵](https://github.com/shuanglong2)
+- 修图: 调色盘滴管, 以及画笔按住 Alt 取色, 光标改为十字, 与蒙版取色一致. 感谢 [喵喵](https://github.com/shuanglong2)
 
 ### 1.9.0
 - 视频: 导出按本机显卡编码. Intel 核显走 Quick Sync, NVIDIA / AMD 走各自的硬件编码器, macOS 走 VideoToolbox. 探测或编码失败退回 libx264. 裁剪版 ffmpeg 已带上这些编码器. 感谢 [喵喵](https://github.com/shuanglong2) 提出这个方案
@@ -297,8 +297,8 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
 - 视频: 导入 mp3/flac/ogg 后预览又能出声. 裁剪 sidecar 没有 `-f s16le` (configure 名是 `pcm_s16le`), 预览管道改走 `-f wav`
 
 ### 1.4.11
-- 导出: 随包 ffmpeg 换成 Actions 裁剪的 7.1.1 sidecar (Windows MSVC / macOS arm64+x64 / Linux x64+arm64), 替代原先约百兆的完整构建; 编码仍是 AVC/libx264 + AAC/FLAC, 导出耗时与完整版相当. 主程序 MIT, sidecar 因 libx264 为 GPL, 只当外部进程调用
-- Windows 本体 `score_sync.exe` 发包时 UPX
+- 导出: 随包 ffmpeg 换成 Actions 裁剪的 7.1.1 sidecar (Windows MSVC / macOS arm64+x64 / Linux x64+arm64), 替代原先约百兆的完整构建; 编码仍是 AVC/libx264 + AAC/FLAC, 导出耗时与完整版相当. 主程序 MIT, sidecar 因 libx264 为 GPL, 只当外部进程调用. 感谢 [喵喵](https://github.com/shuanglong2)
+- Windows 本体 `score_sync.exe` 发包时 UPX. 感谢 [喵喵](https://github.com/shuanglong2)
 
 ### 1.4.10
 - 蒙版: 悬停分块左右边可拖裁, 手感和上下边一样; 向内裁掉的空位用谱纸色填 (导出保留), 向外超出仍按原块左右截掉

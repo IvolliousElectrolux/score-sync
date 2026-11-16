@@ -16,7 +16,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use image::RgbaImage;
@@ -810,7 +810,21 @@ fn encode_raw_video(
             .ok_or_else(|| "ffmpeg stdin 不可写".to_string())?;
         let mut painter = FramePainter::new(pool, w, h, Some(layout), opts.fade_bg_rgb);
         let mut written = 0u64;
-        let mut last_progress = Instant::now();
+        let started = Instant::now();
+        let mut last_progress = Instant::now() - Duration::from_secs(1);
+        let mut report = |written: u64| {
+            if last_progress.elapsed() < Duration::from_millis(200) {
+                return;
+            }
+            last_progress = Instant::now();
+            let head = format!("编码 {written}/{n_frames} 帧 ({label})");
+            let _ = tx.send_blocking(ExportMsg::Progress(with_remaining(
+                &head,
+                started.elapsed().as_secs_f64(),
+                written,
+                n_frames,
+            )));
+        };
         for run in runs {
             if run.fade.is_none() {
                 painter.fill_still(&run.gid)?;
@@ -819,6 +833,7 @@ fn encode_raw_video(
                         .write_all(&painter.frame)
                         .map_err(|e| format!("写入帧失败: {e}"))?;
                     written += 1;
+                    report(written);
                 }
             } else {
                 let base = written;
@@ -828,13 +843,8 @@ fn encode_raw_video(
                         .write_all(&painter.frame)
                         .map_err(|e| format!("写入帧失败: {e}"))?;
                     written += 1;
+                    report(written);
                 }
-            }
-            if last_progress.elapsed() >= Duration::from_millis(200) {
-                last_progress = Instant::now();
-                let _ = tx.send_blocking(ExportMsg::Progress(format!(
-                    "编码 {written}/{n_frames} 帧 ({label})..."
-                )));
             }
         }
         if written != n_frames {
@@ -1123,6 +1133,8 @@ fn held_hw_segment_args(
         os("-hide_banner"),
         os("-loglevel"),
         os("error"),
+        os("-progress"),
+        os("pipe:2"),
         os("-framerate"),
         os(fps.max(1).to_string()),
         os("-f"),
@@ -1171,6 +1183,8 @@ fn held_segment_args(
         os("-hide_banner"),
         os("-loglevel"),
         os("error"),
+        os("-progress"),
+        os("pipe:2"),
         os("-framerate"),
         os(segment_rate(fps, frames, dynamic)),
         os("-f"),
@@ -1238,9 +1252,132 @@ fn held_segment_args(
     args
 }
 
-fn ffmpeg_with_stdin<W>(args: &[std::ffi::OsString], step: &str, write: W) -> Result<(), String>
+/// 已完成 `done` 张画面, 用掉 `elapsed_secs` 秒时, 剩下的还要多久.
+fn eta_seconds(elapsed_secs: f64, done: u64, total: u64) -> Option<f64> {
+    if done == 0 || total <= done || !(elapsed_secs > 0.0) {
+        return None;
+    }
+    Some(elapsed_secs * (total - done) as f64 / done as f64)
+}
+
+fn format_eta(seconds: f64) -> String {
+    let whole = seconds.round().max(1.0) as u64;
+    let hours = whole / 3600;
+    let mins = (whole % 3600) / 60;
+    let secs = whole % 60;
+    if hours > 0 {
+        if mins == 0 {
+            format!("{hours} 小时")
+        } else {
+            format!("{hours} 小时 {mins} 分")
+        }
+    } else if mins > 0 {
+        if secs == 0 {
+            format!("{mins} 分")
+        } else {
+            format!("{mins} 分 {secs} 秒")
+        }
+    } else {
+        format!("{secs} 秒")
+    }
+}
+
+fn with_remaining(head: &str, elapsed_secs: f64, done: u64, total: u64) -> String {
+    match eta_seconds(elapsed_secs, done, total) {
+        Some(seconds) if seconds < 1.0 => format!("{head}, 剩余不到 1 秒..."),
+        Some(seconds) => format!("{head}, 剩余 {}...", format_eta(seconds)),
+        None => format!("{head}..."),
+    }
+}
+
+fn progress_frame(text: &str) -> Option<u64> {
+    let rest = text.trim().strip_prefix("frame=")?.trim();
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+fn is_progress_noise(text: &str) -> bool {
+    let text = text.trim();
+    progress_frame(text).is_some()
+        || text.starts_with("fps=")
+        || text.starts_with("stream_")
+        || text.starts_with("bitrate=")
+        || text.starts_with("total_size=")
+        || text.starts_with("out_time")
+        || text.starts_with("dup_frames=")
+        || text.starts_with("drop_frames=")
+        || text.starts_with("speed=")
+        || text == "progress=continue"
+        || text == "progress=end"
+}
+
+struct PictureClock {
+    start: Instant,
+    total: u64,
+    done: u64,
+    last_sent: Instant,
+}
+
+impl PictureClock {
+    fn new(total: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            start: now,
+            total,
+            done: 0,
+            last_sent: now - Duration::from_secs(1),
+        }
+    }
+}
+
+fn report_encoded(
+    tx: &async_channel::Sender<ExportMsg>,
+    clock: &Mutex<PictureClock>,
+    base: u64,
+    pictures: u64,
+    frame: u64,
+    segment_no: usize,
+    segments: usize,
+    label: Option<&str>,
+    force: bool,
+) {
+    let Ok(mut clock) = clock.lock() else {
+        return;
+    };
+    let done = base.saturating_add(frame.min(pictures));
+    if done > clock.done {
+        clock.done = done.min(clock.total);
+    } else if !force {
+        return;
+    }
+    if !force && clock.last_sent.elapsed() < Duration::from_millis(200) {
+        return;
+    }
+    clock.last_sent = Instant::now();
+    let head = match label {
+        Some(label) => format!("编码画面 {segment_no}/{segments} ({label})"),
+        None => format!("编码画面 {segment_no}/{segments}"),
+    };
+    let line = with_remaining(
+        &head,
+        clock.start.elapsed().as_secs_f64(),
+        clock.done,
+        clock.total,
+    );
+    let _ = tx.send_blocking(ExportMsg::Progress(line));
+}
+
+fn ffmpeg_with_stdin<W, F>(
+    args: &[std::ffi::OsString],
+    step: &str,
+    on_frame: F,
+    write: W,
+) -> Result<(), String>
 where
     W: FnOnce(&mut ChildStdin) -> Result<(), String>,
+    F: Fn(u64) + Send + 'static,
 {
     let mut cmd = Command::new(ffmpeg_path());
     cmd.args(args)
@@ -1261,8 +1398,9 @@ where
     })?;
     let stderr = child.stderr.take();
     let tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let reader = stderr.map(|stderr| {
-        let tail = Arc::clone(&tail);
+    let reader_tail = Arc::clone(&tail);
+    let reader = stderr.map(move |stderr| {
+        let tail = reader_tail;
         std::thread::spawn(move || {
             let mut reader = std::io::BufReader::new(stderr);
             let mut buf = Vec::new();
@@ -1278,6 +1416,13 @@ where
                 let text = String::from_utf8_lossy(&buf).trim().to_string();
                 buf.clear();
                 if text.is_empty() {
+                    continue;
+                }
+                if let Some(frame) = progress_frame(&text) {
+                    on_frame(frame);
+                    continue;
+                }
+                if is_progress_noise(&text) {
                     continue;
                 }
                 if let Ok(mut guard) = tail.lock() {
@@ -1412,9 +1557,15 @@ fn encode_held_hw(
     let w = even_dim(opts.width);
     let h = even_dim(opts.height);
     let label = encoder.label(opts.codec);
+    let total_pictures: u64 = runs
+        .iter()
+        .map(|run| segment_pictures(run.frames, run.fade.is_some()))
+        .sum();
+    let clock = Arc::new(Mutex::new(PictureClock::new(total_pictures)));
     let mut painter = FramePainter::new(pool, w, h, Some(encoder.stored_yuv()), opts.fade_bg_rgb);
     let mut script = String::from("ffconcat version 1.0\n");
     let mut cursor = 0u64;
+    let mut encoded = 0u64;
     for (i, run) in runs.iter().enumerate() {
         let seg = work.join(format!("s{i:05}.mp4"));
         let dynamic = run.fade.is_some();
@@ -1422,19 +1573,47 @@ fn encode_held_hw(
             opts.codec, encoder, fps, w, h, run.frames, dynamic, opts.crf, &seg,
         );
         let base = cursor;
-        ffmpeg_with_stdin(&args, "按页编码", |stdin| {
+        let pictures = segment_pictures(run.frames, dynamic);
+        let encoded_base = encoded;
+        let segment_no = i + 1;
+        let segments = runs.len();
+        let watch = {
+            let tx = tx.clone();
+            let clock = Arc::clone(&clock);
+            move |frame: u64| {
+                report_encoded(
+                    &tx,
+                    &clock,
+                    encoded_base,
+                    pictures,
+                    frame,
+                    segment_no,
+                    segments,
+                    Some(label),
+                    false,
+                );
+            }
+        };
+        ffmpeg_with_stdin(&args, "按页编码", watch, |stdin| {
             write_run_frames(&mut painter, timeline, run, base, fps, dynamic, stdin)
         })?;
         if !dynamic {
             stretch_still_mp4(&seg, run.frames, fps)?;
         }
+        report_encoded(
+            tx,
+            &clock,
+            encoded_base,
+            pictures,
+            pictures,
+            segment_no,
+            segments,
+            Some(label),
+            true,
+        );
         script.push_str(&format!("file '{}'\n", ffconcat_path(&seg)));
         cursor += run.frames;
-        let _ = tx.send_blocking(ExportMsg::Progress(format!(
-            "编码画面 {}/{} ({label})...",
-            i + 1,
-            runs.len()
-        )));
+        encoded += pictures;
     }
     let list = work.join("segments.txt");
     std::fs::write(&list, script).map_err(|e| format!("写出拼接列表失败: {e}"))?;
@@ -1453,24 +1632,58 @@ fn encode_held_software(
     let fps = opts.fps.max(1);
     let w = even_dim(opts.width);
     let h = even_dim(opts.height);
+    let total_pictures: u64 = runs
+        .iter()
+        .map(|run| segment_pictures(run.frames, run.fade.is_some()))
+        .sum();
+    let clock = Arc::new(Mutex::new(PictureClock::new(total_pictures)));
     let mut painter = FramePainter::new(pool, w, h, Some(Yuv420::I420), opts.fade_bg_rgb);
     let mut script = String::from("ffconcat version 1.0\n");
     let mut cursor = 0u64;
+    let mut encoded = 0u64;
     for (i, run) in runs.iter().enumerate() {
         let seg = work.join(format!("s{i:05}.mp4"));
         let dynamic = run.fade.is_some();
         let args = held_segment_args(opts.codec, fps, w, h, run.frames, dynamic, opts.crf, &seg);
         let base = cursor;
-        ffmpeg_with_stdin(&args, "按页编码", |stdin| {
+        let pictures = segment_pictures(run.frames, dynamic);
+        let encoded_base = encoded;
+        let segment_no = i + 1;
+        let segments = runs.len();
+        let watch = {
+            let tx = tx.clone();
+            let clock = Arc::clone(&clock);
+            move |frame: u64| {
+                report_encoded(
+                    &tx,
+                    &clock,
+                    encoded_base,
+                    pictures,
+                    frame,
+                    segment_no,
+                    segments,
+                    None,
+                    false,
+                );
+            }
+        };
+        ffmpeg_with_stdin(&args, "按页编码", watch, |stdin| {
             write_run_frames(&mut painter, timeline, run, base, fps, dynamic, stdin)
         })?;
+        report_encoded(
+            tx,
+            &clock,
+            encoded_base,
+            pictures,
+            pictures,
+            segment_no,
+            segments,
+            None,
+            true,
+        );
         script.push_str(&format!("file '{}'\n", ffconcat_path(&seg)));
         cursor += run.frames;
-        let _ = tx.send_blocking(ExportMsg::Progress(format!(
-            "编码画面 {}/{}...",
-            i + 1,
-            runs.len()
-        )));
+        encoded += pictures;
     }
     let list = work.join("segments.txt");
     std::fs::write(&list, script).map_err(|e| format!("写出拼接列表失败: {e}"))?;
@@ -1658,6 +1871,25 @@ mod tests {
         assert_eq!(movie_duration_ticks(600, 1000, 60), Some(10000));
         assert_eq!(movie_duration_ticks(17, 1000, 30), Some(567));
         assert_eq!(movie_duration_ticks(1, 0, 60), None);
+    }
+
+    #[test]
+    fn encode_eta_scales_with_pictures_left() {
+        assert_eq!(eta_seconds(20.0, 10, 40), Some(60.0));
+        assert_eq!(eta_seconds(1.0, 0, 10), None);
+        assert_eq!(eta_seconds(5.0, 10, 10), None);
+        assert_eq!(format_eta(5.2), "5 秒");
+        assert_eq!(format_eta(65.0), "1 分 5 秒");
+        assert_eq!(format_eta(60.0), "1 分");
+        assert_eq!(format_eta(90.0), "1 分 30 秒");
+        assert_eq!(format_eta(3720.0), "1 小时 2 分");
+        assert_eq!(format_eta(3600.0), "1 小时");
+        assert_eq!(with_remaining("编码画面 1/4", 20.0, 10, 40), "编码画面 1/4, 剩余 1 分...");
+        assert_eq!(with_remaining("编码画面 1/4", 0.2, 1, 4), "编码画面 1/4, 剩余不到 1 秒...");
+        assert_eq!(with_remaining("编码画面 1/4", 0.0, 0, 4), "编码画面 1/4...");
+        assert_eq!(progress_frame("frame=12"), Some(12));
+        assert_eq!(progress_frame("frame=  3"), Some(3));
+        assert_eq!(progress_frame("bitrate=1"), None);
     }
 
     fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
