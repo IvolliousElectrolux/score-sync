@@ -1,19 +1,20 @@
-//! 导出时按本机显卡选择 H.264 编码器.
+//! 导出时按本机显卡和所选编码 (AVC / HEVC / AV1) 选编码器.
 //!
 //! 裁剪版 ffmpeg 把硬件编码器编进同一个 sidecar, 运行时再探测.
-//! 机器上没有对应驱动, 或者这一帧尺寸编码器拒收, 都退回 libx264.
-//! 环境变量 `SCORE_SYNC_VIDEO_ENCODER` 可指定编码器名, 例如 `h264_qsv`.
+//! 机器上没有对应驱动, 或者这一帧尺寸编码器拒收, 都退回该编码的软件编码器.
+//! HEVC / AV1 没有探测通过的硬件编码器时, 界面上不出现这一项.
+//! 环境变量 `SCORE_SYNC_VIDEO_ENCODER` 可指定编码器名, 例如 `h264_qsv` 或 `hevc_nvenc`.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crate::export::ffmpeg_path;
+use crate::export::{ffmpeg_path, VideoCodec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VideoEncoder {
-    Libx264,
+    Software,
     Qsv,
     Nvenc,
     Amf,
@@ -22,20 +23,17 @@ pub(crate) enum VideoEncoder {
 }
 
 impl VideoEncoder {
-    pub(crate) fn ffmpeg_name(self) -> &'static str {
-        match self {
-            Self::Libx264 => "libx264",
-            Self::Qsv => "h264_qsv",
-            Self::Nvenc => "h264_nvenc",
-            Self::Amf => "h264_amf",
-            Self::MediaFoundation => "h264_mf",
-            Self::VideoToolbox => "h264_videotoolbox",
-        }
+    pub(crate) fn ffmpeg_name(self, codec: VideoCodec) -> &'static str {
+        encoder_name(codec, self).unwrap_or(match codec {
+            VideoCodec::Avc => "libx264",
+            VideoCodec::Hevc => "libx265",
+            VideoCodec::Av1 => "libsvtav1",
+        })
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self, codec: VideoCodec) -> &'static str {
         match self {
-            Self::Libx264 => "libx264",
+            Self::Software => self.ffmpeg_name(codec),
             Self::Qsv => "Intel Quick Sync",
             Self::Nvenc => "NVIDIA NVENC",
             Self::Amf => "AMD AMF",
@@ -45,7 +43,7 @@ impl VideoEncoder {
     }
 
     pub(crate) fn is_hardware(self) -> bool {
-        self != Self::Libx264
+        self != Self::Software
     }
 
     /// 编码器直接吃的未压缩格式. 输入已经是这个格式时不要再挂 `format` 滤镜,
@@ -91,31 +89,93 @@ fn quality_percent(crf: u32) -> u32 {
     116u32.saturating_sub(crf.saturating_mul(2)).clamp(40, 95)
 }
 
+/// 这一对 (编码, 硬件) 在裁剪版 ffmpeg 7.1 里有没有对应编码器.
+/// AV1 没有 Media Foundation, 也没有 VideoToolbox.
+pub(crate) fn encoder_name(codec: VideoCodec, encoder: VideoEncoder) -> Option<&'static str> {
+    Some(match (codec, encoder) {
+        (VideoCodec::Avc, VideoEncoder::Software) => "libx264",
+        (VideoCodec::Hevc, VideoEncoder::Software) => "libx265",
+        (VideoCodec::Av1, VideoEncoder::Software) => "libsvtav1",
+        (VideoCodec::Avc, VideoEncoder::Qsv) => "h264_qsv",
+        (VideoCodec::Hevc, VideoEncoder::Qsv) => "hevc_qsv",
+        (VideoCodec::Av1, VideoEncoder::Qsv) => "av1_qsv",
+        (VideoCodec::Avc, VideoEncoder::Nvenc) => "h264_nvenc",
+        (VideoCodec::Hevc, VideoEncoder::Nvenc) => "hevc_nvenc",
+        (VideoCodec::Av1, VideoEncoder::Nvenc) => "av1_nvenc",
+        (VideoCodec::Avc, VideoEncoder::Amf) => "h264_amf",
+        (VideoCodec::Hevc, VideoEncoder::Amf) => "hevc_amf",
+        (VideoCodec::Av1, VideoEncoder::Amf) => "av1_amf",
+        (VideoCodec::Avc, VideoEncoder::MediaFoundation) => "h264_mf",
+        (VideoCodec::Hevc, VideoEncoder::MediaFoundation) => "hevc_mf",
+        (VideoCodec::Av1, VideoEncoder::MediaFoundation) => return None,
+        (VideoCodec::Avc, VideoEncoder::VideoToolbox) => "h264_videotoolbox",
+        (VideoCodec::Hevc, VideoEncoder::VideoToolbox) => "hevc_videotoolbox",
+        (VideoCodec::Av1, VideoEncoder::VideoToolbox) => return None,
+    })
+}
+
 /// `-vf` 起, 到视频编码器参数为止. 不含 `-an` 和输出路径.
-pub(crate) fn video_codec_args(encoder: VideoEncoder, crf: u32) -> Vec<String> {
-    let crf = crf.clamp(1, 51).to_string();
-    let q = quality_percent(crf.parse().unwrap_or(18)).to_string();
-    let parts: &[&str] = match encoder {
-        VideoEncoder::Libx264 => &[
-            "-vf",
-            "format=yuv420p",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "medium",
-            "-crf",
-            "",
-            "-tune",
-            "stillimage",
-        ],
+pub(crate) fn video_codec_args(codec: VideoCodec, encoder: VideoEncoder, crf: u32) -> Vec<String> {
+    let crf_n = crf.clamp(1, 51).to_string();
+    let q = quality_percent(crf.clamp(1, 51)).to_string();
+    let name = encoder.ffmpeg_name(codec);
+    let numeric = match encoder {
+        VideoEncoder::MediaFoundation | VideoEncoder::VideoToolbox => q.as_str(),
+        _ => crf_n.as_str(),
+    };
+    let parts: &[&str] = match (codec, encoder) {
+        (_, VideoEncoder::Software) => match codec {
+            VideoCodec::Avc => &[
+                "-vf",
+                "format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "medium",
+                "-crf",
+                "",
+                "-tune",
+                "stillimage",
+            ],
+            VideoCodec::Hevc => &[
+                "-vf",
+                "format=yuv420p",
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "medium",
+                "-tune",
+                "stillimage",
+                "-tag:v",
+                "hvc1",
+                "-x265-params",
+                "bframes=0",
+                "-crf",
+                "",
+            ],
+            VideoCodec::Av1 => &[
+                "-vf",
+                "format=yuv420p",
+                "-c:v",
+                "libsvtav1",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "6",
+                "-crf",
+                "",
+            ],
+        },
         // ICQ 的刻度和 CRF 相同, 数字越小越清晰. 软件帧由编码器自己送进核显.
-        VideoEncoder::Qsv => &[
+        (_, VideoEncoder::Qsv) => &[
             "-vf",
             "format=nv12",
             "-c:v",
-            "h264_qsv",
+            "",
             "-preset",
             "medium",
             "-global_quality",
@@ -123,7 +183,7 @@ pub(crate) fn video_codec_args(encoder: VideoEncoder, crf: u32) -> Vec<String> {
             "-pix_fmt",
             "nv12",
         ],
-        VideoEncoder::Nvenc => &[
+        (VideoCodec::Avc, VideoEncoder::Nvenc) => &[
             "-vf",
             "format=yuv420p",
             "-c:v",
@@ -141,7 +201,23 @@ pub(crate) fn video_codec_args(encoder: VideoEncoder, crf: u32) -> Vec<String> {
             "-pix_fmt",
             "yuv420p",
         ],
-        VideoEncoder::Amf => &[
+        (_, VideoEncoder::Nvenc) => &[
+            "-vf",
+            "format=yuv420p",
+            "-c:v",
+            "",
+            "-preset",
+            "p5",
+            "-tune",
+            "hq",
+            "-rc",
+            "constqp",
+            "-qp",
+            "",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        (VideoCodec::Avc, VideoEncoder::Amf) => &[
             "-vf",
             "format=yuv420p",
             "-c:v",
@@ -163,11 +239,31 @@ pub(crate) fn video_codec_args(encoder: VideoEncoder, crf: u32) -> Vec<String> {
             "-pix_fmt",
             "yuv420p",
         ],
-        VideoEncoder::MediaFoundation => &[
+        (_, VideoEncoder::Amf) => &[
+            "-vf",
+            "format=yuv420p",
+            "-c:v",
+            "",
+            "-usage",
+            "transcoding",
+            "-quality",
+            "quality",
+            "-rc",
+            "cqp",
+            "-qp_i",
+            "",
+            "-qp_p",
+            "",
+            "-qp_b",
+            "",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        (_, VideoEncoder::MediaFoundation) => &[
             "-vf",
             "format=nv12",
             "-c:v",
-            "h264_mf",
+            "",
             "-hw_encoding",
             "1",
             "-rate_control",
@@ -177,7 +273,7 @@ pub(crate) fn video_codec_args(encoder: VideoEncoder, crf: u32) -> Vec<String> {
             "-pix_fmt",
             "nv12",
         ],
-        VideoEncoder::VideoToolbox => &[
+        (VideoCodec::Avc, VideoEncoder::VideoToolbox) => &[
             "-vf",
             "format=yuv420p",
             "-c:v",
@@ -189,15 +285,47 @@ pub(crate) fn video_codec_args(encoder: VideoEncoder, crf: u32) -> Vec<String> {
             "-pix_fmt",
             "yuv420p",
         ],
-    };
-    let numeric = match encoder {
-        VideoEncoder::MediaFoundation | VideoEncoder::VideoToolbox => q.as_str(),
-        _ => crf.as_str(),
+        (_, VideoEncoder::VideoToolbox) => &[
+            "-vf",
+            "format=yuv420p",
+            "-c:v",
+            "",
+            "-profile:v",
+            "main",
+            "-q:v",
+            "",
+            "-pix_fmt",
+            "yuv420p",
+        ],
     };
     parts
         .iter()
-        .map(|part| if part.is_empty() { numeric } else { *part })
+        .map(|part| {
+            if part.is_empty() {
+                if parts
+                    .windows(2)
+                    .any(|w| w[0] == "-c:v" && w[1].is_empty() && *part == "")
+                {
+                    // filled below
+                }
+                numeric
+            } else {
+                *part
+            }
+        })
         .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            if i > 0 && parts[i - 1] == "-c:v" && parts[i].is_empty() {
+                name.to_string()
+            } else if parts[i].is_empty() {
+                numeric.to_string()
+            } else {
+                part
+            }
+        })
         .collect()
 }
 
@@ -224,20 +352,34 @@ fn candidate_order(host: HostKind, gpus: Gpus) -> Vec<VideoEncoder> {
         HostKind::Macos => out.push(VideoEncoder::VideoToolbox),
         HostKind::Other => {}
     }
-    out.push(VideoEncoder::Libx264);
+    out.push(VideoEncoder::Software);
     out
 }
 
-fn parse_encoder_name(name: &str) -> Option<VideoEncoder> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "libx264" | "x264" | "cpu" => Some(VideoEncoder::Libx264),
-        "h264_qsv" | "qsv" => Some(VideoEncoder::Qsv),
-        "h264_nvenc" | "nvenc" => Some(VideoEncoder::Nvenc),
-        "h264_amf" | "amf" => Some(VideoEncoder::Amf),
-        "h264_mf" | "mf" => Some(VideoEncoder::MediaFoundation),
-        "h264_videotoolbox" | "videotoolbox" | "vt" => Some(VideoEncoder::VideoToolbox),
+/// `None` 编码表示这个名字只指定厂商, 三种编码都优先用它.
+fn parse_encoder_name(name: &str) -> Option<(Option<VideoCodec>, VideoEncoder)> {
+    let name = name.trim().to_ascii_lowercase();
+    let vendor = match name.as_str() {
+        "qsv" | "h264_qsv" | "hevc_qsv" | "av1_qsv" => VideoEncoder::Qsv,
+        "nvenc" | "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => VideoEncoder::Nvenc,
+        "amf" | "h264_amf" | "hevc_amf" | "av1_amf" => VideoEncoder::Amf,
+        "mf" | "h264_mf" | "hevc_mf" => VideoEncoder::MediaFoundation,
+        "videotoolbox" | "vt" | "h264_videotoolbox" | "hevc_videotoolbox" => {
+            VideoEncoder::VideoToolbox
+        }
+        "libx264" | "x264" | "cpu" | "libx265" | "libsvtav1" => VideoEncoder::Software,
+        _ => return None,
+    };
+    let codec = match name.as_str() {
+        "h264_qsv" | "h264_nvenc" | "h264_amf" | "h264_mf" | "h264_videotoolbox" | "libx264"
+        | "x264" => Some(VideoCodec::Avc),
+        "hevc_qsv" | "hevc_nvenc" | "hevc_amf" | "hevc_mf" | "hevc_videotoolbox" | "libx265" => {
+            Some(VideoCodec::Hevc)
+        }
+        "av1_qsv" | "av1_nvenc" | "av1_amf" | "libsvtav1" => Some(VideoCodec::Av1),
         _ => None,
-    }
+    };
+    Some((codec, vendor))
 }
 
 /// 只看显卡描述行, 避免注册表里别的字段碰到 Intel / AMD 这几个词.
@@ -349,7 +491,7 @@ fn listed_encoders() -> Vec<String> {
         .collect()
 }
 
-fn probe_encoder(encoder: VideoEncoder) -> bool {
+fn probe_encoder(codec: VideoCodec, encoder: VideoEncoder) -> bool {
     const W: usize = 256;
     const H: usize = 256;
     let frame = vec![0u8; W * H * 4];
@@ -371,7 +513,7 @@ fn probe_encoder(encoder: VideoEncoder) -> bool {
         "-frames:v".to_string(),
         "2".to_string(),
     ];
-    args.extend(video_codec_args(encoder, 18));
+    args.extend(video_codec_args(codec, encoder, 18));
     args.extend(["-an".to_string(), "-f".to_string(), "null".to_string(), "-".to_string()]);
 
     let mut cmd = Command::new(ffmpeg_path());
@@ -420,35 +562,80 @@ fn hidden(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-fn choose_video_encoder() -> VideoEncoder {
-    if let Ok(raw) = std::env::var("SCORE_SYNC_VIDEO_ENCODER") {
-        if let Some(encoder) = parse_encoder_name(&raw) {
-            if encoder == VideoEncoder::Libx264 {
-                return encoder;
-            }
-            let listed = listed_encoders();
-            if listed.iter().any(|name| name == encoder.ffmpeg_name()) && probe_encoder(encoder) {
-                return encoder;
-            }
-            return VideoEncoder::Libx264;
-        }
-    }
-    let listed = listed_encoders();
-    let gpus = detect_gpus();
-    for encoder in candidate_order(host_kind(), gpus) {
-        if encoder == VideoEncoder::Libx264 {
-            return encoder;
-        }
-        if listed.iter().any(|name| name == encoder.ffmpeg_name()) && probe_encoder(encoder) {
-            return encoder;
-        }
-    }
-    VideoEncoder::Libx264
+struct EncoderCaps {
+    avc: VideoEncoder,
+    hevc: VideoEncoder,
+    av1: VideoEncoder,
 }
 
-pub(crate) fn select_video_encoder() -> VideoEncoder {
-    static CACHE: OnceLock<VideoEncoder> = OnceLock::new();
-    *CACHE.get_or_init(choose_video_encoder)
+fn pick_for(codec: VideoCodec, listed: &[String], order: &[VideoEncoder]) -> VideoEncoder {
+    let forced = std::env::var("SCORE_SYNC_VIDEO_ENCODER")
+        .ok()
+        .and_then(|raw| parse_encoder_name(&raw));
+    if let Some((forced_codec, vendor)) = forced {
+        if forced_codec == Some(codec) || forced_codec.is_none() {
+            if vendor == VideoEncoder::Software {
+                return VideoEncoder::Software;
+            }
+            if encoder_name(codec, vendor).is_some()
+                && listed.iter().any(|name| name == vendor.ffmpeg_name(codec))
+                && probe_encoder(codec, vendor)
+            {
+                return vendor;
+            }
+            if forced_codec == Some(codec) {
+                return VideoEncoder::Software;
+            }
+        }
+    }
+    for vendor in order {
+        if *vendor == VideoEncoder::Software {
+            return VideoEncoder::Software;
+        }
+        let Some(name) = encoder_name(codec, *vendor) else {
+            continue;
+        };
+        if listed.iter().any(|item| item == name) && probe_encoder(codec, *vendor) {
+            return *vendor;
+        }
+    }
+    VideoEncoder::Software
+}
+
+fn encoder_caps() -> EncoderCaps {
+    let listed = listed_encoders();
+    let order = candidate_order(host_kind(), detect_gpus());
+    EncoderCaps {
+        avc: pick_for(VideoCodec::Avc, &listed, &order),
+        hevc: pick_for(VideoCodec::Hevc, &listed, &order),
+        av1: pick_for(VideoCodec::Av1, &listed, &order),
+    }
+}
+
+fn caps() -> &'static EncoderCaps {
+    static CACHE: OnceLock<EncoderCaps> = OnceLock::new();
+    CACHE.get_or_init(encoder_caps)
+}
+
+pub(crate) fn select_video_encoder(codec: VideoCodec) -> VideoEncoder {
+    match codec {
+        VideoCodec::Avc => caps().avc,
+        VideoCodec::Hevc => caps().hevc,
+        VideoCodec::Av1 => caps().av1,
+    }
+}
+
+/// 导出界面要列出的编码. AVC 一定有. HEVC / AV1 要有探测通过的硬件编码器.
+pub(crate) fn hardware_codecs() -> Vec<VideoCodec> {
+    let caps = caps();
+    let mut out = vec![VideoCodec::Avc];
+    if caps.hevc.is_hardware() {
+        out.push(VideoCodec::Hevc);
+    }
+    if caps.av1.is_hardware() {
+        out.push(VideoCodec::Av1);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -465,7 +652,7 @@ mod tests {
 
     #[test]
     fn x264_keeps_stillimage_crf() {
-        let args = video_codec_args(VideoEncoder::Libx264, 18);
+        let args = video_codec_args(VideoCodec::Avc, VideoEncoder::Software, 18);
         assert!(args.windows(2).any(|w| w == ["-c:v", "libx264"]));
         assert!(args.windows(2).any(|w| w == ["-crf", "18"]));
         assert!(args.iter().any(|a| a == "stillimage"));
@@ -474,7 +661,7 @@ mod tests {
 
     #[test]
     fn qsv_uses_icq_not_crf() {
-        let args = video_codec_args(VideoEncoder::Qsv, 18);
+        let args = video_codec_args(VideoCodec::Avc, VideoEncoder::Qsv, 18);
         assert!(args.windows(2).any(|w| w == ["-c:v", "h264_qsv"]));
         assert!(args.windows(2).any(|w| w == ["-global_quality", "18"]));
         assert!(args.windows(2).any(|w| w == ["-vf", "format=nv12"]));
@@ -495,7 +682,7 @@ mod tests {
             vec![
                 VideoEncoder::Qsv,
                 VideoEncoder::MediaFoundation,
-                VideoEncoder::Libx264
+                VideoEncoder::Software
             ]
         );
     }
@@ -525,7 +712,7 @@ mod tests {
                 VideoEncoder::Amf,
                 VideoEncoder::Qsv,
                 VideoEncoder::MediaFoundation,
-                VideoEncoder::Libx264
+                VideoEncoder::Software
             ]
         );
     }
@@ -541,7 +728,7 @@ mod tests {
         );
         assert_eq!(
             order,
-            vec![VideoEncoder::VideoToolbox, VideoEncoder::Libx264]
+            vec![VideoEncoder::VideoToolbox, VideoEncoder::Software]
         );
     }
 
@@ -562,5 +749,26 @@ mod tests {
         let gpus = gpus_from_pci_vendors([0x8086, 0x10de]);
         assert!(gpus.intel && gpus.nvidia);
         assert!(!gpus.amd);
+    }
+
+    #[test]
+    fn av1_skips_encoders_ffmpeg_71_does_not_have() {
+        assert!(encoder_name(VideoCodec::Av1, VideoEncoder::MediaFoundation).is_none());
+        assert!(encoder_name(VideoCodec::Av1, VideoEncoder::VideoToolbox).is_none());
+        assert_eq!(
+            encoder_name(VideoCodec::Hevc, VideoEncoder::Qsv),
+            Some("hevc_qsv")
+        );
+        assert_eq!(
+            encoder_name(VideoCodec::Av1, VideoEncoder::Nvenc),
+            Some("av1_nvenc")
+        );
+    }
+
+    #[test]
+    fn hevc_qsv_keeps_the_same_quality_number() {
+        let args = video_codec_args(VideoCodec::Hevc, VideoEncoder::Qsv, 18);
+        assert!(args.windows(2).any(|w| w == ["-c:v", "hevc_qsv"]));
+        assert!(args.windows(2).any(|w| w == ["-global_quality", "18"]));
     }
 }

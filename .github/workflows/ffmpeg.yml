@@ -57,7 +57,7 @@ jobs:
             asset: ffmpeg-linux-arm64
     runs-on: ${{ matrix.os }}
     env:
-      SRC_CACHE_KEY: ffmpeg-src-n7.1.1-x264-stable
+      SRC_CACHE_KEY: ffmpeg-src-n7.1.1-x264-x265-svt
     steps:
       - uses: actions/checkout@v4
 

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use image::{Rgba, RgbaImage};
-use score_video::export::{export_async, Container, ExportMsg, ExportOptions};
+use score_video::export::{export_async, Container, ExportMsg, ExportOptions, VideoCodec};
 use score_video::model::{AudioClip, FadeKind, FadeSpan, MaterialItem, Timeline, VideoClip};
 use uuid::Uuid;
 
@@ -298,6 +298,7 @@ fn export_once(
 ) -> std::time::Duration {
     let opts = ExportOptions {
         container: Container::Mp4,
+        codec: VideoCodec::Avc,
         width: W,
         height: H,
         fps: 30,

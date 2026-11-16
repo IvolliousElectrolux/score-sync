@@ -37,7 +37,7 @@ pub(crate) use smallvec::smallvec;
 pub(crate) use uuid::Uuid;
 
 pub(crate) use crate::audio::AudioEngine;
-pub(crate) use crate::export::{Container, ExportMsg, ExportOptions};
+pub(crate) use crate::export::{Container, ExportMsg, ExportOptions, VideoCodec};
 pub(crate) use crate::model::{
     AudioClip, FadeKind, MaterialItem, Timeline, FADE_TICK_MS, PLAY_TICK_MS,
 };
@@ -155,6 +155,11 @@ pub struct ScoreVideoApp {
     error_dialog: Option<(SharedString, SharedString)>,
     export_open: bool,
     export_container: Container,
+    export_codec: VideoCodec,
+    /// 探测完成后才含 HEVC / AV1. 探测前只有 AVC.
+    export_codec_options: Vec<VideoCodec>,
+    codec_probe_started: bool,
+    codec_probe_done: bool,
     /// 帧率: 可直接点击输入框改数字 (与 CRF 那种只能加减的 stepper 不同),
     /// 复用 `apply_bg` 里已经有的文本框组件, 无需重复注册快捷键 (宿主启动
     /// 时已经调用过 `apply_bg::text_input::bind_keys`).
@@ -215,6 +220,10 @@ impl ScoreVideoApp {
             split_audio_armed: false,
             export_open: false,
             export_container: Container::Mp4,
+            export_codec: VideoCodec::Avc,
+            export_codec_options: vec![VideoCodec::Avc],
+            codec_probe_started: false,
+            codec_probe_done: false,
             export_fps_input: cx.new(|cx| apply_bg::text_input::TextInput::new(cx, "30", "帧率")),
             export_crf: 18,
             export_out_path: None,

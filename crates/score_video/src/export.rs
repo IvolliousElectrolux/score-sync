@@ -42,6 +42,24 @@ pub(crate) fn ffmpeg_path() -> PathBuf {
     PathBuf::from(name)
 }
 
+/// 导出画面用的编码. AVC 始终可选. HEVC / AV1 只在本机硬件编码器探测通过后出现.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoCodec {
+    Avc,
+    Hevc,
+    Av1,
+}
+
+impl VideoCodec {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Avc => "AVC",
+            Self::Hevc => "HEVC",
+            Self::Av1 => "AV1",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Container {
     Mp4,
@@ -91,6 +109,7 @@ impl Container {
 #[derive(Clone)]
 pub struct ExportOptions {
     pub container: Container,
+    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -701,7 +720,7 @@ fn encode_raw_video(
     let w = even_dim(opts.width);
     let h = even_dim(opts.height);
     let layout = encoder.stored_yuv();
-    let label = encoder.label();
+    let label = encoder.label(opts.codec);
     let mut args = vec![
         os("-y"),
         os("-f"),
@@ -717,7 +736,7 @@ fn encode_raw_video(
         os("-frames:v"),
         os(n_frames.to_string()),
     ];
-    for arg in without_format_filter(video_codec_args(encoder, opts.crf)) {
+    for arg in without_format_filter(video_codec_args(opts.codec, encoder, opts.crf)) {
         args.push(os(arg));
     }
     args.extend([
@@ -980,6 +999,7 @@ fn mux_final(
 }
 
 fn held_segment_args(
+    codec: VideoCodec,
     fps: u32,
     w: u32,
     h: u32,
@@ -989,7 +1009,8 @@ fn held_segment_args(
     out: &Path,
 ) -> Vec<std::ffi::OsString> {
     let pictures = segment_pictures(frames, dynamic);
-    vec![
+    let crf = crf.clamp(1, 51).to_string();
+    let mut args = vec![
         os("-y"),
         os("-hide_banner"),
         os("-loglevel"),
@@ -1008,25 +1029,57 @@ fn held_segment_args(
         os(pictures.to_string()),
         os("-fps_mode"),
         os("passthrough"),
-        os("-c:v"),
-        os("libx264"),
-        os("-preset"),
-        os("medium"),
-        os("-tune"),
-        os("stillimage"),
-        os("-bf"),
-        os("0"),
-        os("-profile:v"),
-        os("high"),
-        os("-crf"),
-        os(crf.clamp(1, 51).to_string()),
+    ];
+    // 硬件编码器经常拒收「fps/帧数」这种超低帧率, 静止页仍用同系列的软件编码器.
+    match codec {
+        VideoCodec::Avc => args.extend([
+            os("-c:v"),
+            os("libx264"),
+            os("-preset"),
+            os("medium"),
+            os("-tune"),
+            os("stillimage"),
+            os("-bf"),
+            os("0"),
+            os("-profile:v"),
+            os("high"),
+            os("-crf"),
+            os(crf),
+        ]),
+        VideoCodec::Hevc => args.extend([
+            os("-c:v"),
+            os("libx265"),
+            os("-preset"),
+            os("medium"),
+            os("-tune"),
+            os("stillimage"),
+            os("-tag:v"),
+            os("hvc1"),
+            os("-x265-params"),
+            os("bframes=0"),
+            os("-crf"),
+            os(crf),
+        ]),
+        VideoCodec::Av1 => args.extend([
+            os("-c:v"),
+            os("libsvtav1"),
+            os("-preset"),
+            os("6"),
+            os("-crf"),
+            os(crf),
+            os("-svtav1-params"),
+            os("keyint=256:scd=0"),
+        ]),
+    }
+    args.extend([
         os("-pix_fmt"),
         os("yuv420p"),
         os("-video_track_timescale"),
         os(fps.max(1).to_string()),
         os("-an"),
         os_path(out),
-    ]
+    ]);
+    args
 }
 
 fn ffmpeg_with_stdin<W>(args: &[std::ffi::OsString], step: &str, write: W) -> Result<(), String>
@@ -1135,7 +1188,7 @@ fn encode_held(
     for (i, run) in runs.iter().enumerate() {
         let seg = work.join(format!("s{i:05}.mp4"));
         let dynamic = run.fade.is_some();
-        let args = held_segment_args(fps, w, h, run.frames, dynamic, opts.crf, &seg);
+        let args = held_segment_args(opts.codec, fps, w, h, run.frames, dynamic, opts.crf, &seg);
         let base = cursor;
         ffmpeg_with_stdin(&args, "按页编码", |stdin| {
             if dynamic {
@@ -1188,11 +1241,12 @@ fn encode_cfr(
     tx: &async_channel::Sender<ExportMsg>,
 ) -> Result<(), String> {
     let _ = tx.send_blocking(ExportMsg::Progress("检测本机视频编码器...".to_string()));
-    let encoder = select_video_encoder();
+    let encoder = select_video_encoder(opts.codec);
     let _ = tx.send_blocking(ExportMsg::Progress(format!(
-        "编码 {} 帧 ({}), {} 页切点...",
+        "编码 {} 帧 ({}, {}), {} 页切点...",
         total_frames,
-        encoder.label(),
+        opts.codec.label(),
+        encoder.label(opts.codec),
         runs.len()
     )));
     match encode_raw_video(
@@ -1207,16 +1261,18 @@ fn encode_cfr(
     ) {
         Ok(()) => Ok(()),
         Err(err) if err.retryable && encoder.is_hardware() => {
-            let _ = tx.send_blocking(ExportMsg::Progress(
-                "硬件编码失败, 改用 libx264...".to_string(),
-            ));
+            let software = VideoEncoder::Software;
+            let _ = tx.send_blocking(ExportMsg::Progress(format!(
+                "硬件编码失败, 改用 {}...",
+                software.ffmpeg_name(opts.codec)
+            )));
             encode_raw_video(
                 pool,
                 timeline,
                 runs,
                 total_frames,
                 opts,
-                VideoEncoder::Libx264,
+                software,
                 out_path,
                 tx,
             )
@@ -1817,6 +1873,7 @@ mod tests {
         let out = root.join("CDEFGAB.mp4");
         let opts = ExportOptions {
             container: Container::Mp4,
+            codec: VideoCodec::Avc,
             width: 1280,
             height: 720,
             fps: 30,
@@ -2070,6 +2127,7 @@ mod tests {
         let out = dir.join("CDE.mkv");
         let opts = ExportOptions {
             container: Container::Mkv,
+            codec: VideoCodec::Avc,
             width: 160,
             height: 90,
             fps: 30,

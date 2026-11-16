@@ -48,6 +48,7 @@ impl ScoreVideoApp {
         let (w, h) = ExportOptions::size_from_pool(&self.pool);
         let opts = ExportOptions {
             container: self.export_container,
+            codec: self.export_codec,
             width: w,
             height: h,
             fps: self.export_fps(cx),
@@ -99,7 +100,29 @@ impl ScoreVideoApp {
         })
         .detach();
     }
+    fn ensure_codec_probe(&mut self, cx: &mut Context<Self>) {
+        if self.codec_probe_started {
+            return;
+        }
+        self.codec_probe_started = true;
+        Self::spawn_native_dialog(
+            cx,
+            || crate::hw_encode::hardware_codecs(),
+            |this, codecs, cx| {
+                if !codecs.contains(&this.export_codec) {
+                    this.export_codec = VideoCodec::Avc;
+                }
+                this.export_codec_options = codecs;
+                this.codec_probe_done = true;
+                cx.notify();
+            },
+        );
+    }
+
     pub fn export_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.export_open && !self.codec_probe_started {
+            cx.defer(|this, cx| this.ensure_codec_probe(cx));
+        }
         let (w, h) = ExportOptions::size_from_pool(&self.pool);
         let out_label: SharedString = self
             .export_out_path
@@ -199,6 +222,42 @@ impl ScoreVideoApp {
                             .text_color(ui_kit::chrome(0x94a3b8))
                             .child(SharedString::from(self.export_container.audio_hint())),
                     )
+                    .child({
+                        let mut row = div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().min_w(px(80.)).child("编码"));
+                        for codec in self.export_codec_options.clone() {
+                            let on = self.export_codec == codec;
+                            row = row.child(self.btn(
+                                match codec {
+                                    VideoCodec::Avc => "sv_codec_avc",
+                                    VideoCodec::Hevc => "sv_codec_hevc",
+                                    VideoCodec::Av1 => "sv_codec_av1",
+                                },
+                                codec.label(),
+                                on,
+                                move |this, _, cx| {
+                                    this.export_codec = codec;
+                                    cx.notify();
+                                },
+                                cx,
+                            ));
+                        }
+                        row
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(ui_kit::chrome(0x94a3b8))
+                            .child(if self.codec_probe_done {
+                                "只列出这台电脑硬件编码器能做的格式. 没有对应硬件就不会出现 HEVC 或 AV1."
+                            } else {
+                                "正在检测本机的 HEVC / AV1 硬件编码器..."
+                            }),
+                    )
                     .child(
                         div()
                             .flex()
@@ -284,7 +343,7 @@ impl ScoreVideoApp {
                         div()
                             .text_xs()
                             .text_color(ui_kit::chrome(0x64748b))
-                            .child("CRF (Constant Rate Factor) 是 x264 编码的质量参数: 数值越小画质越好、文件越大, 越大则画质越差、文件越小; 0 近乎无损, 18~23 常见于\"肉眼无差\"的高质量, 28 起画质明显下降. 与分辨率/码率无关, 是恒定质量而非恒定码率的编码方式."),
+                            .child("质量数字越小越清晰, 文件也越大. 14~28 里, 18 左右通常已经看不出和原图的差别. AVC, HEVC, AV1 共用这一档."),
                     )
                     .child(
                         div()

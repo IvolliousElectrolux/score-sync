@@ -8,6 +8,10 @@ FFMPEG_TAG="${FFMPEG_TAG:-n7.1.1}"
 X264_REF="${X264_REF:-stable}"
 FFMPEG_URL="https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
 X264_URL="https://github.com/mirror/x264/archive/refs/heads/${X264_REF}.tar.gz"
+X265_TAG="${X265_TAG:-3.6}"
+SVT_TAG="${SVT_TAG:-v2.3.0}"
+X265_URL="https://github.com/videolan/x265/archive/refs/tags/${X265_TAG}.tar.gz"
+SVT_URL="https://github.com/AOMediaCodec/SVT-AV1/archive/refs/tags/${SVT_TAG}.tar.gz"
 # 硬件编码器只加头文件或静态 dispatcher, 运行时再加载本机驱动, 不把驱动打进 sidecar.
 NVENC_TAG="${NVENC_TAG:-n12.2.72.0}"
 AMF_TAG="${AMF_TAG:-v1.4.35}"
@@ -316,6 +320,120 @@ install_libvpl() {
   "${PKG_CONFIG:-pkg-config}" --libs vpl
 }
 
+# MSVC 的 pkg-config 会吐出 MSYS 路径, 并且静态库的 -lpthread 链不上.
+rewrite_msvc_pc() {
+  local pc="$1" fallback_lib="$2"
+  [ "$MSVC" = 1 ] || return 0
+  if [ ! -f "$pc" ]; then
+    echo "pkg-config file missing: $pc" >&2
+    exit 1
+  fi
+  local prefix_mix lib="$fallback_lib"
+  prefix_mix="$(cygpath -m "$PREFIX")"
+  if [ -f "$PREFIX/lib/${fallback_lib}-static.lib" ]; then
+    lib="${fallback_lib}-static"
+  fi
+  local tmp="$pc.tmp"
+  awk -v p="$prefix_mix" -v lib="$lib" '
+    /^prefix=/ { print "prefix=" p; next }
+    /^exec_prefix=/ { print "exec_prefix=" p; next }
+    /^libdir=/ { print "libdir=" p "/lib"; next }
+    /^includedir=/ { print "includedir=" p "/include"; next }
+    /^Libs:/ { print "Libs: -L" p "/lib -l" lib; next }
+    /^Libs.private:/ { next }
+    /^Requires.private:/ { next }
+    { print }
+  ' "$pc" >"$tmp"
+  mv "$tmp" "$pc"
+  echo "==> $(basename "$pc")"
+  cat "$pc"
+}
+
+cmake_static() {
+  local src_arg="$1" build_arg="$2"
+  shift 2
+  local prefix_arg="$PREFIX"
+  local -a gen=(-G "Unix Makefiles")
+  local -a msvc_cc=()
+  if [ "$MSVC" = 1 ]; then
+    export MSYS2_ARG_CONV_EXCL='*'
+    src_arg="$(cygpath -w "$src_arg")"
+    build_arg="$(cygpath -w "$build_arg")"
+    prefix_arg="$(cygpath -w "$PREFIX")"
+    local cc
+    cc="$(command -v cl.exe || command -v cl)"
+    cc="$(cygpath -w "$cc")"
+    msvc_cc=(
+      -DCMAKE_C_COMPILER="$cc"
+      -DCMAKE_CXX_COMPILER="$cc"
+      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      "-DCMAKE_C_FLAGS_RELEASE=/MT /O2 /Ob2 /DNDEBUG"
+      "-DCMAKE_CXX_FLAGS_RELEASE=/MT /O2 /Ob2 /DNDEBUG"
+    )
+    if command -v ninja >/dev/null 2>&1 || command -v ninja.exe >/dev/null 2>&1; then
+      gen=(-G Ninja)
+    else
+      gen=(-G "NMake Makefiles")
+    fi
+  fi
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo "need cmake on PATH" >&2
+    exit 1
+  fi
+  cmake -S "$src_arg" -B "$build_arg" "${gen[@]}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$prefix_arg" \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    "${msvc_cc[@]}" \
+    "$@"
+  if [ "$MSVC" = 1 ]; then
+    cmake --build "$build_arg"
+    cmake --install "$build_arg"
+    unset MSYS2_ARG_CONV_EXCL
+  else
+    cmake --build "$build_arg" -j"$JOBS"
+    cmake --install "$build_arg"
+  fi
+}
+
+# 静止页的 HEVC 不走硬件: QSV 一类会拒收超低帧率. libx265 只编一帧.
+install_x265() {
+  fetch_tar "$X265_URL" "$SRC/x265" "$SRC/x265.ok"
+  if [ -f "$PREFIX/lib/libx265.a" ] || [ -f "$PREFIX/lib/x265-static.lib" ] || [ -f "$PREFIX/lib/x265.lib" ]; then
+    echo "==> reuse libx265"
+  else
+    echo "==> build x265 $X265_TAG"
+    rm -rf "$SRC/x265/build"
+    cmake_static "$SRC/x265/source" "$SRC/x265/build" \
+      -DENABLE_SHARED=OFF \
+      -DENABLE_CLI=OFF \
+      -DENABLE_PIC=ON \
+      -DHIGH_BIT_DEPTH=OFF \
+      -DENABLE_HDR10_PLUS=OFF \
+      -DENABLE_LIBNUMA=OFF \
+      -DENABLE_ASSEMBLY=ON
+    rm -rf "$SRC/x265/build"
+  fi
+  rewrite_msvc_pc "$PREFIX/lib/pkgconfig/x265.pc" x265
+}
+
+# AV1 静止页用 SVT-AV1. 硬件 av1_* 只负责「这台机器有没有」, 以及按帧回退.
+install_svtav1() {
+  fetch_tar "$SVT_URL" "$SRC/svt-av1" "$SRC/svt-av1.ok"
+  if [ -f "$PREFIX/lib/libSvtAv1Enc.a" ] || [ -f "$PREFIX/lib/SvtAv1Enc.lib" ]; then
+    echo "==> reuse SVT-AV1"
+  else
+    echo "==> build SVT-AV1 $SVT_TAG"
+    rm -rf "$SRC/svt-av1/build"
+    cmake_static "$SRC/svt-av1" "$SRC/svt-av1/build" \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DBUILD_APPS=OFF \
+      -DBUILD_TESTING=OFF
+    rm -rf "$SRC/svt-av1/build"
+  fi
+  rewrite_msvc_pc "$PREFIX/lib/pkgconfig/SvtAv1Enc.pc" SvtAv1Enc
+}
+
 install_hw_deps() {
   if [ "$TARGET_WIN" = 1 ]; then
     WANT_NVENC=1
@@ -414,19 +532,22 @@ if [ "$MSVC" = 1 ]; then
 fi
 
 install_hw_deps
+install_x265
+install_svtav1
 
 echo "==> build ffmpeg $FFMPEG_TAG"
 cd "$SRC/ffmpeg"
 
 # 覆盖现有导入格式的边界: wav (含 24bit/float/adpcm), mp3, flac,
 # ogg (vorbis/opus/speex/flac), m4a/m4b/aac/mp4/mov (aac / HE-AAC / alac).
-# 视频只编码 AVC, 不解码任何视频. 硬件编码器按平台加, 运行时再探测驱动.
-ENCODERS="libx264"
-if [ "$WANT_QSV" = 1 ]; then ENCODERS="$ENCODERS,h264_qsv"; fi
-if [ "$WANT_NVENC" = 1 ]; then ENCODERS="$ENCODERS,h264_nvenc"; fi
-if [ "$WANT_AMF" = 1 ]; then ENCODERS="$ENCODERS,h264_amf"; fi
-if [ "$WANT_MF" = 1 ]; then ENCODERS="$ENCODERS,h264_mf"; fi
-if [ "$WANT_VT" = 1 ]; then ENCODERS="$ENCODERS,h264_videotoolbox"; fi
+# 画面编码 AVC / HEVC / AV1. 不解码任何视频. 硬件编码器按平台加, 运行时再探测驱动.
+# 软件 libx265 / libsvtav1 给静止页: 一帧撑住整段时长, 不重复送进硬件编码器.
+ENCODERS="libx264,libx265,libsvtav1"
+if [ "$WANT_QSV" = 1 ]; then ENCODERS="$ENCODERS,h264_qsv,hevc_qsv,av1_qsv"; fi
+if [ "$WANT_NVENC" = 1 ]; then ENCODERS="$ENCODERS,h264_nvenc,hevc_nvenc,av1_nvenc"; fi
+if [ "$WANT_AMF" = 1 ]; then ENCODERS="$ENCODERS,h264_amf,hevc_amf,av1_amf"; fi
+if [ "$WANT_MF" = 1 ]; then ENCODERS="$ENCODERS,h264_mf,hevc_mf"; fi
+if [ "$WANT_VT" = 1 ]; then ENCODERS="$ENCODERS,h264_videotoolbox,hevc_videotoolbox"; fi
 ENCODERS="$ENCODERS,aac,flac,pcm_s16le"
 DECODERS="aac,aac_fixed,aac_latm,alac,mp3float,mp3,mp2,flac,vorbis,opus,speex"
 DECODERS="$DECODERS,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be"
@@ -438,7 +559,7 @@ DEMUXERS="rawvideo,lavfi,mov,mp3,aac,flac,ogg,wav,w64,aiff,matroska,concat"
 # CLI 是 `-f s16le`, configure 组件名是 `pcm_s16le` (见 libavformat/Makefile).
 # 写成 s16le 会被 --disable-everything 静默丢掉, 预览管道就没有 raw PCM muxer.
 MUXERS="mp4,mov,ipod,matroska,wav,pcm_s16le,flac,null,adts"
-PARSERS="aac,aac_latm,mpegaudio,flac,vorbis,opus,h264,hevc"
+PARSERS="aac,aac_latm,mpegaudio,flac,vorbis,opus,h264,hevc,av1"
 BSFS="aac_adtstoasc,extract_extradata"
 FILTERS="buffer,buffersink,abuffer,abuffersink,format,scale,aformat,aresample"
 FILTERS="$FILTERS,atrim,setpts,asetpts,apad,concat,atempo,anull,anullsrc"
@@ -447,6 +568,8 @@ ff_cfg=(
   --prefix="$PREFIX"
   --enable-gpl
   --enable-libx264
+  --enable-libx265
+  --enable-libsvtav1
   --enable-static
   --disable-shared
   --disable-everything
@@ -598,6 +721,8 @@ fi
   echo
   echo "FFmpeg ${FFMPEG_TAG}  ${FFMPEG_URL}"
   echo "x264 ${X264_REF}  ${X264_URL}"
+  echo "x265 ${X265_TAG}  ${X265_URL}"
+  echo "SVT-AV1 ${SVT_TAG}  ${SVT_URL}"
   if [ "$WANT_NVENC" = 1 ]; then
     echo "nv-codec-headers ${NVENC_TAG}  ${NVENC_URL}"
   fi
@@ -621,6 +746,18 @@ fi
   echo
   echo "===== x264 ====="
   cat "$SRC/x264/COPYING"
+  echo
+  echo "===== x265 ====="
+  cat "$SRC/x265/COPYING" 2>/dev/null || cat "$SRC/x265/COPYING.txt"
+  if [ -f "$SRC/svt-av1/LICENSE.md" ]; then
+    echo
+    echo "===== SVT-AV1 (BSD) ====="
+    cat "$SRC/svt-av1/LICENSE.md"
+  elif [ -f "$SRC/svt-av1/LICENSE" ]; then
+    echo
+    echo "===== SVT-AV1 (BSD) ====="
+    cat "$SRC/svt-av1/LICENSE"
+  fi
   if [ -f "$SRC/libvpl/LICENSE" ]; then
     echo
     echo "===== libvpl (MIT) ====="
@@ -649,11 +786,31 @@ else
     fi
   }
   need_encoder libx264
-  if [ "$WANT_QSV" = 1 ]; then need_encoder h264_qsv; fi
-  if [ "$WANT_NVENC" = 1 ]; then need_encoder h264_nvenc; fi
-  if [ "$WANT_AMF" = 1 ]; then need_encoder h264_amf; fi
-  if [ "$WANT_MF" = 1 ]; then need_encoder h264_mf; fi
-  if [ "$WANT_VT" = 1 ]; then need_encoder h264_videotoolbox; fi
+  need_encoder libx265
+  need_encoder libsvtav1
+  if [ "$WANT_QSV" = 1 ]; then
+    need_encoder h264_qsv
+    need_encoder hevc_qsv
+    need_encoder av1_qsv
+  fi
+  if [ "$WANT_NVENC" = 1 ]; then
+    need_encoder h264_nvenc
+    need_encoder hevc_nvenc
+    need_encoder av1_nvenc
+  fi
+  if [ "$WANT_AMF" = 1 ]; then
+    need_encoder h264_amf
+    need_encoder hevc_amf
+    need_encoder av1_amf
+  fi
+  if [ "$WANT_MF" = 1 ]; then
+    need_encoder h264_mf
+    need_encoder hevc_mf
+  fi
+  if [ "$WANT_VT" = 1 ]; then
+    need_encoder h264_videotoolbox
+    need_encoder hevc_videotoolbox
+  fi
   null_out="/dev/null"
   if is_windows; then
     null_out="NUL"
@@ -663,6 +820,14 @@ else
   "$OUT_BIN" -y -hide_banner -loglevel error \
     -f rawvideo -pix_fmt rgba -s 64x64 -framerate 2 -i - \
     -frames:v 2 -vf format=yuv420p -c:v libx264 -preset ultrafast -an -f mp4 "$null_out" \
+    </dev/zero
+  "$OUT_BIN" -y -hide_banner -loglevel error \
+    -f rawvideo -pix_fmt yuv420p -s 64x64 -framerate 2 -i - \
+    -frames:v 1 -c:v libx265 -preset ultrafast -crf 28 -tag:v hvc1 -an -f mp4 "$null_out" \
+    </dev/zero
+  "$OUT_BIN" -y -hide_banner -loglevel error \
+    -f rawvideo -pix_fmt yuv420p -s 64x64 -framerate 2 -i - \
+    -frames:v 1 -c:v libsvtav1 -preset 10 -crf 32 -an -f mp4 "$null_out" \
     </dev/zero
   if [ "$WANT_VT" = 1 ]; then
     "$OUT_BIN" -y -hide_banner -loglevel error \
