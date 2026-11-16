@@ -100,7 +100,7 @@ impl ScoreVideoApp {
         })
         .detach();
     }
-    fn ensure_codec_probe(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn ensure_codec_probe(&mut self, cx: &mut Context<Self>) {
         if self.codec_probe_started {
             return;
         }
@@ -120,9 +120,6 @@ impl ScoreVideoApp {
     }
 
     pub fn export_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.export_open && !self.codec_probe_started {
-            cx.defer(|this, cx| this.ensure_codec_probe(cx));
-        }
         let (w, h) = ExportOptions::size_from_pool(&self.pool);
         let out_label: SharedString = self
             .export_out_path

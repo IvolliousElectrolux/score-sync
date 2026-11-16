@@ -234,6 +234,7 @@ impl ScoreVideoApp {
                         true,
                         |this, _, cx| {
                             this.export_open = true;
+                            this.ensure_codec_probe(cx);
                             cx.notify();
                         },
                         cx,
