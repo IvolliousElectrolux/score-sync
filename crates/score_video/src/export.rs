@@ -1,22 +1,27 @@
 //! ffmpeg 导出流水线.
 //!
-//! 预览跟音频时钟 (秒). 导出不再用 concat/tpad/movie 拼静帧: 那些接缝会
-//! 每页丢掉约 1 帧的时长, 一个小时下来就是好几秒, 而且方向和旧的 duration+fps
-//! 滤镜相反 (旧的偏晚, concat 偏早).
+//! 预览跟音频时钟 (秒). 输出时长 = 帧数 / fps, 跟音频 `-t` 同一把尺子.
+//! 每一帧该显示哪一页, 仍按时间轴的 `covering_*` 算, 不在接缝上丢帧.
 //!
-//! 现在按时间轴算出每一帧该显示哪一页, 把 RGBA 像素按 `-framerate fps` 写进
-//! ffmpeg stdin. 输出时长 = 帧数 / fps, 跟音频 `-t` 同一把尺子.
+//! 内存: 同时只解码当前页, 以及刷入/交叠要用的另一页. 不再把整池 RGBA 留到导出结束.
+//!
+//! 速度有两条路, 看 sidecar 有没有 `concat` 解复用器:
+//! - 有: 静止段只编码一帧, `-framerate fps/帧数` 加上 `-fps_mode passthrough`
+//!   让这一帧的时长正好等于「帧数 / fps」, 再把各段 `-c copy` 拼起来.
+//!   淡入淡出 / 刷入 / 交叠仍按帧画. 硬件编码器对这种超低帧率会拒收, 所以这段走 libx264.
+//! - 没有: 仍按帧写入 stdin, 但先转成编码器要的 nv12 / yuv420p, 不再每帧做 RGBA→YUV.
 
-use std::collections::HashMap;
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 
 use crate::hw_encode::{select_video_encoder, video_codec_args, VideoEncoder};
 use crate::model::{AudioClip, FadeKind, MaterialItem, Timeline};
+use crate::yuv::{rgba_to_yuv420, Yuv420};
 
 /// ffmpeg 可执行文件路径: 优先找程序自身同目录下的 `ffmpeg(.exe)` (发行包
 /// 自带, 用户不用单独装 ffmpeg), 找不到再退回 PATH 里的 `ffmpeg` (方便开发
@@ -268,25 +273,212 @@ fn fit_pad(img: &RgbaImage, target_w: u32, target_h: u32) -> RgbaImage {
     canvas
 }
 
-fn load_pool_rgba(
-    pool: &[MaterialItem],
-    target_w: u32,
-    target_h: u32,
-) -> Result<HashMap<String, Vec<u8>>, String> {
-    let target_w = even_dim(target_w);
-    let target_h = even_dim(target_h);
-    let mut map = HashMap::new();
-    for item in pool {
-        let rgba = item.load_rgba()?;
-        let (w, h) = rgba.dimensions();
-        let img = if w == target_w && h == target_h {
-            rgba
-        } else {
-            fit_pad(&rgba, target_w, target_h)
-        };
-        map.insert(item.group_id.clone(), img.into_raw());
+/// 导出期间的页缓存: 最多留两张 RGBA (当前页 + 转场的另一页).
+/// 预览贴图是缩小后的 JPEG, 和这里的全分辨率不是同一份, 不互相占用.
+struct PageSource<'a> {
+    pool: &'a [MaterialItem],
+    w: u32,
+    h: u32,
+    slots: Vec<(String, Arc<Vec<u8>>)>,
+    black: Arc<Vec<u8>>,
+}
+
+impl<'a> PageSource<'a> {
+    fn new(pool: &'a [MaterialItem], w: u32, h: u32) -> Self {
+        let w = even_dim(w);
+        let h = even_dim(h);
+        let black = RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 255])).into_raw();
+        Self {
+            pool,
+            w,
+            h,
+            slots: Vec::new(),
+            black: Arc::new(black),
+        }
     }
-    Ok(map)
+
+    fn rgba(&mut self, gid: &str) -> Result<Arc<Vec<u8>>, String> {
+        if gid == BLACK_KEY {
+            return Ok(Arc::clone(&self.black));
+        }
+        if let Some(i) = self.slots.iter().position(|(id, _)| id == gid) {
+            let slot = self.slots.remove(i);
+            let arc = Arc::clone(&slot.1);
+            self.slots.insert(0, slot);
+            return Ok(arc);
+        }
+        let item = self
+            .pool
+            .iter()
+            .find(|m| m.group_id == gid)
+            .ok_or_else(|| format!("素材 {gid} 缺少图片, 无法导出"))?;
+        let rgba = item.load_rgba()?;
+        let (iw, ih) = rgba.dimensions();
+        let raw = if iw == self.w && ih == self.h {
+            rgba.into_raw()
+        } else {
+            fit_pad(&rgba, self.w, self.h).into_raw()
+        };
+        let arc = Arc::new(raw);
+        self.slots.insert(0, (gid.to_string(), Arc::clone(&arc)));
+        if self.slots.len() > 2 {
+            self.slots.pop();
+        }
+        Ok(arc)
+    }
+}
+
+/// 静止段: 输入 1 张图, 帧率写成 `fps/帧数`, 这一帧的时长就是帧数/fps.
+/// 转场段: 每帧都不同, 帧率就是导出帧率.
+fn segment_rate(fps: u32, frames: u64, dynamic: bool) -> String {
+    if dynamic {
+        fps.max(1).to_string()
+    } else {
+        format!("{}/{}", fps.max(1), frames.max(1))
+    }
+}
+
+fn segment_pictures(frames: u64, dynamic: bool) -> u64 {
+    if dynamic {
+        frames.max(1)
+    } else {
+        1
+    }
+}
+
+fn without_format_filter(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if arg == "-vf" {
+            skip = true;
+            continue;
+        }
+        out.push(arg);
+    }
+    out
+}
+
+fn concat_demuxer_available() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let mut cmd = Command::new(ffmpeg_path());
+        cmd.args(["-hide_banner", "-demuxers"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let Ok(output) = cmd.output() else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.lines()
+            .any(|line| line.split_whitespace().nth(1) == Some("concat"))
+    })
+}
+
+fn ffconcat_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "/")
+        .replace('\'', "'\\''")
+}
+
+/// 把一帧 (或一段转场的每一帧) 画进 `frame`. `layout = None` 时 `frame` 是 RGBA.
+struct FramePainter<'a> {
+    source: PageSource<'a>,
+    w: u32,
+    h: u32,
+    layout: Option<Yuv420>,
+    scratch: Vec<u8>,
+    frame: Vec<u8>,
+    fade_bg: [u8; 3],
+}
+
+impl<'a> FramePainter<'a> {
+    fn new(pool: &'a [MaterialItem], w: u32, h: u32, layout: Option<Yuv420>, fade_bg: [u8; 3]) -> Self {
+        let w = even_dim(w);
+        let h = even_dim(h);
+        let rgba_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        Self {
+            source: PageSource::new(pool, w, h),
+            w,
+            h,
+            layout,
+            scratch: vec![0u8; rgba_len],
+            frame: Vec::new(),
+            fade_bg,
+        }
+    }
+
+    fn fill_still(&mut self, gid: &str) -> Result<(), String> {
+        let rgba = self.source.rgba(gid)?;
+        match self.layout {
+            None => {
+                self.frame.clear();
+                self.frame.extend_from_slice(&rgba);
+            }
+            Some(layout) => rgba_to_yuv420(&rgba, self.w, self.h, layout, &mut self.frame),
+        }
+        Ok(())
+    }
+
+    /// 转场这一帧. 没有实际叠色时退回静止页.
+    fn fill_at(&mut self, timeline: &Timeline, run: &FrameRun, t: f64) -> Result<(), String> {
+        let kind = run.fade.map(|(k, _)| k);
+        let blended = match kind {
+            Some(FadeKind::WipeLtr) => {
+                if let Some((prev, next, p, _)) = timeline.page_blend_at(t) {
+                    let prev_img = self.source.rgba(prev)?;
+                    let next_img = self.source.rgba(next)?;
+                    apply_wipe(&prev_img, &next_img, &mut self.scratch, p as f32, self.w);
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(FadeKind::Dissolve) => {
+                if let Some((prev, next, p, _)) = timeline.page_blend_at(t) {
+                    let prev_img = self.source.rgba(prev)?;
+                    let next_img = self.source.rgba(next)?;
+                    apply_dissolve(&prev_img, &next_img, &mut self.scratch, p as f32);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => match fade_overlay_at(timeline, t, self.fade_bg) {
+                Some((alpha, bg)) if alpha > 0.004 => {
+                    let pixels = self.source.rgba(&run.gid)?;
+                    apply_fade_overlay(&pixels, &mut self.scratch, alpha, bg);
+                    true
+                }
+                _ => false,
+            },
+        };
+        if blended {
+            match self.layout {
+                None => {
+                    self.frame.clear();
+                    self.frame.extend_from_slice(&self.scratch);
+                }
+                Some(layout) => {
+                    rgba_to_yuv420(&self.scratch, self.w, self.h, layout, &mut self.frame)
+                }
+            }
+        } else {
+            self.fill_still(&run.gid)?;
+        }
+        Ok(())
+    }
 }
 
 fn fade_overlay_at(timeline: &Timeline, t: f64, fade_bg: [u8; 3]) -> Option<(f32, [u8; 3])> {
@@ -496,7 +688,7 @@ impl From<String> for EncodeFailure {
 }
 
 fn encode_raw_video(
-    images: &HashMap<String, Vec<u8>>,
+    pool: &[MaterialItem],
     timeline: &Timeline,
     runs: &[FrameRun],
     n_frames: u64,
@@ -508,14 +700,14 @@ fn encode_raw_video(
     let fps = opts.fps.max(1);
     let w = even_dim(opts.width);
     let h = even_dim(opts.height);
-    let frame_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+    let layout = encoder.stored_yuv();
     let label = encoder.label();
     let mut args = vec![
         os("-y"),
         os("-f"),
         os("rawvideo"),
         os("-pix_fmt"),
-        os("rgba"),
+        os(layout.ffmpeg_name()),
         os("-s"),
         os(format!("{w}x{h}")),
         os("-framerate"),
@@ -525,7 +717,7 @@ fn encode_raw_video(
         os("-frames:v"),
         os(n_frames.to_string()),
     ];
-    for arg in video_codec_args(encoder, opts.crf) {
+    for arg in without_format_filter(video_codec_args(encoder, opts.crf)) {
         args.push(os(arg));
     }
     args.extend([
@@ -591,65 +783,28 @@ fn encode_raw_video(
     });
 
     let write_result = (|| -> Result<(), String> {
-        let stdin = child
+        let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "ffmpeg stdin 不可写".to_string())?;
-        let mut stdin = BufWriter::with_capacity(frame_len.max(1) * 2, stdin);
-        let mut scratch = vec![0u8; frame_len];
-        let black = vec![0u8; frame_len];
+        let mut painter = FramePainter::new(pool, w, h, Some(layout), opts.fade_bg_rgb);
         let mut written = 0u64;
         let mut last_progress = Instant::now();
         for run in runs {
-            let pixels = images
-                .get(&run.gid)
-                .ok_or_else(|| format!("素材 {} 缺少图片, 无法导出", run.gid))?;
-            if pixels.len() != frame_len {
-                return Err(format!(
-                    "素材 {} 像素尺寸不匹配 ({} != {})",
-                    run.gid,
-                    pixels.len(),
-                    frame_len
-                ));
-            }
             if run.fade.is_none() {
+                painter.fill_still(&run.gid)?;
                 for _ in 0..run.frames {
                     stdin
-                        .write_all(pixels)
+                        .write_all(&painter.frame)
                         .map_err(|e| format!("写入帧失败: {e}"))?;
                     written += 1;
                 }
             } else {
                 let base = written;
-                let fade_kind = run.fade.map(|(k, _)| k);
                 for i in 0..run.frames {
-                    let t = frame_time(base + i, fps);
-                    let blended = match fade_kind {
-                        Some(FadeKind::WipeLtr) => {
-                            timeline.page_blend_at(t).map(|(prev_gid, next_gid, p, _)| {
-                                let next = images.get(next_gid).unwrap_or(pixels);
-                                let prev = images.get(prev_gid).unwrap_or(&black);
-                                apply_wipe(prev, next, &mut scratch, p as f32, w);
-                            })
-                        }
-                        Some(FadeKind::Dissolve) => {
-                            timeline.page_blend_at(t).map(|(prev_gid, next_gid, p, _)| {
-                                let next = images.get(next_gid).unwrap_or(pixels);
-                                let prev = images.get(prev_gid).unwrap_or(&black);
-                                apply_dissolve(prev, next, &mut scratch, p as f32);
-                            })
-                        }
-                        _ => match fade_overlay_at(timeline, t, opts.fade_bg_rgb) {
-                            Some((alpha, bg)) if alpha > 0.004 => {
-                                apply_fade_overlay(pixels, &mut scratch, alpha, bg);
-                                Some(())
-                            }
-                            _ => None,
-                        },
-                    };
-                    let bytes: &[u8] = if blended.is_some() { &scratch } else { pixels };
+                    painter.fill_at(timeline, run, frame_time(base + i, fps))?;
                     stdin
-                        .write_all(bytes)
+                        .write_all(&painter.frame)
                         .map_err(|e| format!("写入帧失败: {e}"))?;
                     written += 1;
                 }
@@ -824,31 +979,214 @@ fn mux_final(
     run_ffmpeg(&args, "合并音视频", tx)
 }
 
-fn run_export(
-    timeline: &Timeline,
+fn held_segment_args(
+    fps: u32,
+    w: u32,
+    h: u32,
+    frames: u64,
+    dynamic: bool,
+    crf: u32,
+    out: &Path,
+) -> Vec<std::ffi::OsString> {
+    let pictures = segment_pictures(frames, dynamic);
+    vec![
+        os("-y"),
+        os("-hide_banner"),
+        os("-loglevel"),
+        os("error"),
+        os("-framerate"),
+        os(segment_rate(fps, frames, dynamic)),
+        os("-f"),
+        os("rawvideo"),
+        os("-pix_fmt"),
+        os("yuv420p"),
+        os("-s"),
+        os(format!("{w}x{h}")),
+        os("-i"),
+        os("-"),
+        os("-frames:v"),
+        os(pictures.to_string()),
+        os("-fps_mode"),
+        os("passthrough"),
+        os("-c:v"),
+        os("libx264"),
+        os("-preset"),
+        os("medium"),
+        os("-tune"),
+        os("stillimage"),
+        os("-bf"),
+        os("0"),
+        os("-profile:v"),
+        os("high"),
+        os("-crf"),
+        os(crf.clamp(1, 51).to_string()),
+        os("-pix_fmt"),
+        os("yuv420p"),
+        os("-video_track_timescale"),
+        os(fps.max(1).to_string()),
+        os("-an"),
+        os_path(out),
+    ]
+}
+
+fn ffmpeg_with_stdin<W>(args: &[std::ffi::OsString], step: &str, write: W) -> Result<(), String>
+where
+    W: FnOnce(&mut ChildStdin) -> Result<(), String>,
+{
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().map_err(|e| {
+        crate::error::Error::FfmpegSpawn {
+            step: step.to_string(),
+            source: e,
+        }
+        .to_string()
+    })?;
+    let stderr = child.stderr.take();
+    let tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let reader = stderr.map(|stderr| {
+        let tail = Arc::clone(&tail);
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut buf = Vec::new();
+            for byte in reader.by_ref().bytes() {
+                let Ok(b) = byte else { break };
+                if b != b'\n' && b != b'\r' {
+                    buf.push(b);
+                    continue;
+                }
+                if buf.is_empty() {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&buf).trim().to_string();
+                buf.clear();
+                if text.is_empty() {
+                    continue;
+                }
+                if let Ok(mut guard) = tail.lock() {
+                    push_log_tail(&mut guard, &text);
+                }
+            }
+        })
+    });
+    let write_result = (|| {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "ffmpeg stdin 不可写".to_string())?;
+        write(&mut stdin)?;
+        stdin.flush().map_err(|e| format!("刷新帧数据失败: {e}"))?;
+        Ok(())
+    })();
+    drop(child.stdin.take());
+    let status = child.wait().map_err(|e| format!("等待进程结束失败: {e}"))?;
+    if let Some(handle) = reader {
+        let _ = handle.join();
+    }
+    let detail = tail
+        .lock()
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default();
+    if let Err(err) = write_result {
+        if detail.is_empty() {
+            return Err(err);
+        }
+        return Err(format!("{err}\n{detail}"));
+    }
+    if !status.success() {
+        let detail = if detail.is_empty() {
+            format!("退出码 {:?}", status.code())
+        } else {
+            format!("退出码 {:?}:\n{detail}", status.code())
+        };
+        return Err(crate::error::Error::Ffmpeg {
+            step: step.to_string(),
+            detail,
+        }
+        .to_string());
+    }
+    Ok(())
+}
+
+/// 静止段一帧, 转场段逐帧. 失败时调用方改走按帧编码.
+fn encode_held(
     pool: &[MaterialItem],
+    timeline: &Timeline,
+    runs: &[FrameRun],
     opts: &ExportOptions,
+    out_path: &Path,
+    work: &Path,
     tx: &async_channel::Sender<ExportMsg>,
-) -> Result<PathBuf, String> {
-    let _ = tx.send_blocking(ExportMsg::Progress("准备素材图片...".to_string()));
-    let work = WorkDir::new()
-        .map_err(|e| crate::error::Error::export(format!("创建临时目录失败: {e}")).to_string())?;
-    let mut images = load_pool_rgba(pool, opts.width, opts.height)?;
+) -> Result<(), String> {
+    let fps = opts.fps.max(1);
     let w = even_dim(opts.width);
     let h = even_dim(opts.height);
-    images.insert(
-        BLACK_KEY.to_string(),
-        RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 255])).into_raw(),
-    );
-
-    let fps = opts.fps.max(1);
-    let _ = tx.send_blocking(ExportMsg::Progress("按帧对齐时间轴...".to_string()));
-    let runs = build_frame_runs(timeline, fps);
-    let total_frames: u64 = runs.iter().map(|r| r.frames).sum();
-    if runs.is_empty() || total_frames == 0 {
-        return Err(crate::error::Error::export("时间轴为空, 无法导出").to_string());
+    let mut painter = FramePainter::new(pool, w, h, Some(Yuv420::I420), opts.fade_bg_rgb);
+    let mut script = String::from("ffconcat version 1.0\n");
+    let mut cursor = 0u64;
+    for (i, run) in runs.iter().enumerate() {
+        let seg = work.join(format!("s{i:05}.mp4"));
+        let dynamic = run.fade.is_some();
+        let args = held_segment_args(fps, w, h, run.frames, dynamic, opts.crf, &seg);
+        let base = cursor;
+        ffmpeg_with_stdin(&args, "按页编码", |stdin| {
+            if dynamic {
+                for i in 0..run.frames {
+                    painter.fill_at(timeline, run, frame_time(base + i, fps))?;
+                    stdin
+                        .write_all(&painter.frame)
+                        .map_err(|e| format!("写入帧失败: {e}"))?;
+                }
+            } else {
+                painter.fill_still(&run.gid)?;
+                stdin
+                    .write_all(&painter.frame)
+                    .map_err(|e| format!("写入帧失败: {e}"))?;
+            }
+            Ok(())
+        })?;
+        script.push_str(&format!("file '{}'\n", ffconcat_path(&seg)));
+        cursor += run.frames;
+        let _ = tx.send_blocking(ExportMsg::Progress(format!(
+            "编码画面 {}/{}...",
+            i + 1,
+            runs.len()
+        )));
     }
+    let list = work.join("segments.txt");
+    std::fs::write(&list, script).map_err(|e| format!("写出拼接列表失败: {e}"))?;
+    let args = vec![
+        os("-y"),
+        os("-f"),
+        os("concat"),
+        os("-safe"),
+        os("0"),
+        os("-i"),
+        os_path(&list),
+        os("-c"),
+        os("copy"),
+        os_path(out_path),
+    ];
+    run_ffmpeg(&args, "拼接画面", tx)
+}
 
+fn encode_cfr(
+    pool: &[MaterialItem],
+    timeline: &Timeline,
+    runs: &[FrameRun],
+    total_frames: u64,
+    opts: &ExportOptions,
+    out_path: &Path,
+    tx: &async_channel::Sender<ExportMsg>,
+) -> Result<(), String> {
     let _ = tx.send_blocking(ExportMsg::Progress("检测本机视频编码器...".to_string()));
     let encoder = select_video_encoder();
     let _ = tx.send_blocking(ExportMsg::Progress(format!(
@@ -857,35 +1195,82 @@ fn run_export(
         encoder.label(),
         runs.len()
     )));
-    let silent_video = work.path().join("silent.mp4");
     match encode_raw_video(
-        &images,
+        pool,
         timeline,
-        &runs,
+        runs,
         total_frames,
         opts,
         encoder,
-        &silent_video,
+        out_path,
         tx,
     ) {
-        Ok(()) => {}
+        Ok(()) => Ok(()),
         Err(err) if err.retryable && encoder.is_hardware() => {
             let _ = tx.send_blocking(ExportMsg::Progress(
                 "硬件编码失败, 改用 libx264...".to_string(),
             ));
             encode_raw_video(
-                &images,
+                pool,
                 timeline,
-                &runs,
+                runs,
                 total_frames,
                 opts,
                 VideoEncoder::Libx264,
-                &silent_video,
+                out_path,
                 tx,
             )
-            .map_err(|err| err.message)?;
+            .map_err(|err| err.message)
         }
-        Err(err) => return Err(err.message),
+        Err(err) => Err(err.message),
+    }
+}
+
+fn run_export(
+    timeline: &Timeline,
+    pool: &[MaterialItem],
+    opts: &ExportOptions,
+    tx: &async_channel::Sender<ExportMsg>,
+) -> Result<PathBuf, String> {
+    let work = WorkDir::new()
+        .map_err(|e| crate::error::Error::export(format!("创建临时目录失败: {e}")).to_string())?;
+    let fps = opts.fps.max(1);
+    let _ = tx.send_blocking(ExportMsg::Progress("按帧对齐时间轴...".to_string()));
+    let runs = build_frame_runs(timeline, fps);
+    let total_frames: u64 = runs.iter().map(|r| r.frames).sum();
+    if runs.is_empty() || total_frames == 0 {
+        return Err(crate::error::Error::export("时间轴为空, 无法导出").to_string());
+    }
+
+    let silent_video = work.path().join("silent.mp4");
+    if concat_demuxer_available() {
+        let stills = runs.iter().filter(|r| r.fade.is_none()).count();
+        let _ = tx.send_blocking(ExportMsg::Progress(format!(
+            "按页编码 {} 段 (其中 {} 段静止页只编一帧), 共 {} 帧...",
+            runs.len(),
+            stills,
+            total_frames
+        )));
+        if let Err(err) = encode_held(
+            pool,
+            timeline,
+            &runs,
+            opts,
+            &silent_video,
+            work.path(),
+            tx,
+        ) {
+            let missing = err.contains("缺少图片");
+            if missing {
+                return Err(err);
+            }
+            let _ = tx.send_blocking(ExportMsg::Progress(format!(
+                "按页编码失败, 改按帧编码: {err}"
+            )));
+            encode_cfr(pool, timeline, &runs, total_frames, opts, &silent_video, tx)?;
+        }
+    } else {
+        encode_cfr(pool, timeline, &runs, total_frames, opts, &silent_video, tx)?;
     }
 
     let video_dur = frames_to_seconds(total_frames, fps);
@@ -953,6 +1338,14 @@ mod tests {
         runs.iter()
             .map(|r| (r.gid.clone(), r.frames, r.fade.is_some()))
             .collect()
+    }
+
+    #[test]
+    fn held_static_rate_is_frames_over_fps() {
+        assert_eq!(segment_rate(60, 17, false), "60/17");
+        assert_eq!(segment_rate(60, 17, true), "60");
+        assert_eq!(segment_pictures(17, false), 1);
+        assert_eq!(segment_pictures(17, true), 17);
     }
 
     #[test]

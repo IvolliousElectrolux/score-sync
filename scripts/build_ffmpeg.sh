@@ -433,7 +433,8 @@ DECODERS="$DECODERS,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be"
 DECODERS="$DECODERS,pcm_f32le,pcm_f32be,pcm_f64le,pcm_u8,pcm_alaw,pcm_mulaw"
 DECODERS="$DECODERS,pcm_s16le_planar,pcm_s24le_planar,pcm_s32le_planar"
 DECODERS="$DECODERS,adpcm_ima_wav,adpcm_ms,adpcm_ima_qt,rawvideo"
-DEMUXERS="rawvideo,lavfi,mov,mp3,aac,flac,ogg,wav,w64,aiff,matroska"
+# concat: 静止页各编成一帧后按脚本拼接, 不再把同一张图按帧数重复送进编码器.
+DEMUXERS="rawvideo,lavfi,mov,mp3,aac,flac,ogg,wav,w64,aiff,matroska,concat"
 # CLI 是 `-f s16le`, configure 组件名是 `pcm_s16le` (见 libavformat/Makefile).
 # 写成 s16le 会被 --disable-everything 静默丢掉, 预览管道就没有 raw PCM muxer.
 MUXERS="mp4,mov,ipod,matroska,wav,pcm_s16le,flac,null,adts"

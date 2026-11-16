@@ -47,6 +47,15 @@ impl VideoEncoder {
     pub(crate) fn is_hardware(self) -> bool {
         self != Self::Libx264
     }
+
+    /// 编码器直接吃的未压缩格式. 输入已经是这个格式时不要再挂 `format` 滤镜,
+    /// 否则每一帧都在 CPU 上重做一遍 RGB→YUV.
+    pub(crate) fn stored_yuv(self) -> crate::yuv::Yuv420 {
+        match self {
+            Self::Qsv | Self::MediaFoundation => crate::yuv::Yuv420::Nv12,
+            _ => crate::yuv::Yuv420::I420,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

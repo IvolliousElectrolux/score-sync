@@ -4,7 +4,7 @@
 
 从扫描谱或 PDF 出发, 在同一界面完成 **谱表分块 → 蒙版清理 → 加底色裁切 → 视频剪辑导出**, 支持工程保存/继续编辑, 一路做到可以直接发布的同步曲谱视频 (MP4/MKV).
 
-当前版本: **1.9.2**
+当前版本: **1.9.3**
 
 ## 功能
 
@@ -52,7 +52,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 
 | 场景 | sidecar 做什么 |
 |------|----------------|
-| 导出画面 | stdin `rawvideo` RGBA (`-i -`, 协议必须有 `fd`) → 按本机显卡选编码器. Windows: 有 NVIDIA 用 `h264_nvenc`, 有 AMD 用 `h264_amf`, 只有 Intel 核显用 `h264_qsv` (ICQ, 刻度同 CRF), 再不行用 `h264_mf`. macOS 用 `h264_videotoolbox`. Linux 同样先看 NVIDIA / AMD / Intel. 探测或正式编码失败退回 `libx264` (yuv420p, CRF, preset=medium, tune=stillimage). `SCORE_SYNC_VIDEO_ENCODER` 可指定 `libx264` / `h264_qsv` / `h264_nvenc` / `h264_amf` / `h264_mf` / `h264_videotoolbox` |
+| 导出画面 | 按时间轴一段段读图, 内存里同时只留当前页和转场要用的另一页. sidecar 有 `concat` 解复用器时, 静止段用 libx264 只编一帧 (`-framerate fps/帧数`, `-fps_mode passthrough`, `-video_track_timescale fps`), 再 `concat` 复制拼起来, 时长仍落在帧网格上. 没有 `concat` 时退回按帧写 stdin, 但像素已经是编码器要的 `nv12` / `yuv420p`, 不再每帧做 RGBA→YUV. 硬件编码器: Windows 有 NVIDIA 用 `h264_nvenc`, 有 AMD 用 `h264_amf`, 只有 Intel 核显用 `h264_qsv` (ICQ, 刻度同 CRF), 再不行用 `h264_mf`. macOS 用 `h264_videotoolbox`. Linux 同样先看 NVIDIA / AMD / Intel. 探测或正式编码失败退回 `libx264` (yuv420p, CRF, preset=medium, tune=stillimage). `SCORE_SYNC_VIDEO_ENCODER` 可指定 `libx264` / `h264_qsv` / `h264_nvenc` / `h264_amf` / `h264_mf` / `h264_videotoolbox` |
 | 导出音频 | MP4: `aac`; MKV: `flac`. 多段: `filter_complex` 里 `atrim` / `asetpts` / `aformat` / `apad` / `concat`. 无音轨: `lavfi` `anullsrc` |
 | 预览解码 | m4a/aac/mp4/mov 转临时 WAV `pcm_s16le`; 其它非 16-bit WAV (mp3/flac/ogg 等) 走 ffmpeg 管道 `-f wav` |
 | 预览倍速 | `-af atempo` (单级 0.5–2, 3x 拆成两级) 后同样 `-f wav` 喂 rodio; 导出仍是 1x |
@@ -62,7 +62,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 
 - 编码: `libx264`, `aac`, `flac`, `pcm_s16le`. 另按平台带上硬件编码器, 只编码不解码: Windows `h264_qsv` (静态 libvpl) / `h264_nvenc` / `h264_amf` / `h264_mf`; macOS `h264_videotoolbox`; Linux `h264_qsv` / `h264_nvenc` / `h264_amf`. 驱动不打进 sidecar, 运行时向本机显卡驱动要
 - 解码: `aac` / HE-AAC / `alac` / `mp3` / `flac` / `vorbis` / `opus` / `speex` / 多种 PCM 与 wav-ADPCM / `rawvideo`. **没有视频解码器** (含 h264)
-- 解复用: `rawvideo`, `lavfi`, `mov` (mp4/m4a/m4b), `mp3`, `aac`, `flac`, `ogg`, `wav`, `w64`, `aiff`, `matroska`
+- 解复用: `rawvideo`, `lavfi`, `mov` (mp4/m4a/m4b), `mp3`, `aac`, `flac`, `ogg`, `wav`, `w64`, `aiff`, `matroska`, `concat`
 - 复用: `mp4`, `mov`, `ipod`, `matroska`, `wav`, `pcm_s16le` (CLI `-f s16le`), `flac`, `null`, `adts`
 - 滤镜: `format`, `scale`, `aformat`, `aresample`, `atrim`, `setpts`, `asetpts`, `apad`, `concat`, `atempo`, `anull`, `anullsrc` 以及 buffer 类
 - 协议: `file`, `pipe`, `fd` (FFmpeg 7.1 把 `-i -` 当成 `fd`, 缺了 stdin 编码会 `Protocol not found`)
@@ -159,6 +159,9 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
   `W` 刷入下一张 (切页并附 1 秒左→右转场), `X` 交叠下一张 (切页并附 1 秒叠化), `I`/`O` 标记淡入/淡出, 轨道区 `Ctrl+滚轮` 缩放; 预览按素材自身比例装进 16:9, 不拉扁
 
 ## 版本摘要
+
+### 1.9.3
+- 视频: 导出不再把整池谱页展开留在内存里, 同时只留当前页和转场要用的另一页. 静止页只编码一帧, 再按这一页的帧数撑住时长; 淡入淡出, 刷入和交叠仍逐帧. 裁剪版 ffmpeg 带上 `concat`, 用来把这些段复制拼起来. 感谢 [喵喵](https://github.com/shuanglong2) 的优化思路
 
 ### 1.9.2
 - 导入: 锁定宽高比时, 内容框裁完后把每页宽度拉到目标宽, 高度随该页比例. 不锁定则拉到目标宽高. 同组里内容框更窄的页不再短一截
