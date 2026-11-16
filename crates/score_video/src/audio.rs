@@ -2,11 +2,11 @@
 //!
 //! rodio 的 `Sink` 只能从头顺序播放已 append 的音源, 不支持中途寻址; 因此每次
 //! 跳转 (播放/暂停后重新播放/松开进度条) 都重新创建 `Sink`, 定位到覆盖目标时刻
-//! 的那条 `AudioClip`. 1x 对 16-bit WAV (含 m4a 转出来的预览 WAV) 按采样点
-//! `seek`, 不要用 `skip_duration` 从头解码 (长文件暂停再播会卡, 墙钟却继续走,
-//! 出声时播放头已经往后漂). FLAC 等不能按采样点寻址的格式, 以及倍速预览, 走
-//! ffmpeg 管道. 解码在单独的线程里往队列填, 出声回调只取已经解好的采样,
-//! 避免音频线程堵在管道读上, 墙钟照走、听到的声音却一顿一顿.
+//! 的那条 `AudioClip`. 1x 对 16-bit WAV 按采样点 `seek`. FLAC 在进程内按
+//! SEEKTABLE 跳到目标采样: 文件自带的表间隔不超过 4 秒就直接用; 没有表则等
+//! 后台把每一帧的文件偏移建好, 这段时间进度条停住. 倍速预览仍走 ffmpeg 管道.
+//! 出声前只同步打开眼前这一小段, sink 先暂停, 全部 append 完再 `play` 并启动
+//! 墙钟; 更后面的段落在后台逐段准备好再排进队列.
 //!
 //! `Sink::append` 之后音频线程会立刻出声, 而墙钟要等 `restart_from` 返回才走.
 //! 若在第一次 append 之后继续同步打开后面每一段 (每段一次 ffmpeg, 十几段就要
@@ -56,6 +56,8 @@ pub struct AudioEngine {
     /// 当前流对应的系统默认输出设备名. 读不到名字时为 None.
     output_device: Option<String>,
     output_device_checked: Instant,
+    /// FLAC 寻址表还在建: 播放头停在 `base_time`, 表好了再出声.
+    awaiting_index: bool,
 }
 
 impl AudioEngine {
@@ -76,6 +78,7 @@ impl AudioEngine {
                 prep_rx: None,
                 output_device: default_output_key(),
                 output_device_checked: Instant::now(),
+                awaiting_index: false,
             },
             Err(_) => Self {
                 _stream: None,
@@ -92,11 +95,13 @@ impl AudioEngine {
                 prep_rx: None,
                 output_device: None,
                 output_device_checked: Instant::now(),
+                awaiting_index: false,
             },
         }
     }
 
     pub fn set_clips(&mut self, clips: Vec<AudioClip>) {
+        crate::flac_index::prime(clips.iter().map(|clip| clip.path.as_path()));
         self.clips = clips;
         if self.playing {
             self.begin_playback_at(self.current_time());
@@ -145,6 +150,7 @@ impl AudioEngine {
         self.base_time = self.current_time();
         self.playing = false;
         self.scrubbing = false;
+        self.awaiting_index = false;
         self.started_at = None;
         self.stop_output();
     }
@@ -194,7 +200,16 @@ impl AudioEngine {
     }
 
     /// 把后台准备好的下一段排进当前 sink. 播放 ticker 里调用.
+    /// FLAC 寻址表还没好时进度条停着, 这里发现表好了再开始出声.
     pub fn pump(&mut self) {
+        if self.awaiting_index {
+            if self.playing && !self.scrubbing && !self.hold_for_flac_index(self.base_time) {
+                self.awaiting_index = false;
+                self.restart_from(self.base_time);
+                self.started_at = Some(Instant::now());
+            }
+            return;
+        }
         if !self.playing || self.scrubbing {
             return;
         }
@@ -231,14 +246,52 @@ impl AudioEngine {
     }
 
     /// 先把要出声的源打开, 再暂停 sink, append 完立刻 play, 然后才开墙钟.
-    /// 打开解码的时间不算进播放头, 出声也不会跑在墙钟前面.
+    /// 打开解码的时间不算进播放头. FLAC 寻址表未完成时墙钟先不开.
     fn begin_playback_at(&mut self, t: f64) {
         self.base_time = t.max(0.0);
         self.playing = true;
         self.scrubbing = false;
         self.started_at = None;
+        self.awaiting_index = false;
+        if self.hold_for_flac_index(self.base_time) {
+            self.awaiting_index = true;
+            self.stop_output();
+            return;
+        }
         self.restart_from(self.base_time);
         self.started_at = Some(Instant::now());
+    }
+
+    /// 1x 下, 马上要出声的 FLAC 还没有可用的寻址表.
+    fn hold_for_flac_index(&mut self, t: f64) -> bool {
+        if (self.speed - 1.0).abs() > 1e-3 {
+            return false;
+        }
+        let jobs = playback_slices(&self.clips, t);
+        let n = sync_prefix_len(&jobs);
+        let pending: Vec<&Path> = jobs
+            .iter()
+            .take(n)
+            .map(|job| job.path.as_path())
+            .filter(|path| !crate::flac_index::seek_ready(path))
+            .collect();
+        if pending.is_empty() {
+            return false;
+        }
+        crate::flac_index::prioritize(pending);
+        true
+    }
+
+    /// 播放条上的等待提示. 表已经能用, 或当前没在等, 就没有这行.
+    pub fn index_message(&self) -> Option<String> {
+        if !self.awaiting_index {
+            return None;
+        }
+        let jobs = playback_slices(&self.clips, self.base_time);
+        let n = sync_prefix_len(&jobs);
+        Some(crate::flac_index::wait_message(
+            jobs.iter().take(n).map(|job| job.path.as_path()),
+        ))
     }
 
     fn restart_from(&mut self, t: f64) {
@@ -380,6 +433,7 @@ struct PrepMsg {
 
 enum PlaySource {
     Wav(WavSliceSource),
+    Flac(FlacSource),
     Atempo(AtempoSource),
 }
 
@@ -389,6 +443,7 @@ impl Iterator for PlaySource {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             PlaySource::Wav(src) => src.next(),
+            PlaySource::Flac(src) => src.next(),
             PlaySource::Atempo(src) => src.next(),
         }
     }
@@ -398,6 +453,7 @@ impl Source for PlaySource {
     fn current_frame_len(&self) -> Option<usize> {
         match self {
             PlaySource::Wav(src) => src.current_frame_len(),
+            PlaySource::Flac(src) => src.current_frame_len(),
             PlaySource::Atempo(src) => src.current_frame_len(),
         }
     }
@@ -405,6 +461,7 @@ impl Source for PlaySource {
     fn channels(&self) -> u16 {
         match self {
             PlaySource::Wav(src) => src.channels(),
+            PlaySource::Flac(src) => src.channels(),
             PlaySource::Atempo(src) => src.channels(),
         }
     }
@@ -412,6 +469,7 @@ impl Source for PlaySource {
     fn sample_rate(&self) -> u32 {
         match self {
             PlaySource::Wav(src) => src.sample_rate(),
+            PlaySource::Flac(src) => src.sample_rate(),
             PlaySource::Atempo(src) => src.sample_rate(),
         }
     }
@@ -419,6 +477,7 @@ impl Source for PlaySource {
     fn total_duration(&self) -> Option<Duration> {
         match self {
             PlaySource::Wav(src) => src.total_duration(),
+            PlaySource::Flac(src) => src.total_duration(),
             PlaySource::Atempo(src) => src.total_duration(),
         }
     }
@@ -465,6 +524,10 @@ fn open_play_source(path: &Path, start: f64, duration: f64, speed: f32) -> Optio
     let stretch = (speed - 1.0).abs() > 1e-3;
     if stretch {
         open_atempo_source(path, start, duration, speed).map(PlaySource::Atempo)
+    } else if file_ext(path) == "flac" {
+        open_flac_slice(path, start, duration)
+            .map(PlaySource::Flac)
+            .or_else(|| open_atempo_source(path, start, duration, 1.0).map(PlaySource::Atempo))
     } else if let Some(src) = open_wav_slice(path, start, duration) {
         Some(PlaySource::Wav(src))
     } else {
@@ -921,6 +984,169 @@ impl Drop for AtempoSource {
     }
 }
 
+/// 进程内 FLAC: 先跳到目标采样, 再在后台把后面的帧解进队列.
+struct FlacSource {
+    channels: u16,
+    sample_rate: u32,
+    remaining: u64,
+    pipe: Arc<FlacPipe>,
+    local: Vec<i16>,
+    local_i: usize,
+}
+
+struct FlacPipe {
+    queue: Mutex<VecDeque<i16>>,
+    cv: Condvar,
+    eof: AtomicBool,
+    cancel: AtomicBool,
+}
+
+fn open_flac_slice(path: &Path, start: f64, duration: f64) -> Option<FlacSource> {
+    if duration < 1e-4 {
+        return None;
+    }
+    let rate = crate::flac_index::probe_rate(path)?;
+    let start_sample = (start.max(0.0) * rate as f64).round() as u64;
+    let mut decoder = crate::flac_index::FlacDecoder::open(path, start_sample)?;
+    let channels = decoder.channels().max(1);
+    let sample_rate = decoder.sample_rate().max(1);
+    let frames = (duration.max(0.0) * sample_rate as f64).round() as u64;
+    let mut remaining = frames.saturating_mul(u64::from(channels));
+    if remaining == 0 {
+        return None;
+    }
+    let want = (sample_rate as usize / 20).max(1) * channels as usize;
+    let mut primed = VecDeque::new();
+    while primed.len() < want && remaining > 0 {
+        let Some(chunk) = decoder.pull() else {
+            break;
+        };
+        let take = chunk.len().min(remaining as usize);
+        primed.extend(chunk.into_iter().take(take));
+        remaining -= take as u64;
+        if take < chunk.len() {
+            break;
+        }
+    }
+    if primed.is_empty() {
+        return None;
+    }
+    let pipe = Arc::new(FlacPipe {
+        queue: Mutex::new(primed),
+        cv: Condvar::new(),
+        eof: AtomicBool::new(false),
+        cancel: AtomicBool::new(false),
+    });
+    let reader = Arc::clone(&pipe);
+    let cap = (sample_rate as usize * channels as usize).clamp(4096, 44100 * 8);
+    std::thread::spawn(move || pump_flac(decoder, reader, remaining, cap));
+    Some(FlacSource {
+        channels,
+        sample_rate,
+        remaining: frames.saturating_mul(u64::from(channels)),
+        pipe,
+        local: Vec::new(),
+        local_i: 0,
+    })
+}
+
+fn pump_flac(
+    mut decoder: crate::flac_index::FlacDecoder,
+    pipe: Arc<FlacPipe>,
+    mut remaining: u64,
+    cap: usize,
+) {
+    while remaining > 0 && !pipe.cancel.load(Ordering::Relaxed) {
+        let Some(chunk) = decoder.pull() else {
+            break;
+        };
+        let take = chunk.len().min(remaining as usize);
+        remaining -= take as u64;
+        let mut queue = pipe.queue.lock().unwrap_or_else(|err| err.into_inner());
+        while queue.len() + take > cap && !pipe.cancel.load(Ordering::Relaxed) {
+            queue = pipe.cv.wait(queue).unwrap_or_else(|err| err.into_inner());
+        }
+        if pipe.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        queue.extend(chunk.into_iter().take(take));
+        drop(queue);
+        pipe.cv.notify_all();
+    }
+    pipe.eof.store(true, Ordering::Relaxed);
+    pipe.cv.notify_all();
+}
+
+impl Iterator for FlacSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        if self.local_i >= self.local.len() {
+            let mut queue = self
+                .pipe
+                .queue
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if queue.is_empty() && !self.pipe.eof.load(Ordering::Relaxed) {
+                let (guard, _) = self
+                    .pipe
+                    .cv
+                    .wait_timeout(queue, Duration::from_millis(2))
+                    .unwrap_or_else(|err| err.into_inner());
+                queue = guard;
+            }
+            if queue.is_empty() {
+                if self.pipe.eof.load(Ordering::Relaxed) {
+                    return None;
+                }
+                self.remaining -= 1;
+                return Some(0);
+            }
+            let n = queue.len().min(2048);
+            self.local.clear();
+            self.local.extend(queue.drain(..n));
+            self.local_i = 0;
+            drop(queue);
+            self.pipe.cv.notify_all();
+        }
+        let sample = self.local[self.local_i];
+        self.local_i += 1;
+        self.remaining -= 1;
+        Some(sample)
+    }
+}
+
+impl Source for FlacSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        let ch = self.channels.max(1) as u64;
+        let sr = self.sample_rate.max(1) as f64;
+        let secs = (self.remaining / ch) as f64 / sr;
+        Some(Duration::from_secs_f64(secs.max(0.0)))
+    }
+}
+
+impl Drop for FlacSource {
+    fn drop(&mut self) {
+        self.pipe.cancel.store(true, Ordering::Relaxed);
+        self.pipe.cv.notify_all();
+    }
+}
+
 /// 轨道波形峰值: 流式扫一遍采样, 不要 `collect` 整段 PCM.
 /// 长 CD 轨 stereo 44.1kHz 整段解开会到数百 MB, 峰值算完后堆又不还给 OS.
 pub fn waveform_peaks(
@@ -1280,13 +1506,31 @@ mod tests {
     use super::{parse_ffmpeg_duration, parse_ffmpeg_progress_seconds};
 
     fn clip(dur: f64, offset: f64) -> crate::model::AudioClip {
+        clip_at(std::path::Path::new("a.flac"), dur, offset)
+    }
+
+    fn clip_at(path: &std::path::Path, dur: f64, offset: f64) -> crate::model::AudioClip {
         crate::model::AudioClip {
             id: uuid::Uuid::new_v4(),
-            path: std::path::PathBuf::from("a.flac"),
+            path: path.to_path_buf(),
             label: "a".into(),
             duration: dur,
             offset,
         }
+    }
+
+    #[test]
+    fn flac_with_seek_table_starts_the_clock_without_waiting() {
+        let path = crate::flac_index::tests::fixture_native_flac();
+        let mut engine = super::AudioEngine::new();
+        engine.set_clips(vec![clip_at(&path, 30.0, 0.0)]);
+        engine.play_from(0.25);
+        assert!(engine.index_message().is_none());
+        assert!(engine.started_at.is_some());
+        let t0 = engine.current_time();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert!(engine.current_time() > t0 + 0.01);
+        engine.pause();
     }
 
     #[test]

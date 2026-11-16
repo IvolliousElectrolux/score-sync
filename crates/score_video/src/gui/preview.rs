@@ -40,6 +40,8 @@ impl ScoreVideoApp {
 
     pub(super) fn transport_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let playing = self.audio.is_playing();
+        let index_note = self.audio.index_message();
+        let waiting = index_note.is_some();
         let time_label = format!(
             "{} / {}",
             fmt_time(self.timeline.playhead),
@@ -167,9 +169,13 @@ impl ScoreVideoApp {
                     .items_center()
                     .px_2()
                     .text_xs()
-                    .text_color(ui_kit::chrome(0x94a3b8))
                     .whitespace_nowrap()
-                    .child(time_label),
+                    .text_color(if waiting {
+                        rgb(0xfbbf24)
+                    } else {
+                        ui_kit::chrome(0x94a3b8)
+                    })
+                    .child(index_note.unwrap_or(time_label)),
             )
     }
 

@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod error;
 pub mod export;
+mod flac_index;
 mod hw_encode;
 pub mod gui;
 pub mod model;
