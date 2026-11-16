@@ -349,6 +349,40 @@ rewrite_msvc_pc() {
   cat "$pc"
 }
 
+# ffmpeg 探测静态库时不带 pkg-config --static, C++ 运行库留在 Libs.private 就链不上.
+# macOS 上 bash 3.2 配合 set -u 不能展开空数组, 所以 MSVC 参数另走一条.
+fold_static_libs() {
+  local pc="$1" cxxlib="-lstdc++"
+  [ "$MSVC" = 1 ] && return 0
+  if [ ! -f "$pc" ]; then
+    echo "pkg-config file missing: $pc" >&2
+    exit 1
+  fi
+  if is_macos; then
+    cxxlib="-lc++"
+  fi
+  awk -v cxx="$cxxlib" '
+    /^Libs:/ { libs = $0; next }
+    /^Libs\.private:/ {
+      sub(/^Libs\.private:[[:space:]]*/, "")
+      priv = $0
+      next
+    }
+    /^Requires\.private:/ { next }
+    { print }
+    END {
+      if (libs != "") {
+        line = libs (priv != "" ? " " priv : "")
+        gsub(/-lstdc\+\+/, cxx, line)
+        print line
+      }
+    }
+  ' "$pc" >"$pc.tmp"
+  mv "$pc.tmp" "$pc"
+  echo "==> $(basename "$pc")"
+  cat "$pc"
+}
+
 cmake_static() {
   local src_arg="$1" build_arg="$2"
   shift 2
@@ -380,12 +414,19 @@ cmake_static() {
     echo "need cmake on PATH" >&2
     exit 1
   fi
-  cmake -S "$src_arg" -B "$build_arg" "${gen[@]}" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$prefix_arg" \
-    -DCMAKE_INSTALL_LIBDIR=lib \
-    "${msvc_cc[@]}" \
-    "$@"
+  # x265 3.4 的 cmake_minimum_required 低于 3.5, CMake 4 会直接拒绝.
+  local -a cmake_args=(
+    -S "$src_arg" -B "$build_arg" "${gen[@]}"
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$prefix_arg"
+    -DCMAKE_INSTALL_LIBDIR=lib
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  )
+  if [ "$MSVC" = 1 ]; then
+    cmake_args+=("${msvc_cc[@]}")
+  fi
+  cmake_args+=("$@")
+  cmake "${cmake_args[@]}"
   if [ "$MSVC" = 1 ]; then
     cmake --build "$build_arg"
     cmake --install "$build_arg"
@@ -415,6 +456,7 @@ install_x265() {
     rm -rf "$SRC/x265/build"
   fi
   rewrite_msvc_pc "$PREFIX/lib/pkgconfig/x265.pc" x265
+  fold_static_libs "$PREFIX/lib/pkgconfig/x265.pc"
 }
 
 # AV1 静止页用 SVT-AV1. 硬件 av1_* 只负责「这台机器有没有」, 以及按帧回退.
@@ -432,6 +474,7 @@ install_svtav1() {
     rm -rf "$SRC/svt-av1/build"
   fi
   rewrite_msvc_pc "$PREFIX/lib/pkgconfig/SvtAv1Enc.pc" SvtAv1Enc
+  fold_static_libs "$PREFIX/lib/pkgconfig/SvtAv1Enc.pc"
 }
 
 install_hw_deps() {
