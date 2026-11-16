@@ -437,6 +437,22 @@ cmake_static() {
   fi
 }
 
+# x265 3.4 把 CMP0025 / CMP0054 设成 OLD, CMake 4 已删除这两种旧行为.
+# 只改构建脚本里的策略, 不动编码器源码. Apple Clang 在 NEW 下不再冒充 Clang, 分支补上.
+relax_x265_cmake() {
+  local cm="$SRC/x265/source/CMakeLists.txt"
+  [ -f "$cm" ] || return 0
+  awk '
+    /cmake_policy\(SET CMP0025 OLD\)/ { sub(/OLD/, "NEW") }
+    /cmake_policy\(SET CMP0054 OLD\)/ { sub(/OLD/, "NEW") }
+    /STREQUAL "Clang"/ && !/AppleClang/ {
+      sub(/STREQUAL "Clang"/, "STREQUAL \"Clang\" OR ${CMAKE_CXX_COMPILER_ID} STREQUAL \"AppleClang\"")
+    }
+    { print }
+  ' "$cm" >"$cm.tmp"
+  mv "$cm.tmp" "$cm"
+}
+
 # 静止页的 HEVC 不走硬件: QSV 一类会拒收超低帧率. libx265 只编一帧.
 install_x265() {
   fetch_tar "$X265_URL" "$SRC/x265" "$SRC/x265.ok"
@@ -444,6 +460,7 @@ install_x265() {
     echo "==> reuse libx265"
   else
     echo "==> build x265 $X265_TAG"
+    relax_x265_cmake
     rm -rf "$SRC/x265/build"
     cmake_static "$SRC/x265/source" "$SRC/x265/build" \
       -DENABLE_SHARED=OFF \
@@ -759,7 +776,7 @@ fi
   echo "This sidecar ffmpeg is GPL (libx264 + FFmpeg --enable-gpl)."
   echo "score_sync stays MIT and only execs this binary as a separate process."
   echo
-  echo "No upstream source was patched; components are selected by configure."
+  echo "Codec sources are not patched. x265's CMakeLists only flips CMP0025 and CMP0054 to NEW so CMake 4 can configure it."
   echo "Recipe: scripts/build_ffmpeg.sh  (GitHub Actions: .github/workflows/ffmpeg.yml)"
   echo
   echo "FFmpeg ${FFMPEG_TAG}  ${FFMPEG_URL}"
