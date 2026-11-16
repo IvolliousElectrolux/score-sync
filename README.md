@@ -4,7 +4,7 @@
 
 从扫描谱或 PDF 出发, 在同一界面完成 **谱表分块 → 蒙版清理 → 加底色裁切 → 视频剪辑导出**, 支持工程保存/继续编辑, 一路做到可以直接发布的同步曲谱视频 (MP4/MKV).
 
-当前版本: **1.9.4**
+当前版本: **1.9.5**
 
 ## 功能
 
@@ -52,7 +52,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 
 | 场景 | sidecar 做什么 |
 |------|----------------|
-| 导出画面 | 按时间轴一段段读图, 内存里同时只留当前页和转场要用的另一页. 编码可选 AVC / HEVC / AV1, 后两者只在本机硬件编码器探测通过后出现. sidecar 有 `concat` 解复用器时, 静止段用该编码的软件编码器只编一帧 (`libx264` / `libx265` / `libsvtav1`, `-framerate fps/帧数`, `-fps_mode passthrough`, `-video_track_timescale fps`), 再 `concat` 复制拼起来, 时长仍落在帧网格上. 没有 `concat` 时退回按帧写 stdin, 像素已经是编码器要的 `nv12` / `yuv420p`. 硬件编码器按厂商: NVIDIA `*_nvenc`, AMD `*_amf`, Intel `*_qsv`, Windows 再试 `*_mf`, macOS `*_videotoolbox`. 这版 ffmpeg 没有 `av1_mf` 和 `av1_videotoolbox`. 探测或正式编码失败退回同编码的软件编码器. `SCORE_SYNC_VIDEO_ENCODER` 可指定具体名字, 如 `h264_qsv` / `hevc_nvenc` / `av1_amf` |
+| 导出画面 | 按时间轴一段段读图, 内存里同时只留当前页和转场要用的另一页. 编码可选 AVC / HEVC / AV1, 后两者只在本机硬件编码器探测通过后出现. sidecar 有 `concat` 解复用器时, 静止段只编一帧, 再把这一帧的时长改成这一页的帧数, 转场逐帧, 然后 `concat` 复制拼起来, 时长仍落在帧网格上. 本机硬件编码器可用时, 静止和转场都走这块显卡: 静止帧按导出帧率编一帧 (硬件拒收 `fps/帧数`), 再改 MP4 里这一帧的时长. 硬件编码或改时长失败, 整条时间轴改回同编码的软件编码器 (`libx264` / `libx265` / `libsvtav1`, 静止段 `-framerate fps/帧数`), 不会把硬件段和软件段拼在一起. 没有 `concat` 时退回按帧写 stdin, 像素已经是编码器要的 `nv12` / `yuv420p`. 硬件编码器按厂商: NVIDIA `*_nvenc`, AMD `*_amf`, Intel `*_qsv`, Windows 再试 `*_mf`, macOS `*_videotoolbox`. 这版 ffmpeg 没有 `av1_mf` 和 `av1_videotoolbox`. 探测或正式编码失败退回同编码的软件编码器. `SCORE_SYNC_VIDEO_ENCODER` 可指定具体名字, 如 `h264_qsv` / `hevc_nvenc` / `av1_amf` |
 | 导出音频 | MP4: `aac`; MKV: `flac`. 多段: `filter_complex` 里 `atrim` / `asetpts` / `aformat` / `apad` / `concat`. 无音轨: `lavfi` `anullsrc` |
 | 预览解码 | m4a/aac/mp4/mov 转临时 WAV `pcm_s16le`; 其它非 16-bit WAV (mp3/flac/ogg 等) 走 ffmpeg 管道 `-f wav` |
 | 预览倍速 | `-af atempo` (单级 0.5–2, 3x 拆成两级) 后同样 `-f wav` 喂 rodio; 导出仍是 1x |
@@ -70,7 +70,7 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 
 **不要假定能做 (常见踩坑):**
 
-- 硬件编码: 需要本机有对应驱动. 没有, 或画面一边超过编码器上限, 导出会改走 `libx264`. 旧 sidecar 里没有这些编码器名时同样走 `libx264`. 不解码 H.264
+- 硬件编码: 需要本机有对应驱动. 没有, 或画面一边超过编码器上限, 导出会改走同一编码的软件编码器 (`libx264` / `libx265` / `libsvtav1`). 旧 sidecar 里没有这些编码器名时同样退回软件. 不解码 H.264
 - 抽自己导出的 mp4 帧 / 解码别人的视频: 没有 h264 decoder, 也没有 `ffprobe`
 - 写出 jpg/png: 没有这些图像编码器
 - 视频转场、烧字、叠图: 没有 `xfade` / `overlay` / `fade` / `drawtext`
@@ -159,6 +159,9 @@ score_sync/           # 主程序 (本仓库根, Cargo workspace)
   `W` 刷入下一张 (切页并附 1 秒左→右转场), `X` 交叠下一张 (切页并附 1 秒叠化), `I`/`O` 标记淡入/淡出, 轨道区 `Ctrl+滚轮` 缩放; 预览按素材自身比例装进 16:9, 不拉扁
 
 ## 版本摘要
+
+### 1.9.5
+- 视频: 导出的静止页和转场都走本机硬件编码器. 静止页仍只编一帧, 再把这一帧撑成这一页的时长. 硬件失败则整段改回同编码的软件编码器
 
 ### 1.9.4
 - 视频: 导出可以选择 AVC, HEVC, AV1. 只有这台电脑探测通过的硬件编码器才会出现; 没有 AV1 硬件就不会列出 AV1. 静止页仍只编一帧

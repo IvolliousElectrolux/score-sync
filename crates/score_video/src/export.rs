@@ -6,9 +6,11 @@
 //! 内存: 同时只解码当前页, 以及刷入/交叠要用的另一页. 不再把整池 RGBA 留到导出结束.
 //!
 //! 速度有两条路, 看 sidecar 有没有 `concat` 解复用器:
-//! - 有: 静止段只编码一帧, `-framerate fps/帧数` 加上 `-fps_mode passthrough`
-//!   让这一帧的时长正好等于「帧数 / fps」, 再把各段 `-c copy` 拼起来.
-//!   淡入淡出 / 刷入 / 交叠仍按帧画. 硬件编码器对这种超低帧率会拒收, 所以这段走 libx264.
+//! - 有: 静止段只编码一帧, 这一帧的时长等于「帧数 / fps」; 转场段按帧画.
+//!   各段再 `-c copy` 拼起来. 本机硬件编码器可用时, 静止和转场都交给它.
+//!   硬件不接受 `fps/帧数`, 所以静止帧按导出帧率编一帧, 再把 MP4 里这一帧的
+//!   时长改成这一页的帧数. 硬件失败, 或时长盒对不上, 整条时间轴改用同编码的
+//!   软件编码器, 静止段直接 `-framerate fps/帧数`. 两套参数不混在同一次拼接里.
 //! - 没有: 仍按帧写入 stdin, 但先转成编码器要的 nv12 / yuv420p, 不再每帧做 RGBA→YUV.
 
 use std::io::{Read, Write};
@@ -998,6 +1000,160 @@ fn mux_final(
     run_ffmpeg(&args, "合并音视频", tx)
 }
 
+/// 电影时间刻度上的时长, 向上取整, 盖住媒体时间, 避免编辑列表把这一帧裁短.
+/// 17 帧, 媒体 60 Hz, 电影 1000 Hz → 284. 600 帧 → 10000.
+fn movie_duration_ticks(frames: u64, movie_ts: u64, media_ts: u64) -> Option<u32> {
+    if movie_ts == 0 || media_ts == 0 {
+        return None;
+    }
+    let ticks = frames.checked_mul(movie_ts)?;
+    u32::try_from(ticks.div_ceil(media_ts)).ok()
+}
+
+fn read_u32(data: &[u8], off: usize) -> Result<u32, String> {
+    let bytes = data.get(off..off + 4).ok_or("MP4 时长盒越界")?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn write_u32(data: &mut [u8], off: usize, value: u32) -> Result<(), String> {
+    let bytes = data.get_mut(off..off + 4).ok_or("MP4 时长盒越界")?;
+    bytes.copy_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+/// 只递归 moov 这一支. mdat 里的字节不是盒.
+fn walk_timing(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    slots: &mut [Option<usize>; 5],
+) -> Result<(), String> {
+    const NAMES: [&[u8]; 5] = [b"mvhd", b"mdhd", b"tkhd", b"elst", b"stts"];
+    const CONTAINERS: [&[u8]; 6] = [b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts"];
+    let mut cursor = start;
+    while cursor + 8 <= end {
+        let size = read_u32(data, cursor)? as usize;
+        if size < 8 || cursor + size > end {
+            return Err("MP4 盒尺寸不对".to_string());
+        }
+        let kind = &data[cursor + 4..cursor + 8];
+        let payload = cursor + 8;
+        let next = cursor + size;
+        if let Some(index) = NAMES.iter().position(|name| *name == kind) {
+            if slots[index].is_some() {
+                return Err("MP4 时长盒重复".to_string());
+            }
+            slots[index] = Some(payload);
+        } else if CONTAINERS.iter().any(|name| *name == kind) {
+            walk_timing(data, payload, next, slots)?;
+        }
+        cursor = next;
+    }
+    Ok(())
+}
+
+/// 硬件编码器拒收 `fps/帧数`, 静止段按导出帧率只编一帧, 包时长仍是 1/fps.
+/// 这里把这一帧改成「帧数 / fps」, 和软件路径那一帧的时长对齐:
+/// stts / mdhd 用媒体时间刻度, mvhd / tkhd / elst 用电影时间刻度并向上取整.
+fn stretch_still_bytes(data: &mut [u8], frames: u64, fps: u32) -> Result<(), String> {
+    if frames <= 1 {
+        return Ok(());
+    }
+    let frames_u32 = u32::try_from(frames).map_err(|_| "这一页太长, 无法改时长".to_string())?;
+    let mut slots = [None; 5];
+    walk_timing(data, 0, data.len(), &mut slots)?;
+    let [mvhd, mdhd, tkhd, elst, stts] = slots;
+    let (Some(mvhd), Some(mdhd), Some(tkhd), Some(elst), Some(stts)) = (mvhd, mdhd, tkhd, elst, stts)
+    else {
+        return Err("MP4 缺少时长盒".to_string());
+    };
+    for (at, need) in [(mvhd, 20), (mdhd, 20), (tkhd, 24), (elst, 16), (stts, 16)] {
+        if data.len() < at + need || data[at] != 0 {
+            return Err("MP4 时长盒版本不受支持".to_string());
+        }
+    }
+    if read_u32(data, mdhd + 12)? != fps {
+        return Err("静止段的时间刻度不是导出帧率".to_string());
+    }
+    if read_u32(data, stts + 4)? != 1
+        || read_u32(data, stts + 8)? != 1
+        || read_u32(data, stts + 12)? != 1
+    {
+        return Err("静止段不是单帧, 不改时长".to_string());
+    }
+    if read_u32(data, elst + 4)? != 1 || read_u32(data, elst + 12)? != 0 {
+        return Err("编辑列表不是单段, 不改时长".to_string());
+    }
+    let movie_ts = u64::from(read_u32(data, mvhd + 12)?);
+    let movie_dur = movie_duration_ticks(frames, movie_ts, u64::from(fps))
+        .ok_or("这一页的时长超出 MP4 能写下的范围")?;
+    write_u32(data, stts + 12, frames_u32)?;
+    write_u32(data, mdhd + 16, frames_u32)?;
+    write_u32(data, mvhd + 16, movie_dur)?;
+    write_u32(data, tkhd + 20, movie_dur)?;
+    write_u32(data, elst + 8, movie_dur)?;
+    Ok(())
+}
+
+fn stretch_still_mp4(path: &Path, frames: u64, fps: u32) -> Result<(), String> {
+    if frames <= 1 {
+        return Ok(());
+    }
+    let mut data = std::fs::read(path).map_err(|e| format!("读取静止段失败: {e}"))?;
+    stretch_still_bytes(&mut data, frames, fps)?;
+    std::fs::write(path, data).map_err(|e| format!("写回静止段时长失败: {e}"))?;
+    Ok(())
+}
+
+fn held_hw_segment_args(
+    codec: VideoCodec,
+    encoder: VideoEncoder,
+    fps: u32,
+    w: u32,
+    h: u32,
+    frames: u64,
+    dynamic: bool,
+    crf: u32,
+    out: &Path,
+) -> Vec<std::ffi::OsString> {
+    let pictures = if dynamic { frames.max(1) } else { 1 };
+    let layout = encoder.stored_yuv();
+    let mut args = vec![
+        os("-y"),
+        os("-hide_banner"),
+        os("-loglevel"),
+        os("error"),
+        os("-framerate"),
+        os(fps.max(1).to_string()),
+        os("-f"),
+        os("rawvideo"),
+        os("-pix_fmt"),
+        os(layout.ffmpeg_name()),
+        os("-s"),
+        os(format!("{w}x{h}")),
+        os("-i"),
+        os("-"),
+        os("-frames:v"),
+        os(pictures.to_string()),
+        os("-fps_mode"),
+        os("passthrough"),
+    ];
+    for arg in without_format_filter(video_codec_args(codec, encoder, crf)) {
+        args.push(os(arg));
+    }
+    // Media Foundation 不认 -bf. 其余硬件关掉 B 帧, 短转场和后面的拼接才稳.
+    if encoder != VideoEncoder::MediaFoundation {
+        args.extend([os("-bf"), os("0")]);
+    }
+    args.extend([
+        os("-video_track_timescale"),
+        os(fps.max(1).to_string()),
+        os("-an"),
+        os_path(out),
+    ]);
+    args
+}
+
 fn held_segment_args(
     codec: VideoCodec,
     fps: u32,
@@ -1030,7 +1186,7 @@ fn held_segment_args(
         os("-fps_mode"),
         os("passthrough"),
     ];
-    // 硬件编码器经常拒收「fps/帧数」这种超低帧率, 静止页仍用同系列的软件编码器.
+    // 硬件拒收「fps/帧数」时整条时间轴回到这里, 仍用同编码的软件编码器.
     match codec {
         VideoCodec::Avc => args.extend([
             os("-c:v"),
@@ -1169,8 +1325,123 @@ where
     Ok(())
 }
 
-/// 静止段一帧, 转场段逐帧. 失败时调用方改走按帧编码.
+fn concat_segments(
+    list: &Path,
+    out_path: &Path,
+    tx: &async_channel::Sender<ExportMsg>,
+) -> Result<(), String> {
+    let args = vec![
+        os("-y"),
+        os("-f"),
+        os("concat"),
+        os("-safe"),
+        os("0"),
+        os("-i"),
+        os_path(list),
+        os("-c"),
+        os("copy"),
+        os_path(out_path),
+    ];
+    run_ffmpeg(&args, "拼接画面", tx)
+}
+
+fn write_run_frames(
+    painter: &mut FramePainter<'_>,
+    timeline: &Timeline,
+    run: &FrameRun,
+    base: u64,
+    fps: u32,
+    dynamic: bool,
+    stdin: &mut ChildStdin,
+) -> Result<(), String> {
+    if dynamic {
+        for index in 0..run.frames {
+            painter.fill_at(timeline, run, frame_time(base + index, fps))?;
+            stdin
+                .write_all(&painter.frame)
+                .map_err(|e| format!("写入帧失败: {e}"))?;
+        }
+    } else {
+        painter.fill_still(&run.gid)?;
+        stdin
+            .write_all(&painter.frame)
+            .map_err(|e| format!("写入帧失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 静止段一帧, 转场段逐帧. 硬件整段失败时改回同编码的软件编码器.
+/// 缺图不改路. 两条路都失败时, 调用方再改走按帧编码.
 fn encode_held(
+    pool: &[MaterialItem],
+    timeline: &Timeline,
+    runs: &[FrameRun],
+    opts: &ExportOptions,
+    out_path: &Path,
+    work: &Path,
+    tx: &async_channel::Sender<ExportMsg>,
+) -> Result<(), String> {
+    let encoder = select_video_encoder(opts.codec);
+    if encoder.is_hardware() {
+        match encode_held_hw(pool, timeline, runs, opts, encoder, out_path, work, tx) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.contains("缺少图片") => return Err(err),
+            Err(err) => {
+                let brief = err.lines().next().unwrap_or("").chars().take(180).collect::<String>();
+                let _ = tx.send_blocking(ExportMsg::Progress(format!(
+                    "硬件编码失败, 改用 {}: {brief}",
+                    VideoEncoder::Software.ffmpeg_name(opts.codec)
+                )));
+            }
+        }
+    }
+    encode_held_software(pool, timeline, runs, opts, out_path, work, tx)
+}
+
+fn encode_held_hw(
+    pool: &[MaterialItem],
+    timeline: &Timeline,
+    runs: &[FrameRun],
+    opts: &ExportOptions,
+    encoder: VideoEncoder,
+    out_path: &Path,
+    work: &Path,
+    tx: &async_channel::Sender<ExportMsg>,
+) -> Result<(), String> {
+    let fps = opts.fps.max(1);
+    let w = even_dim(opts.width);
+    let h = even_dim(opts.height);
+    let label = encoder.label(opts.codec);
+    let mut painter = FramePainter::new(pool, w, h, Some(encoder.stored_yuv()), opts.fade_bg_rgb);
+    let mut script = String::from("ffconcat version 1.0\n");
+    let mut cursor = 0u64;
+    for (i, run) in runs.iter().enumerate() {
+        let seg = work.join(format!("s{i:05}.mp4"));
+        let dynamic = run.fade.is_some();
+        let args = held_hw_segment_args(
+            opts.codec, encoder, fps, w, h, run.frames, dynamic, opts.crf, &seg,
+        );
+        let base = cursor;
+        ffmpeg_with_stdin(&args, "按页编码", |stdin| {
+            write_run_frames(&mut painter, timeline, run, base, fps, dynamic, stdin)
+        })?;
+        if !dynamic {
+            stretch_still_mp4(&seg, run.frames, fps)?;
+        }
+        script.push_str(&format!("file '{}'\n", ffconcat_path(&seg)));
+        cursor += run.frames;
+        let _ = tx.send_blocking(ExportMsg::Progress(format!(
+            "编码画面 {}/{} ({label})...",
+            i + 1,
+            runs.len()
+        )));
+    }
+    let list = work.join("segments.txt");
+    std::fs::write(&list, script).map_err(|e| format!("写出拼接列表失败: {e}"))?;
+    concat_segments(&list, out_path, tx)
+}
+
+fn encode_held_software(
     pool: &[MaterialItem],
     timeline: &Timeline,
     runs: &[FrameRun],
@@ -1191,20 +1462,7 @@ fn encode_held(
         let args = held_segment_args(opts.codec, fps, w, h, run.frames, dynamic, opts.crf, &seg);
         let base = cursor;
         ffmpeg_with_stdin(&args, "按页编码", |stdin| {
-            if dynamic {
-                for i in 0..run.frames {
-                    painter.fill_at(timeline, run, frame_time(base + i, fps))?;
-                    stdin
-                        .write_all(&painter.frame)
-                        .map_err(|e| format!("写入帧失败: {e}"))?;
-                }
-            } else {
-                painter.fill_still(&run.gid)?;
-                stdin
-                    .write_all(&painter.frame)
-                    .map_err(|e| format!("写入帧失败: {e}"))?;
-            }
-            Ok(())
+            write_run_frames(&mut painter, timeline, run, base, fps, dynamic, stdin)
         })?;
         script.push_str(&format!("file '{}'\n", ffconcat_path(&seg)));
         cursor += run.frames;
@@ -1216,19 +1474,7 @@ fn encode_held(
     }
     let list = work.join("segments.txt");
     std::fs::write(&list, script).map_err(|e| format!("写出拼接列表失败: {e}"))?;
-    let args = vec![
-        os("-y"),
-        os("-f"),
-        os("concat"),
-        os("-safe"),
-        os("0"),
-        os("-i"),
-        os_path(&list),
-        os("-c"),
-        os("copy"),
-        os_path(out_path),
-    ];
-    run_ffmpeg(&args, "拼接画面", tx)
+    concat_segments(&list, out_path, tx)
 }
 
 fn encode_cfr(
@@ -1402,6 +1648,124 @@ mod tests {
         assert_eq!(segment_rate(60, 17, true), "60");
         assert_eq!(segment_pictures(17, false), 1);
         assert_eq!(segment_pictures(17, true), 17);
+    }
+
+    #[test]
+    fn movie_duration_rounds_up_to_cover_the_frame() {
+        assert_eq!(movie_duration_ticks(1, 1000, 60), Some(17));
+        assert_eq!(movie_duration_ticks(17, 1000, 60), Some(284));
+        assert_eq!(movie_duration_ticks(30, 1000, 60), Some(500));
+        assert_eq!(movie_duration_ticks(600, 1000, 60), Some(10000));
+        assert_eq!(movie_duration_ticks(17, 1000, 30), Some(567));
+        assert_eq!(movie_duration_ticks(1, 0, 60), None);
+    }
+
+    fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn timing_payload(len: usize, writes: &[(usize, u32)]) -> Vec<u8> {
+        let mut payload = vec![0u8; len];
+        for (at, value) in writes {
+            payload[*at..*at + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        payload
+    }
+
+    #[test]
+    fn stretch_one_hardware_frame_to_the_page_length() {
+        let stts = mp4_box(b"stts", &timing_payload(16, &[(4, 1), (8, 1), (12, 1)]));
+        let stbl = mp4_box(b"stbl", &stts);
+        let minf = mp4_box(b"minf", &stbl);
+        let mdhd = mp4_box(b"mdhd", &timing_payload(24, &[(12, 60), (16, 1)]));
+        let mdia = mp4_box(b"mdia", &[mdhd, minf].concat());
+        let elst = mp4_box(b"elst", &timing_payload(20, &[(4, 1), (8, 17), (12, 0)]));
+        let edts = mp4_box(b"edts", &elst);
+        let tkhd = mp4_box(b"tkhd", &timing_payload(84, &[(20, 17)]));
+        let trak = mp4_box(b"trak", &[tkhd, edts, mdia].concat());
+        let mvhd = mp4_box(b"mvhd", &timing_payload(100, &[(12, 1000), (16, 17)]));
+        let mut file = mp4_box(b"moov", &[mvhd, trak].concat());
+
+        stretch_still_bytes(&mut file, 17, 60).unwrap();
+        fn field(data: &[u8], kind: &[u8; 4], rel: usize) -> u32 {
+            let at = data.windows(4).position(|w| w == kind.as_slice()).unwrap();
+            u32::from_be_bytes(data[at + 4 + rel..at + 8 + rel].try_into().unwrap())
+        }
+        assert_eq!(field(&file, b"stts", 12), 17);
+        assert_eq!(field(&file, b"mdhd", 16), 17);
+        assert_eq!(field(&file, b"mvhd", 16), 284);
+        assert_eq!(field(&file, b"tkhd", 20), 284);
+        assert_eq!(field(&file, b"elst", 8), 284);
+
+        stretch_still_bytes(&mut file, 1, 60).unwrap();
+        assert_eq!(field(&file, b"stts", 12), 17);
+
+        let stts_at = file.windows(4).position(|w| w == b"stts".as_slice()).unwrap();
+        file[stts_at + 4 + 15] = 2;
+        assert!(stretch_still_bytes(&mut file, 30, 60).is_err());
+    }
+
+    #[test]
+    fn held_hw_still_encodes_one_frame_at_the_export_rate() {
+        let args = held_hw_segment_args(
+            VideoCodec::Hevc,
+            VideoEncoder::Qsv,
+            60,
+            1280,
+            720,
+            600,
+            false,
+            18,
+            Path::new("a.mp4"),
+        );
+        let text: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert!(text.windows(2).any(|pair| pair == ["-framerate", "60"]));
+        assert!(text.windows(2).any(|pair| pair == ["-frames:v", "1"]));
+        assert!(text.windows(2).any(|pair| pair == ["-c:v", "hevc_qsv"]));
+        assert!(text.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"]));
+        assert!(text.windows(2).any(|pair| pair == ["-bf", "0"]));
+        assert!(text.windows(2).any(|pair| pair == ["-video_track_timescale", "60"]));
+        assert!(!text.iter().any(|arg| arg == "-vf" || arg.contains('/')));
+    }
+
+    #[test]
+    fn held_hw_transition_sends_every_frame_without_bf_on_mf() {
+        let transition = held_hw_segment_args(
+            VideoCodec::Avc,
+            VideoEncoder::Qsv,
+            60,
+            640,
+            360,
+            30,
+            true,
+            18,
+            Path::new("b.mp4"),
+        );
+        let text: Vec<String> = transition
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(text.windows(2).any(|pair| pair == ["-frames:v", "30"]));
+        assert!(text.windows(2).any(|pair| pair == ["-c:v", "h264_qsv"]));
+
+        let mf = held_hw_segment_args(
+            VideoCodec::Avc,
+            VideoEncoder::MediaFoundation,
+            30,
+            640,
+            360,
+            10,
+            false,
+            18,
+            Path::new("c.mp4"),
+        );
+        let mf_text: Vec<String> = mf.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert!(mf_text.windows(2).any(|pair| pair == ["-c:v", "h264_mf"]));
+        assert!(!mf_text.windows(2).any(|pair| pair == ["-bf", "0"]));
+        assert!(!mf_text.iter().any(|arg| arg == "-vf"));
     }
 
     #[test]
