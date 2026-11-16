@@ -527,6 +527,8 @@ pub(crate) enum ImportJob {
     Pdf {
         path: PathBuf,
         scales: Vec<(f32, f32)>,
+        /// `(目标宽, 目标高, 锁定宽高比)`. None 表示不在裁切后再拉齐.
+        fit: Option<(u32, u32, bool)>,
         /// 1-based 页码; 空则导入全部页.
         pages: Vec<u32>,
     },

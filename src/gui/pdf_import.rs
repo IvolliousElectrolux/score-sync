@@ -844,6 +844,7 @@ impl ScoreSyncApp {
                     Some(ImportJob::Pdf {
                         path: info.path.clone(),
                         scales: st.scales_for_file(info),
+                        fit: (tw > 0).then_some((tw, th, lock)),
                         pages,
                     })
                 }

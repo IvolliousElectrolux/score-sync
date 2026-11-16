@@ -198,6 +198,7 @@ impl ScoreSyncApp {
                 .map(|path| ImportJob::Pdf {
                     path,
                     scales: Vec::new(),
+                    fit: None,
                     pages: Vec::new(),
                 })
                 .collect(),
@@ -249,6 +250,7 @@ impl ScoreSyncApp {
                     ImportJob::Pdf {
                         path: pdf,
                         scales,
+                        fit,
                         pages,
                     } => {
                         let name = pdf
@@ -265,6 +267,7 @@ impl ScoreSyncApp {
                             pack_lines,
                             pack_mode,
                             &scales,
+                            fit,
                             &pages,
                             move || token_loop.load(Ordering::SeqCst) == gen,
                             |i, total, page| {

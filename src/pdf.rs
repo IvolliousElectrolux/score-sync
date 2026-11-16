@@ -537,6 +537,26 @@ pub fn scale_from_target(pt: f32, px: u32) -> f32 {
     clamp_pdf_scale(px as f32 / pt)
 }
 
+/// 内容框裁完之后套到导入目标.
+/// `lock_aspect` 时各页宽高比不同, 做不到同一宽高, 只把宽度拉齐, 高度跟着该页比例走.
+/// 不锁定则拉到确切的宽×高. `None` 表示按渲染倍率原样留下.
+pub fn fit_imported_page(
+    image: image::RgbImage,
+    fit: Option<(u32, u32, bool)>,
+) -> image::RgbImage {
+    let Some((tw, th, lock)) = fit else {
+        return image;
+    };
+    if tw == 0 {
+        return image;
+    }
+    if lock {
+        scale_rgb_to_width(image, tw)
+    } else {
+        scale_rgb_to_size(image, tw, th.max(1))
+    }
+}
+
 /// 等比缩放到目标宽 (混入 PDF 时与谱面齐宽).
 pub fn scale_rgb_to_width(rgb: image::RgbImage, target_w: u32) -> image::RgbImage {
     let w = rgb.width().max(1);
@@ -588,6 +608,8 @@ pub enum StreamedPdfPage {
 /// PDF 逐页处理; 每完成一页回调 `(原页 index0, total, 结果)`.
 /// `scales` 与页一一对应为 `(scale_x, scale_y)`; 长度为 1 时套用到每一页;
 /// 空则用 [DEFAULT_PDF_SCALE].
+/// `fit` 为 `(目标宽, 目标高, 锁定宽高比)`. 内容框裁完后同组里比抽样页窄的页
+/// 会短一截; 锁定时把宽度拉齐, 不锁定则拉到目标宽高.
 /// `pages` 为 1-based 页码; 空则导入全部页.
 /// 渲染后立刻在本线程识别并写 sidecar, 不占用 UI.
 /// `should_continue` 返回 false 时停在当前页之前 (已写出的页保留), 返回已完成页数.
@@ -598,6 +620,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
     pack_lines: u32,
     pack_mode: crate::staff_detect::StaffPackMode,
     scales: &[(f32, f32)],
+    fit: Option<(u32, u32, bool)>,
     pages: &[u32],
     mut should_continue: impl FnMut() -> bool,
     mut on_page: impl FnMut(usize, usize, StreamedPdfPage),
@@ -670,6 +693,7 @@ pub fn pdf_pages_to_tmp_images_streaming(
             let (sx, sy) = scale_for_page(scales, i);
             let image = render_visible(&page, sx, sy)
                 .map_err(|e| crate::error::Error::msg(format!("渲染第 {} 页失败: {e}", i + 1)))?;
+            let image = fit_imported_page(image, fit);
             crate::trace::log(&format!(
                 "pdf: 渲染 {}/{total} 完成 {}×{}, 写 PNG …",
                 done + 1,
@@ -747,6 +771,7 @@ pub fn pdf_pages_to_tmp_images(pdf_path: &Path) -> Result<Vec<PathBuf>, crate::e
         1,
         crate::staff_detect::StaffPackMode::WithinPage,
         &[],
+        None,
         &[],
         || true,
         |_, _, page| {
@@ -1106,6 +1131,20 @@ mod tests {
             std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", dll);
         }
         bind_pdfium().expect("应能通过 PDFIUM_DYNAMIC_LIB_PATH 加载 pdfium");
+    }
+
+    #[test]
+    fn fit_imported_page_unifies_width_when_aspect_is_locked() {
+        let img = image::RgbImage::from_pixel(32, 40, image::Rgb([8, 8, 8]));
+        let out = fit_imported_page(img, Some((40, 99, true)));
+        assert_eq!(out.dimensions(), (40, 50));
+    }
+
+    #[test]
+    fn fit_imported_page_stretches_to_box_when_aspect_is_unlocked() {
+        let img = image::RgbImage::from_pixel(32, 40, image::Rgb([8, 8, 8]));
+        let out = fit_imported_page(img, Some((40, 40, false)));
+        assert_eq!(out.dimensions(), (40, 40));
     }
 
     #[test]
