@@ -4,7 +4,8 @@
 //! 跳转 (播放/暂停后重新播放/松开进度条) 都重新创建 `Sink`, 定位到覆盖目标时刻
 //! 的那条 `AudioClip`. 1x 对 16-bit WAV 按采样点 `seek`. FLAC 在进程内按
 //! SEEKTABLE 跳到目标采样: 文件自带的表间隔不超过 4 秒就直接用; 没有表则等
-//! 后台把每一帧的文件偏移建好, 这段时间进度条停住. 倍速预览仍走 ffmpeg 管道.
+//! 后台把每一帧的文件偏移建好, 这段时间进度条停住. mp3, ogg, m4a 以及倍速也在
+//! 进程内解码, 倍速用重叠相加, 不再为每次跳转新开 ffmpeg. 打不开时才退回管道.
 //! 出声前只同步打开眼前这一小段, sink 先暂停, 全部 append 完再 `play` 并启动
 //! 墙钟; 更后面的段落在后台逐段准备好再排进队列.
 //!
@@ -522,17 +523,19 @@ fn sync_prefix_len(jobs: &[SliceJob]) -> usize {
 
 fn open_play_source(path: &Path, start: f64, duration: f64, speed: f32) -> Option<PlaySource> {
     let stretch = (speed - 1.0).abs() > 1e-3;
-    if stretch {
-        open_atempo_source(path, start, duration, speed).map(PlaySource::Atempo)
-    } else if file_ext(path) == "flac" {
-        open_flac_slice(path, start, duration)
-            .map(PlaySource::Flac)
-            .or_else(|| open_atempo_source(path, start, duration, 1.0).map(PlaySource::Atempo))
-    } else if let Some(src) = open_wav_slice(path, start, duration) {
-        Some(PlaySource::Wav(src))
-    } else {
-        open_atempo_source(path, start, duration, 1.0).map(PlaySource::Atempo)
+    if !stretch && file_ext(path) == "flac" {
+        if let Some(src) = open_flac_slice(path, start, duration) {
+            return Some(PlaySource::Flac(src));
+        }
+    } else if !stretch {
+        if let Some(src) = open_wav_slice(path, start, duration) {
+            return Some(PlaySource::Wav(src));
+        }
     }
+    if let Some(src) = open_live_slice(path, start, duration, speed) {
+        return Some(PlaySource::Flac(src));
+    }
+    open_atempo_source(path, start, duration, speed).map(PlaySource::Atempo)
 }
 
 /// MPEG-4 / 裸 AAC: rodio 0.19 初始化时遇到 SeekError 会 `unreachable!` 直接崩
@@ -1051,6 +1054,170 @@ fn open_flac_slice(path: &Path, start: f64, duration: f64) -> Option<FlacSource>
     })
 }
 
+enum LiveDecoder {
+    Flac(crate::flac_index::FlacDecoder),
+    Other(crate::pcm_decode::SymphoniaDecoder),
+}
+
+impl LiveDecoder {
+    fn open(path: &Path, start: f64) -> Option<Self> {
+        if file_ext(path) == "flac" {
+            let rate = crate::flac_index::probe_rate(path)?;
+            let sample = (start.max(0.0) * rate as f64).round() as u64;
+            return crate::flac_index::FlacDecoder::open(path, sample).map(Self::Flac);
+        }
+        crate::pcm_decode::SymphoniaDecoder::open(path, start).map(Self::Other)
+    }
+
+    fn pull(&mut self) -> Option<Vec<i16>> {
+        match self {
+            Self::Flac(decoder) => decoder.pull(),
+            Self::Other(decoder) => decoder.pull(),
+        }
+    }
+
+    fn channels(&self) -> u16 {
+        match self {
+            Self::Flac(decoder) => decoder.channels(),
+            Self::Other(decoder) => decoder.channels(),
+        }
+    }
+
+    fn sample_rate(&self) -> u32 {
+        match self {
+            Self::Flac(decoder) => decoder.sample_rate(),
+            Self::Other(decoder) => decoder.sample_rate(),
+        }
+    }
+}
+
+/// 进程内解码, 倍速时顺手做重叠相加. 打不开则调用方再走 ffmpeg.
+fn open_live_slice(path: &Path, start: f64, duration: f64, speed: f32) -> Option<FlacSource> {
+    if duration < 1e-4 {
+        return None;
+    }
+    let mut decoder = LiveDecoder::open(path, start)?;
+    let channels = decoder.channels().max(1);
+    let sample_rate = decoder.sample_rate().max(1);
+    let ch = usize::from(channels);
+    let speed = if (speed - 1.0).abs() > 1e-3 {
+        speed.clamp(0.25, 4.0)
+    } else {
+        1.0
+    };
+    let input_frames = (duration.max(0.0) * sample_rate as f64).round() as u64;
+    if input_frames == 0 {
+        return None;
+    }
+    let mut input_left = input_frames.saturating_mul(u64::from(channels));
+    let output_frames = (input_frames as f64 / f64::from(speed)).round().max(1.0) as u64;
+    let mut stretch = if (speed - 1.0).abs() > 1e-3 {
+        Some(crate::time_stretch::TimeStretch::new(ch, speed, sample_rate))
+    } else {
+        None
+    };
+    let want = (sample_rate as usize / 20).max(1) * ch;
+    let mut primed = VecDeque::new();
+    while primed.len() < want && input_left >= ch as u64 {
+        let Some(chunk) = decoder.pull() else {
+            break;
+        };
+        let Some((take, produced)) = take_live(&chunk, ch, input_left, stretch.as_mut()) else {
+            break;
+        };
+        input_left -= take as u64;
+        primed.extend(produced);
+    }
+    if primed.is_empty() {
+        return None;
+    }
+    let pipe = Arc::new(FlacPipe {
+        queue: Mutex::new(primed),
+        cv: Condvar::new(),
+        eof: AtomicBool::new(false),
+        cancel: AtomicBool::new(false),
+    });
+    let reader = Arc::clone(&pipe);
+    let cap = (sample_rate as usize * ch).clamp(4096, 44100 * 8);
+    std::thread::spawn(move || pump_live(decoder, stretch, reader, input_left, cap));
+    Some(FlacSource {
+        channels,
+        sample_rate,
+        remaining: output_frames.saturating_mul(u64::from(channels)),
+        pipe,
+        local: Vec::new(),
+        local_i: 0,
+    })
+}
+
+fn take_live(
+    chunk: &[i16],
+    channels: usize,
+    input_left: u64,
+    stretch: Option<&mut crate::time_stretch::TimeStretch>,
+) -> Option<(usize, Vec<i16>)> {
+    let aligned = chunk.len() - chunk.len() % channels;
+    let room = input_left as usize;
+    let room = room - room % channels;
+    let take = aligned.min(room);
+    if take == 0 {
+        return None;
+    }
+    let produced = if let Some(stretch) = stretch {
+        stretch.push(&chunk[..take])
+    } else {
+        chunk[..take].to_vec()
+    };
+    Some((take, produced))
+}
+
+fn pump_live(
+    mut decoder: LiveDecoder,
+    mut stretch: Option<crate::time_stretch::TimeStretch>,
+    pipe: Arc<FlacPipe>,
+    mut input_left: u64,
+    cap: usize,
+) {
+    let channels = usize::from(decoder.channels().max(1));
+    while input_left >= channels as u64 && !pipe.cancel.load(Ordering::Relaxed) {
+        let Some(chunk) = decoder.pull() else {
+            break;
+        };
+        let Some((take, produced)) = take_live(&chunk, channels, input_left, stretch.as_mut())
+        else {
+            break;
+        };
+        input_left -= take as u64;
+        if !enqueue_pcm(&pipe, produced, cap) {
+            break;
+        }
+    }
+    if !pipe.cancel.load(Ordering::Relaxed) {
+        if let Some(stretch) = stretch.as_mut() {
+            let _ = enqueue_pcm(&pipe, stretch.finish(), cap);
+        }
+    }
+    pipe.eof.store(true, Ordering::Relaxed);
+    pipe.cv.notify_all();
+}
+
+fn enqueue_pcm(pipe: &FlacPipe, samples: Vec<i16>, cap: usize) -> bool {
+    if samples.is_empty() {
+        return true;
+    }
+    let mut queue = pipe.queue.lock().unwrap_or_else(|err| err.into_inner());
+    while queue.len() + samples.len() > cap && !pipe.cancel.load(Ordering::Relaxed) {
+        queue = pipe.cv.wait(queue).unwrap_or_else(|err| err.into_inner());
+    }
+    if pipe.cancel.load(Ordering::Relaxed) {
+        return false;
+    }
+    queue.extend(samples);
+    drop(queue);
+    pipe.cv.notify_all();
+    true
+}
+
 fn pump_flac(
     mut decoder: crate::flac_index::FlacDecoder,
     pipe: Arc<FlacPipe>,
@@ -1532,6 +1699,33 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(40));
         assert!(engine.current_time() > t0 + 0.01);
         engine.pause();
+    }
+
+    #[test]
+    fn wav_double_speed_keeps_level_without_ffmpeg() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|dur| dur.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("score-sync-level-{stamp}.wav"));
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..44100 {
+            writer.write_sample(8000i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let src = super::open_play_source(&path, 0.0, 1.0, 2.0).expect("in-process decode");
+        let samples: Vec<i16> = src.take(2000).collect();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(samples.len(), 2000);
+        let body = &samples[64..];
+        let mean = body.iter().map(|sample| i32::from(*sample)).sum::<i32>() / body.len() as i32;
+        assert!((mean - 8000).abs() < 3, "mean {mean}");
     }
 
     #[test]

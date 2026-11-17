@@ -38,6 +38,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p score_video --lib audio::tests::flac_with_seek_table_starts_the_clock
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p score_video --lib time_stretch::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p score_video --lib pcm_decode::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p score_video --lib audio::tests::wav_double_speed_keeps_level
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build score_sync (release-max)
         run: cargo build --profile release-max -p score_sync

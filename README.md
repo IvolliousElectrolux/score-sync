@@ -54,8 +54,8 @@ macOS 成品不 UPX (Gatekeeper); Windows / Linux 会 UPX.
 |------|----------------|
 | 导出画面 | 按时间轴一段段读图, 内存里同时只留当前页和转场要用的另一页. 编码可选 AVC / HEVC / AV1, 后两者只在本机硬件编码器探测通过后出现. sidecar 有 `concat` 解复用器时, 静止段只编一帧, 再把这一帧的时长改成这一页的帧数, 转场逐帧, 然后 `concat` 复制拼起来, 时长仍落在帧网格上. 本机硬件编码器可用时, 静止和转场都走这块显卡: 静止帧按导出帧率编一帧 (硬件拒收 `fps/帧数`), 再改 MP4 里这一帧的时长. 硬件编码或改时长失败, 整条时间轴改回同编码的软件编码器 (`libx264` / `libx265` / `libsvtav1`, 静止段 `-framerate fps/帧数`), 不会把硬件段和软件段拼在一起. 没有 `concat` 时退回按帧写 stdin, 像素已经是编码器要的 `nv12` / `yuv420p`. 硬件编码器按厂商: NVIDIA `*_nvenc`, AMD `*_amf`, Intel `*_qsv`, Windows 再试 `*_mf`, macOS `*_videotoolbox`. 这版 ffmpeg 没有 `av1_mf` 和 `av1_videotoolbox`. 探测或正式编码失败退回同编码的软件编码器. `SCORE_SYNC_VIDEO_ENCODER` 可指定具体名字, 如 `h264_qsv` / `hevc_nvenc` / `av1_amf` |
 | 导出音频 | MP4: `aac`; MKV: `flac`. 多段: `filter_complex` 里 `atrim` / `asetpts` / `aformat` / `apad` / `concat`. 无音轨: `lavfi` `anullsrc` |
-| 预览解码 | FLAC 在进程内按采样点跳转: 自带 SEEKTABLE 且间隔不超过 4 秒时直接用这张表; 没有表, 或间隔更大, 则导入后在后台记下每一帧的文件偏移. 表还没好就按下播放时, 进度条停住并显示剩余时间, 好了之后声音和进度条一起走. m4a/aac/mp4/mov 转临时 WAV `pcm_s16le`; 其它非 16-bit WAV (mp3/ogg 等) 以及倍速仍走 ffmpeg 管道 `-f wav` |
-| 预览倍速 | `-af atempo` (单级 0.5–2, 3x 拆成两级) 后同样 `-f wav` 喂 rodio; 导出仍是 1x |
+| 预览解码 | FLAC, 16-bit WAV, mp3, ogg, m4a/aac 在进程内按采样点跳转, 不再为每次播放新开 ffmpeg. FLAC 自带 SEEKTABLE 且间隔不超过 4 秒时直接用这张表; 没有表, 或间隔更大, 则导入后在后台记下每一帧的文件偏移. 表还没好就按下播放时, 进度条停住并显示剩余时间, 好了之后声音和进度条一起走. 打不开的格式才退回 ffmpeg 管道, 进度条同样等出声后再走. m4a/aac/mp4/mov 仍会另转一份临时 WAV 给波形 |
+| 预览倍速 | 进程内重叠相加, 音调不变, 不新开 ffmpeg. 这一路打不开时才用 `-af atempo` (单级 0.5–2, 3x 拆成两级). 导出仍是 1x |
 | 最终封装 | 视频+音频 stream copy 进 mp4/mkv |
 
 **编进去了 (脚本里的列表, 摘常用项):**

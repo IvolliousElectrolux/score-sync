@@ -14,7 +14,7 @@ hound = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"] }
 rfd = "0.15"
 rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
-symphonia = { version = "0.5.5", default-features = false, features = ["flac"] }
+symphonia = { version = "0.5.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 smallvec = "1"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"

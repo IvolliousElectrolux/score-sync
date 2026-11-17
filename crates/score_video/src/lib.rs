@@ -9,6 +9,8 @@ pub mod error;
 pub mod export;
 mod flac_index;
 mod hw_encode;
+mod pcm_decode;
+mod time_stretch;
 pub mod gui;
 pub mod model;
 mod yuv;
