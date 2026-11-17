@@ -56,13 +56,14 @@ impl ScoreVideoApp {
         if top_pad > 0.5 {
             list = list.child(div().h(px(top_pad)).flex_shrink_0());
         }
-        for item in self
+        let visible: Vec<_> = self
             .pool
             .iter()
             .skip(win_start)
             .take(win_end.saturating_sub(win_start))
             .cloned()
-        {
+            .collect();
+        for item in visible {
             let gid = item.group_id.clone();
             let gid2 = gid.clone();
             let expanded = self.expanded_pool.as_deref() == Some(gid.as_str());
