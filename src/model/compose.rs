@@ -675,6 +675,120 @@ impl DocState {
     /// 见 [`GroupRenderJob`] 文档: 主线程只收集磁盘路径与条带范围, 不解码
     /// 原图. 单测若页图只在内存且已是全分辨率, 会把裁切条带放进 `inline`.
     pub fn prepare_group_render_job(&self, group_id: &str) -> Option<GroupRenderJob> {
+        self.prepare_group_render_job_inner(group_id, true)
+    }
+
+    /// 视频素材池用: 不在主线程拷贝内存里的全分辨率条带, 一律等后台读磁盘原图.
+    pub fn prepare_group_render_job_from_disk(&self, group_id: &str) -> Option<GroupRenderJob> {
+        self.prepare_group_render_job_inner(group_id, false)
+    }
+
+    /// 终稿是否过期. 内存字段的哈希, 加上调用方再混入的文件长度/修改时间.
+    /// 返回 `(内存指纹, 需要 stat 的文件)`.
+    pub fn group_render_fingerprint(&self, group_id: &str) -> Option<(u64, Vec<PathBuf>)> {
+        use std::hash::{Hash, Hasher};
+        let group = self.groups.iter().find(|g| g.id == group_id)?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut files = Vec::new();
+        self.ink_threshold.hash(&mut hasher);
+        self.mask_prefs.mask_opacity.to_bits().hash(&mut hasher);
+        self.bg_enabled.hash(&mut hasher);
+        self.bg_gen.hash(&mut hasher);
+        self.bg_solid.hash(&mut hasher);
+        self.bg_aspect_w.hash(&mut hasher);
+        self.bg_aspect_h.hash(&mut hasher);
+        self.is_spread().hash(&mut hasher);
+        group_id.hash(&mut hasher);
+        for rid in &group.region_ids {
+            rid.hash(&mut hasher);
+            let Some((pi, region)) = self.find_region(rid) else {
+                continue;
+            };
+            region.y0.hash(&mut hasher);
+            region.y1.hash(&mut hasher);
+            let Some(page) = self.pages.get(pi) else {
+                continue;
+            };
+            page.img_w.hash(&mut hasher);
+            page.img_h.hash(&mut hasher);
+            page.blank.hash(&mut hasher);
+            page.disk_path.hash(&mut hasher);
+            if !page.disk_path.as_os_str().is_empty() {
+                files.push(page.disk_path.clone());
+            }
+            if let Some(vector) = &page.vector {
+                vector.pdf_path.hash(&mut hasher);
+                vector.page_index.hash(&mut hasher);
+                vector.w_pt.to_bits().hash(&mut hasher);
+                vector.h_pt.to_bits().hash(&mut hasher);
+                files.push(vector.pdf_path.clone());
+            }
+            let applies = self.region_edit_applies(rid);
+            applies.hash(&mut hasher);
+            if applies {
+                let kind = self.region_edit_kind(rid);
+                matches!(kind, EditKind::Vector).hash(&mut hasher);
+                if let Some((w, h)) = self.region_edit_size(rid) {
+                    w.hash(&mut hasher);
+                    h.hash(&mut hasher);
+                }
+                let dir = Self::region_edit_dir(rid);
+                if matches!(kind, EditKind::Vector) {
+                    files.push(dir.join("manifest.json"));
+                } else {
+                    files.push(dir.join("flat.png"));
+                }
+            }
+        }
+        for adj in self.get_block_layout(group_id) {
+            adj.region_id.hash(&mut hasher);
+            adj.extra_top.hash(&mut hasher);
+            adj.extra_bottom.hash(&mut hasher);
+            adj.extra_left.hash(&mut hasher);
+            adj.extra_right.hash(&mut hasher);
+            adj.gap_before.hash(&mut hasher);
+            adj.gap_after.hash(&mut hasher);
+            adj.shift_x.hash(&mut hasher);
+            adj.shift_y.hash(&mut hasher);
+        }
+        self.get_group_voff_shift(group_id).hash(&mut hasher);
+        self.group_leading_gap(group_id).hash(&mut hasher);
+        self.group_trailing_gap(group_id).hash(&mut hasher);
+        self.group_sheet_width(group_id).hash(&mut hasher);
+        if let Some(frame) = self.group_preview_frame(group_id) {
+            frame.canvas_w.hash(&mut hasher);
+            frame.canvas_h.hash(&mut hasher);
+            frame.content_scale.to_bits().hash(&mut hasher);
+        }
+        for mask in self.get_group_masks(group_id) {
+            mask.id.hash(&mut hasher);
+            mask.x0.hash(&mut hasher);
+            mask.y0.hash(&mut hasher);
+            mask.x1.hash(&mut hasher);
+            mask.y1.hash(&mut hasher);
+            mask.brush_radius.to_bits().hash(&mut hasher);
+            mask.color.hash(&mut hasher);
+            mask.opacity.to_bits().hash(&mut hasher);
+            mask.bound_block.hash(&mut hasher);
+            for (x, y) in &mask.brush_points {
+                x.to_bits().hash(&mut hasher);
+                y.to_bits().hash(&mut hasher);
+            }
+            for (x, y) in &mask.poly_points {
+                x.hash(&mut hasher);
+                y.hash(&mut hasher);
+            }
+        }
+        files.sort();
+        files.dedup();
+        Some((hasher.finish(), files))
+    }
+
+    fn prepare_group_render_job_inner(
+        &self,
+        group_id: &str,
+        allow_inline: bool,
+    ) -> Option<GroupRenderJob> {
         let g = self.groups.iter().find(|g| g.id == group_id)?;
         let mut members = Vec::new();
         for rid in &g.region_ids {
@@ -689,7 +803,7 @@ impl DocState {
                 continue;
             }
             let height = y1 - y0 + 1;
-            let inline = if page.is_full_res() {
+            let inline = if allow_inline && page.is_full_res() {
                 page.image
                     .as_ref()
                     .map(|img| crop_band_fast(img, y0, height))

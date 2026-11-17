@@ -2,11 +2,23 @@
 
 use super::*;
 
+fn span_visible(start: f64, end: f64, scroll: f64, visible: f64) -> bool {
+    if visible <= 0.05 {
+        return true;
+    }
+    end > scroll - 0.25 && start < scroll + visible + 0.25
+}
+
 impl ScoreVideoApp {
     pub(super) fn video_track_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let pps = self.px_per_sec;
         let scroll = self.track_scroll;
+        let visible = self.visible_secs();
         let selected = self.timeline.selected_clip;
+        let mut labels: HashMap<&str, SharedString> = HashMap::with_capacity(self.pool.len());
+        for item in &self.pool {
+            labels.insert(item.group_id.as_str(), item.label.clone());
+        }
         let mut row = div()
             .id("sv_video_row")
             .relative()
@@ -15,14 +27,16 @@ impl ScoreVideoApp {
             .flex_shrink_0()
             .border_b_1()
             .border_color(ui_kit::chrome(0x1e293b));
-        for c in self.timeline.video_clips.clone() {
+        for idx in 0..self.timeline.video_clips.len() {
+            let c = &self.timeline.video_clips[idx];
+            if !span_visible(c.start, c.end, scroll, visible) {
+                continue;
+            }
             let x = ((c.start - scroll) as f32) * pps;
             let w = ((c.end - c.start) as f32 * pps).max(2.0);
-            let label: SharedString = self
-                .pool
-                .iter()
-                .find(|m| m.group_id == c.group_id)
-                .map(|m| m.label.clone())
+            let label: SharedString = labels
+                .get(c.group_id.as_str())
+                .cloned()
                 .unwrap_or_else(|| c.group_id.clone().into());
             let is_sel = selected == Some(c.id);
             let id = c.id;
@@ -66,6 +80,7 @@ impl ScoreVideoApp {
     pub(super) fn fade_track_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let pps = self.px_per_sec;
         let scroll = self.track_scroll;
+        let visible = self.visible_secs();
         let sel_range = self.timeline.fade_selection;
         let mut row = div()
             .id("sv_fade_row")
@@ -91,6 +106,9 @@ impl ScoreVideoApp {
                 }),
             );
         for f in self.timeline.fades.clone() {
+            if !span_visible(f.start, f.end, scroll, visible) {
+                continue;
+            }
             let x = ((f.start - scroll) as f32) * pps;
             let w = ((f.end - f.start) as f32 * pps).max(2.0);
             let is_sel = self.timeline.fade_is_selected(f.id);
@@ -312,6 +330,7 @@ impl ScoreVideoApp {
     pub(super) fn audio_track_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let pps = self.px_per_sec;
         let scroll = self.track_scroll;
+        let visible = self.visible_secs();
         let selected = self.timeline.selected_audio;
         let split_armed = self.split_audio_armed;
         let drag_from = match &self.drag {
@@ -363,6 +382,10 @@ impl ScoreVideoApp {
             );
         let mut cum = 0.0f64;
         for (idx, c) in self.timeline.audio_clips.clone().into_iter().enumerate() {
+            if !span_visible(cum, cum + c.duration, scroll, visible) {
+                cum += c.duration;
+                continue;
+            }
             let x = ((cum - scroll) as f32) * pps;
             let w = (c.duration as f32 * pps).max(2.0);
             let is_sel = selected == Some(c.id);

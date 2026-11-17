@@ -474,6 +474,46 @@ pub fn available_memory_bytes() -> u64 {
     }
 }
 
+/// 从 PNG 文件头读宽高, 不解码像素.
+pub fn png_ihdr_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != SIG || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    if w == 0 || h == 0 {
+        None
+    } else {
+        Some((w, h))
+    }
+}
+
+/// 只读 PNG 前 24 字节. 不是 PNG 时返回 None.
+pub fn png_file_dimensions(path: &Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = [0u8; 24];
+    file.read_exact(&mut buf).ok()?;
+    png_ihdr_dimensions(&buf)
+}
+
+/// 后台重渲等不要和界面抢 CPU. 失败时保持默认优先级.
+pub fn set_background_thread_priority() {
+    #[cfg(windows)]
+    unsafe {
+        const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentThread() -> isize;
+    fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+}
+
 /// 根据可用内存与单任务峰值估算并发度 (至少 1).
 pub fn concurrency_for_peak(peak_bytes: u64) -> usize {
     let avail = available_memory_bytes();
@@ -530,6 +570,17 @@ mod window_radius_tests {
     #[test]
     fn huge_pages_shrink_to_one() {
         assert_eq!(window_radius_for_bytes(80 * 1024 * 1024), 1);
+    }
+
+    #[test]
+    fn png_ihdr_matches_encoded_image() {
+        use image::{Rgb, RgbImage};
+        let img = RgbImage::from_pixel(13, 27, Rgb([1, 2, 3]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(super::png_ihdr_dimensions(bytes.get_ref()), Some((13, 27)));
     }
 
     #[test]

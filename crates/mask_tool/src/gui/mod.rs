@@ -453,11 +453,27 @@ impl MaskToolApp {
     }
 
     /// 切走蒙版/底色面板时丢掉预览像素, 会话键与撤重栈保留.
-    /// 下次 `load_layered_preview` 会再灌贴图.
+    /// 下次 `load_layered_preview` 会再灌贴图. 大块 CPU 像素放到后台线程释放.
     pub fn drop_preview_pixels(&mut self) {
-        self.rgb_image = None;
+        if let Some(rgb) = self.rgb_image.take() {
+            std::thread::spawn(move || drop(rgb));
+        }
         self.replace_render_image(None);
+        let tiles = std::mem::take(&mut self.block_tiles);
+        let bg = self.block_bg.take();
+        let mut cpu = Vec::new();
+        for tile in &tiles {
+            cpu.push(tile.thumb.clone());
+        }
+        if let Some(bg) = &bg {
+            cpu.push(bg.thumb.clone());
+        }
+        self.block_tiles = tiles;
+        self.block_bg = bg;
         self.set_block_tiles(Vec::new(), None);
+        if !cpu.is_empty() {
+            std::thread::spawn(move || drop(cpu));
+        }
     }
 
     pub fn accounted_memory(&self) -> MaskMemory {

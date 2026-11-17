@@ -1032,27 +1032,44 @@ pub fn render_vector_rect_rgba(
         .map_err(|e| format!("光栅矢量页失败: {e}"))
 }
 
-pub fn load_vector_source(
+/// 同一份 PDF 只打开一次, 按 `page_indices` 的顺序返回矢量页.
+pub fn load_vector_sources(
     pdf_path: &Path,
-    page_index: u32,
-) -> Result<crate::vector_page::VectorSource, String> {
+    page_indices: &[u32],
+) -> Result<Vec<crate::vector_page::VectorSource>, String> {
+    if page_indices.is_empty() {
+        return Ok(Vec::new());
+    }
     let pdfium = bind_pdfium().map_err(|e| e.to_string())?;
     let document = pdfium
         .load_pdf_from_file(pdf_path, None)
         .map_err(|e| format!("打开矢量 PDF 失败: {e}"))?;
-    let page = document
-        .pages()
-        .get(page_index as u16)
-        .map_err(|e| format!("读取矢量页失败: {e}"))?;
-    let (w_pt, h_pt) = page_pt(&page);
-    let scene = extract_vector_scene(&page);
-    Ok(crate::vector_page::VectorSource {
-        pdf_path: pdf_path.to_path_buf(),
-        page_index,
-        w_pt,
-        h_pt,
-        scene: std::sync::Arc::new(scene),
-    })
+    let mut out = Vec::with_capacity(page_indices.len());
+    for &page_index in page_indices {
+        let page = document
+            .pages()
+            .get(page_index as u16)
+            .map_err(|e| format!("读取矢量页失败: {e}"))?;
+        let (w_pt, h_pt) = page_pt(&page);
+        let scene = extract_vector_scene(&page);
+        out.push(crate::vector_page::VectorSource {
+            pdf_path: pdf_path.to_path_buf(),
+            page_index,
+            w_pt,
+            h_pt,
+            scene: std::sync::Arc::new(scene),
+        });
+    }
+    Ok(out)
+}
+
+pub fn load_vector_source(
+    pdf_path: &Path,
+    page_index: u32,
+) -> Result<crate::vector_page::VectorSource, String> {
+    load_vector_sources(pdf_path, &[page_index])?
+        .pop()
+        .ok_or_else(|| "读取矢量页失败".into())
 }
 
 #[cfg(test)]

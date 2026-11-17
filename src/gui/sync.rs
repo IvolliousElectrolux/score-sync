@@ -1,5 +1,7 @@
 //! 页图窗口、蒙版/视频同步、面板切换.
 
+use std::path::Path;
+
 use super::ScoreSyncApp;
 use super::*;
 
@@ -11,6 +13,35 @@ struct VideoPoolRebuildEntry {
     label: String,
     cache_path: PathBuf,
     job: Option<crate::model::GroupRenderJob>,
+    /// 这次渲染对应的内容指纹. None 表示当时没算出指纹, 只记宽高.
+    fp: Option<u64>,
+}
+
+struct PoolSnap {
+    gid: String,
+    label: String,
+    cache_path: PathBuf,
+    mem_fp: Option<u64>,
+    files: Vec<PathBuf>,
+}
+
+struct PoolScan {
+    cached: Vec<MaterialItem>,
+    rebuild: Vec<String>,
+    fps: HashMap<String, u64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct PoolIndexEntry {
+    w: u32,
+    h: u32,
+    #[serde(default)]
+    fp: Option<u64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct PoolIndexFile {
+    groups: HashMap<String, PoolIndexEntry>,
 }
 
 /// 同一批任务共用一张超高清底色时, 先裁到最大谱面宽对应的一页, 再让各组合
@@ -707,16 +738,18 @@ impl ScoreSyncApp {
     }
 
     pub(super) fn flush_gpu_drops(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for img in std::mem::take(&mut self.gpu_drop) {
+        const PER_FRAME: usize = 2;
+        let mut pending = std::mem::take(&mut self.gpu_drop);
+        pending.extend(self.mask_tool.update(cx, |m, _| m.take_gpu_drops()));
+        pending.extend(self.photo_edit.update(cx, |p, _| p.take_gpu_drops()));
+        let n = pending.len().min(PER_FRAME);
+        for img in pending.drain(..n) {
             let _ = window.drop_image(img);
         }
-        let extra = self.mask_tool.update(cx, |m, _| m.take_gpu_drops());
-        for img in extra {
-            let _ = window.drop_image(img);
-        }
-        let photo = self.photo_edit.update(cx, |p, _| p.take_gpu_drops());
-        for img in photo {
-            let _ = window.drop_image(img);
+        let more = !pending.is_empty();
+        self.gpu_drop = pending;
+        if more {
+            cx.notify();
         }
     }
 
@@ -1375,15 +1408,20 @@ impl ScoreSyncApp {
         self.dirty = true;
     }
 
-    /// 保存进行中时驱动标题栏拖尾转圈.
-    pub(super) fn start_save_spinner(&mut self, cx: &mut Context<Self>) {
+    /// 保存或打开工程时驱动标题栏拖尾转圈.
+    pub(super) fn start_busy_spinner(&mut self, cx: &mut Context<Self>) {
+        if self.busy_spin {
+            return;
+        }
+        self.busy_spin = true;
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(Duration::from_millis(33))
                 .await;
             let cont = this
                 .update(cx, |view, cx| {
-                    if !view.saving {
+                    if !view.saving && !view.opening {
+                        view.busy_spin = false;
                         return false;
                     }
                     view.save_spin_phase = (view.save_spin_phase + 0.08) % 1.0;
@@ -1988,6 +2026,8 @@ impl ScoreSyncApp {
         if self.side_tool == tool {
             return;
         }
+        let switch_started = Instant::now();
+        let switch_from = self.side_tool;
         if self.side_tool == SideTool::Mask {
             self.flush_mask_to_doc(cx);
         }
@@ -2012,10 +2052,12 @@ impl ScoreSyncApp {
             self.bg_tile_cache = None;
         }
         if leaving_crop {
-            self.lod_full = None;
+            if let Some(full) = self.lod_full.take() {
+                std::thread::spawn(move || drop(full));
+            }
         }
         if leaving_project {
-            self.drop_bg_full_pixels();
+            self.drop_bg_full_pixels(cx);
         }
         if leaving_video {
             self.score_video
@@ -2075,6 +2117,10 @@ impl ScoreSyncApp {
         if crate::trace::enabled() {
             self.emit_memory("side-tool", false, cx);
         }
+        crate::trace::log(&format!(
+            "side-tool {switch_from:?} -> {tool:?} {}ms",
+            switch_started.elapsed().as_millis()
+        ));
         cx.notify();
     }
 
@@ -2104,58 +2150,54 @@ impl ScoreSyncApp {
             return;
         }
         let cache_root = self.pool_cache_dir().join("pool");
-        let _ = std::fs::create_dir_all(&cache_root);
-        crate::page_cache::prune_pool_cache(&cache_root, &group_ids.iter().cloned().collect());
         let all_dirty = self.video_pool_all_dirty;
         let dirty_set = self.video_pool_dirty.clone();
-
-        let mut cached_items: Vec<MaterialItem> = Vec::new();
-        let mut rebuild_ids: Vec<String> = Vec::new();
-        for (idx, gid) in group_ids.iter().enumerate() {
-            let cache_path = cache_root.join(format!("{gid}.png"));
-            let need_rebuild = all_dirty || dirty_set.contains(gid) || !cache_path.is_file();
-            if let Ok((w, h)) = image::image_dimensions(&cache_path) {
+        let hot: Vec<String> = self
+            .score_video
+            .read(cx)
+            .timeline_snapshot()
+            .video_clips
+            .iter()
+            .map(|clip| clip.0.clone())
+            .collect();
+        let snap_started = Instant::now();
+        let snaps: Vec<PoolSnap> = group_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, gid)| {
                 let label = self
                     .doc
                     .groups
                     .get(idx)
                     .map(|g| g.display_name(idx))
                     .unwrap_or_else(|| gid.clone());
-                cached_items.push(MaterialItem {
-                    group_id: gid.clone(),
-                    label: label.into(),
-                    width: w,
-                    height: h,
-                    cache_path,
-                });
-            }
-            if need_rebuild {
-                rebuild_ids.push(gid.clone());
-            }
-        }
-        let cached_n = cached_items.len();
+                let (mem_fp, files) = if all_dirty || dirty_set.contains(gid) {
+                    self.doc
+                        .group_render_fingerprint(gid)
+                        .map(|(fp, files)| (Some(fp), files))
+                        .unwrap_or((None, Vec::new()))
+                } else {
+                    (None, Vec::new())
+                };
+                PoolSnap {
+                    gid: gid.clone(),
+                    label,
+                    cache_path: cache_root.join(format!("{gid}.png")),
+                    mem_fp,
+                    files,
+                }
+            })
+            .collect();
+        crate::trace::log(&format!(
+            "video_pool: 主线程快照 {} 组 {}ms (all_dirty={all_dirty})",
+            snaps.len(),
+            snap_started.elapsed().as_millis()
+        ));
+        self.status = "视频工具 (正在读取素材缓存…)".into();
         self.score_video.update(cx, |v, cx| {
-            v.set_pool(cached_items, cx);
+            v.set_pool_status("正在读取素材缓存…", cx);
         });
-
-        if rebuild_ids.is_empty() {
-            self.video_pool_all_dirty = false;
-            self.video_pool_dirty.clear();
-            self.score_video
-                .update(cx, |v, cx| v.set_pool_status("", cx));
-            self.status = format!("视频工具 (素材 {cached_n} 张)").into();
-            return;
-        }
-
-        let rebuild_n = rebuild_ids.len();
-        self.score_video.update(cx, |v, cx| {
-            v.set_pool_status(format!("正在更新 {rebuild_n} 张…"), cx);
-        });
-        self.status = if cached_n > 0 {
-            format!("视频工具 (已显示缓存 {cached_n} 张, 后台更新 {rebuild_n} 张)").into()
-        } else {
-            format!("视频工具 (正在生成素材 0/{rebuild_n})").into()
-        };
+        let live: HashSet<String> = group_ids.iter().cloned().collect();
 
         let peak = {
             let page = self
@@ -2172,7 +2214,58 @@ impl ScoreSyncApp {
         };
         let conc = crate::page_cache::concurrency_for_peak(peak.max(128 * 1024 * 1024));
 
+        let index_path = cache_root.join("index.json");
         cx.spawn(async move |this, cx| {
+            let (tx, rx) = async_channel::bounded::<PoolScan>(1);
+            std::thread::spawn(move || {
+                let scan = scan_pool_cache(&cache_root, &snaps, &live, &hot);
+                let _ = tx.send_blocking(scan);
+            });
+            let Ok(scan) = rx.recv().await else {
+                return;
+            };
+            let PoolScan {
+                cached,
+                rebuild,
+                fps,
+            } = scan;
+            let cached_n = cached.len();
+            let rebuild_n = rebuild.len();
+            let proceed = this
+                .update(cx, |view, cx| {
+                    if view.video_sync_gen != gen {
+                        return false;
+                    }
+                    view.score_video.update(cx, |v, cx| {
+                        v.set_pool(cached, cx);
+                        if rebuild_n == 0 {
+                            v.set_pool_status("", cx);
+                        } else {
+                            v.set_pool_status(format!("正在更新 {rebuild_n} 张…"), cx);
+                        }
+                    });
+                    if rebuild_n == 0 {
+                        view.video_pool_all_dirty = false;
+                        view.video_pool_dirty.clear();
+                        view.status = format!("视频工具 (素材 {cached_n} 张)").into();
+                    } else {
+                        view.status = if cached_n > 0 {
+                            format!(
+                                "视频工具 (已显示缓存 {cached_n} 张, 后台更新 {rebuild_n} 张)"
+                            )
+                            .into()
+                        } else {
+                            format!("视频工具 (正在生成素材 0/{rebuild_n})").into()
+                        };
+                    }
+                    cx.notify();
+                    rebuild_n > 0
+                })
+                .unwrap_or(false);
+            if !proceed {
+                return;
+            }
+            let rebuild_ids = rebuild;
             let mut done = 0usize;
             let total = rebuild_ids.len();
             for (chunk_i, chunk) in rebuild_ids.chunks(conc.max(1)).enumerate() {
@@ -2196,14 +2289,17 @@ impl ScoreSyncApp {
                             continue;
                         };
                         let label = view.doc.groups[idx].display_name(idx);
-                        let cache_path = cache_root.join(format!("{gid}.png"));
-                        let job = view.doc.prepare_group_render_job(gid);
-                        view.doc.retain_memory_window();
+                        let cache_path = index_path
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .join(format!("{gid}.png"));
+                        let job = view.doc.prepare_group_render_job_from_disk(gid);
                         out.push(VideoPoolRebuildEntry {
                             gid: gid.clone(),
                             label,
                             cache_path,
                             job,
+                            fp: fps.get(gid).copied(),
                         });
                     }
                     Some(out)
@@ -2216,7 +2312,9 @@ impl ScoreSyncApp {
                     return;
                 };
                 let (tx, rx) = async_channel::bounded(1);
+                let index_for_chunk = index_path.clone();
                 std::thread::spawn(move || {
+                    crate::page_cache::set_background_thread_priority();
                     precrop_pool_bg_pages(&mut gathered);
                     let mut chunk_items = Vec::with_capacity(gathered.len());
                     for entry in gathered {
@@ -2225,6 +2323,7 @@ impl ScoreSyncApp {
                             label,
                             cache_path,
                             job,
+                            fp,
                         } = entry;
                         let mut item = None;
                         if let Some(job) = job {
@@ -2268,7 +2367,8 @@ impl ScoreSyncApp {
                             crate::trace::log(&format!("video_pool: {gid} 无成员片段, 跳过渲染"));
                         }
                         if item.is_none() {
-                            if let Ok((w, h)) = image::image_dimensions(&cache_path) {
+                            if let Some((w, h)) = crate::page_cache::png_file_dimensions(&cache_path)
+                            {
                                 item = Some(MaterialItem {
                                     group_id: gid.clone(),
                                     label: label.into(),
@@ -2283,6 +2383,13 @@ impl ScoreSyncApp {
                             }
                         }
                         if let Some(it) = item {
+                            remember_pool_index(
+                                &index_for_chunk,
+                                &it.group_id,
+                                it.width,
+                                it.height,
+                                fp,
+                            );
                             chunk_items.push(it);
                         }
                     }
@@ -2783,6 +2890,135 @@ mod mask_preview_wait_probe {
         let preview = mask_tool::gui::rgb_to_render_image(&canvas2);
         black_box(&preview);
         step("第一帧必需 (composite + 预览贴图)", t0);
+    }
+}
+
+fn mix_file_fingerprint(mem: u64, paths: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mem.hash(&mut hasher);
+    for path in paths {
+        path.hash(&mut hasher);
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                meta.len().hash(&mut hasher);
+                meta.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .hash(&mut hasher);
+            }
+            Err(_) => 0u8.hash(&mut hasher),
+        }
+    }
+    hasher.finish()
+}
+
+fn read_pool_index(path: &Path) -> PoolIndexFile {
+    let Ok(bytes) = std::fs::read(path) else {
+        return PoolIndexFile::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn write_pool_index(path: &Path, index: &PoolIndexFile) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(index) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+fn remember_pool_index(path: &Path, gid: &str, w: u32, h: u32, fp: Option<u64>) {
+    let mut index = read_pool_index(path);
+    index.groups.insert(
+        gid.to_string(),
+        PoolIndexEntry { w, h, fp },
+    );
+    write_pool_index(path, &index);
+}
+
+fn scan_pool_cache(
+    cache_root: &Path,
+    snaps: &[PoolSnap],
+    live: &HashSet<String>,
+    hot: &[String],
+) -> PoolScan {
+    let started = Instant::now();
+    let _ = std::fs::create_dir_all(cache_root);
+    crate::page_cache::prune_pool_cache(cache_root, live);
+    let index_path = cache_root.join("index.json");
+    let mut index = read_pool_index(&index_path);
+    let mut cached = Vec::new();
+    let mut rebuild = Vec::new();
+    let mut fps = HashMap::new();
+    let mut index_dirty = false;
+    for snap in snaps {
+        let exists = snap.cache_path.is_file();
+        let entry = index.groups.get(&snap.gid).cloned();
+        if exists {
+            let dims = entry
+                .as_ref()
+                .map(|item| (item.w, item.h))
+                .filter(|(w, h)| *w > 0 && *h > 0)
+                .or_else(|| crate::page_cache::png_file_dimensions(&snap.cache_path));
+            if let Some((w, h)) = dims {
+                cached.push(MaterialItem {
+                    group_id: snap.gid.clone(),
+                    label: snap.label.clone().into(),
+                    width: w,
+                    height: h,
+                    cache_path: snap.cache_path.clone(),
+                });
+                if entry.is_none() {
+                    index.groups.insert(
+                        snap.gid.clone(),
+                        PoolIndexEntry { w, h, fp: None },
+                    );
+                    index_dirty = true;
+                }
+            }
+        }
+        if snap.mem_fp.is_some() || !exists {
+            let fp = snap
+                .mem_fp
+                .map(|mem| mix_file_fingerprint(mem, &snap.files));
+            if let Some(fp) = fp {
+                fps.insert(snap.gid.clone(), fp);
+            }
+            let stale = match fp {
+                Some(fp) => entry.and_then(|item| item.fp) != Some(fp) || !exists,
+                None => !exists,
+            };
+            if stale {
+                rebuild.push(snap.gid.clone());
+            }
+        }
+    }
+    let before = index.groups.len();
+    index.groups.retain(|gid, _| live.contains(gid));
+    if index.groups.len() != before {
+        index_dirty = true;
+    }
+    if index_dirty {
+        write_pool_index(&index_path, &index);
+    }
+    rebuild.sort_by_key(|gid| {
+        hot.iter()
+            .position(|id| id == gid)
+            .unwrap_or(usize::MAX)
+    });
+    crate::trace::log(&format!(
+        "video_pool: 后台扫描缓存 {} 张, 待更新 {} 张, {}ms",
+        cached.len(),
+        rebuild.len(),
+        started.elapsed().as_millis()
+    ));
+    PoolScan {
+        cached,
+        rebuild,
+        fps,
     }
 }
 

@@ -38,10 +38,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-${{ matrix.asset }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        continue-on-error: true
+        run: cargo clippy -p score_sync --all-targets -- -W clippy::all
 
       - name: Build score_sync
         run: cargo build -r -p score_sync --target ${{ matrix.target }}

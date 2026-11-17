@@ -4,9 +4,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::{BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use image::ImageFormat;
 use mask_tool::mask::MaskRect;
@@ -603,25 +605,309 @@ pub fn save_project(doc: &DocState, path: &Path) -> Result<PathBuf, String> {
     Ok(project_path)
 }
 
-fn extract_edit_entries(zip: &mut ZipArchive<File>, session: &Path) -> Result<(), String> {
-    let names: Vec<String> = (0..zip.len())
+fn page_is_blank(p: &ProjectPage) -> bool {
+    let title_stem = std::path::Path::new(&p.title)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(p.title.as_str());
+    p.blank
+        || title_stem
+            .split("_copy")
+            .next()
+            .unwrap_or(title_stem)
+            .starts_with("blank_")
+}
+
+fn regions_of(p: &ProjectPage) -> HashMap<String, Region> {
+    let mut regions = HashMap::new();
+    for r in &p.regions {
+        regions.insert(
+            r.id.clone(),
+            Region {
+                id: r.id.clone(),
+                page_id: r.page_id.clone(),
+                y0: r.y0,
+                y1: r.y1,
+                kind: r.kind.clone(),
+                color: r.color.clone(),
+            },
+        );
+    }
+    regions
+}
+
+fn display_path_of(p: &ProjectPage) -> PathBuf {
+    if p.title.is_empty() {
+        PathBuf::from(if p.image.is_empty() { "page" } else { &p.image })
+    } else {
+        PathBuf::from(&p.title)
+    }
+}
+
+fn write_bytes(dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    let file = File::create(dest).map_err(|e| format!("写出 {} 失败: {e}", dest.display()))?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(bytes)
+        .map_err(|e| format!("写出 {} 失败: {e}", dest.display()))?;
+    writer
+        .flush()
+        .map_err(|e| format!("写出 {} 失败: {e}", dest.display()))?;
+    Ok(())
+}
+
+fn read_zip_file_entry(zip_path: &Path, name: &str) -> Result<Vec<u8>, String> {
+    let file = File::open(zip_path).map_err(|e| format!("打开工程失败: {e}"))?;
+    let mut zip = ZipArchive::new(file)
+        .map_err(|e| format!("无法作为工程压缩包打开: {e}"))?;
+    read_zip_entry(&mut zip, name)
+}
+
+fn edit_entry_names(zip: &mut ZipArchive<File>) -> Vec<String> {
+    (0..zip.len())
         .filter_map(|i| {
-            let e = zip.by_index(i).ok()?;
-            let n = e.name().replace('\\', "/");
-            if n.starts_with("edits/") && !n.ends_with('/') {
-                Some(n)
+            let entry = zip.by_index(i).ok()?;
+            let name = entry.name().replace('\\', "/");
+            if name.starts_with("edits/") && !name.ends_with('/') {
+                Some(name)
             } else {
                 None
             }
         })
-        .collect();
-    for name in names {
-        let bytes = read_zip_entry(zip, &name)?;
-        let dest = session.join(&name);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("创建 {name} 目录失败: {e}"))?;
+        .collect()
+}
+
+fn parallel_map<T, R>(items: &[T], conc: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let n = items.len();
+    let conc = conc.max(1).min(n);
+    let slots: Vec<std::sync::Mutex<Option<R>>> =
+        (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..conc {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let value = f(&items[i]);
+                    *slots[i].lock().unwrap_or_else(|err| err.into_inner()) = Some(value);
+                }
+            });
         }
-        std::fs::write(&dest, bytes).map_err(|e| format!("写出 {name} 失败: {e}"))?;
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(|err| err.into_inner())
+                .expect("parallel slot")
+        })
+        .collect()
+}
+
+fn assemble_pages(
+    zip_path: &Path,
+    meta_pages: &[ProjectPage],
+    session: &Path,
+    report: &(impl Fn(LoadProgress) + Sync),
+) -> Result<Vec<Page>, String> {
+    let total = meta_pages.iter().filter(|p| !page_is_blank(p)).count();
+    report(LoadProgress {
+        stage: "解压页面",
+        done: 0,
+        total,
+    });
+    let done = AtomicUsize::new(0);
+    let conc = crate::page_cache::concurrency_for_peak(8 * 1024 * 1024);
+    let mut pdf_order = Vec::new();
+    let mut pdf_pages: HashMap<String, Vec<u32>> = HashMap::new();
+    for page in meta_pages {
+        if page_is_blank(page) || page.coord != "pt" || page.pdf.is_empty() {
+            continue;
+        }
+        if !pdf_pages.contains_key(&page.pdf) {
+            pdf_order.push(page.pdf.clone());
+        }
+        let pages = pdf_pages.entry(page.pdf.clone()).or_default();
+        if !pages.contains(&page.pdf_page) {
+            pages.push(page.pdf_page);
+        }
+    }
+    let pdf_jobs: Vec<(String, PathBuf, Vec<u32>)> = pdf_order
+        .into_iter()
+        .map(|name| {
+            let dest = session.join(format!("proj_{}.pdf", sanitize_zip_name(&name)));
+            let pages = pdf_pages.remove(&name).unwrap_or_default();
+            (name, dest, pages)
+        })
+        .collect();
+    let pdf_loaded = parallel_map(&pdf_jobs, conc, |job| {
+        let (name, dest, pages) = job;
+        let bytes = read_zip_file_entry(zip_path, name)?;
+        write_bytes(dest, &bytes)?;
+        let sources = crate::pdf::load_vector_sources(dest, pages)
+            .map_err(|e| format!("读取矢量页失败 ({name}): {e}"))?;
+        let n = pages.len();
+        let finished = done.fetch_add(n, Ordering::Relaxed) + n;
+        report(LoadProgress {
+            stage: "解压页面",
+            done: finished.min(total),
+            total,
+        });
+        let mut by_page = HashMap::new();
+        for source in sources {
+            by_page.insert(source.page_index, source);
+        }
+        Ok::<_, String>((name.clone(), by_page))
+    });
+    let mut pdf_sources = HashMap::new();
+    for item in pdf_loaded {
+        let (name, by_page) = item?;
+        pdf_sources.insert(name, by_page);
+    }
+
+    struct BitmapJob {
+        index: usize,
+        image: String,
+        dest: PathBuf,
+    }
+    let bitmap_jobs: Vec<BitmapJob> = meta_pages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, page)| {
+            if page_is_blank(page) || (page.coord == "pt" && !page.pdf.is_empty()) {
+                return None;
+            }
+            Some(BitmapJob {
+                index,
+                image: page.image.clone(),
+                dest: session.join(format!("proj_{}.png", page.id)),
+            })
+        })
+        .collect();
+    let bitmap_loaded = parallel_map(&bitmap_jobs, conc, |job| {
+        let bytes = read_zip_file_entry(zip_path, &job.image)?;
+        let (w, h) = crate::page_cache::png_ihdr_dimensions(&bytes)
+            .or_else(|| {
+                image::load_from_memory(&bytes)
+                    .ok()
+                    .map(|image| image.dimensions())
+            })
+            .ok_or_else(|| format!("读取页尺寸失败 ({})", job.image))?;
+        write_bytes(&job.dest, &bytes)?;
+        let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+        report(LoadProgress {
+            stage: "解压页面",
+            done: finished.min(total),
+            total,
+        });
+        Ok::<_, String>((job.index, job.dest.clone(), w, h))
+    });
+    let mut bitmaps = HashMap::new();
+    for item in bitmap_loaded {
+        let (index, dest, w, h) = item?;
+        bitmaps.insert(index, (dest, w, h));
+    }
+
+    let mut pages = Vec::with_capacity(meta_pages.len());
+    for (index, page) in meta_pages.iter().enumerate() {
+        if page_is_blank(page) {
+            pages.push(Page {
+                id: page.id.clone(),
+                path: if page.title.is_empty() {
+                    PathBuf::from(format!("blank_{}.png", page.id))
+                } else {
+                    PathBuf::from(&page.title)
+                },
+                disk_path: PathBuf::new(),
+                image: None,
+                img_w: 1,
+                img_h: 1,
+                regions: HashMap::new(),
+                vector: None,
+                blank: true,
+            });
+            continue;
+        }
+        let vector = if page.coord == "pt" && !page.pdf.is_empty() {
+            Some(
+                pdf_sources
+                    .get(&page.pdf)
+                    .and_then(|by_page| by_page.get(&page.pdf_page))
+                    .cloned()
+                    .ok_or_else(|| format!("读取矢量页失败 ({})", page.id))?,
+            )
+        } else {
+            None
+        };
+        let (disk_path, w, h) = if let Some(source) = vector.as_ref() {
+            let (w, h) = source.logical_size();
+            (PathBuf::new(), w, h)
+        } else {
+            bitmaps
+                .remove(&index)
+                .ok_or_else(|| format!("缺少页图 {}", page.id))?
+        };
+        pages.push(Page {
+            id: page.id.clone(),
+            path: display_path_of(page),
+            disk_path,
+            image: None,
+            img_w: w,
+            img_h: h,
+            regions: regions_of(page),
+            vector,
+            blank: false,
+        });
+    }
+    Ok(pages)
+}
+
+fn extract_named_entries(
+    zip_path: &Path,
+    session: &Path,
+    names: &[String],
+    report: &(impl Fn(LoadProgress) + Sync),
+) -> Result<(), String> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let total = names.len();
+    report(LoadProgress {
+        stage: "解压修图",
+        done: 0,
+        total,
+    });
+    let done = AtomicUsize::new(0);
+    let conc = crate::page_cache::concurrency_for_peak(1024 * 1024);
+    let results = parallel_map(names, conc, |name| {
+        let bytes = read_zip_file_entry(zip_path, name)?;
+        let dest = session.join(name);
+        write_bytes(&dest, &bytes)?;
+        let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+        if finished == total || finished % 16 == 0 {
+            report(LoadProgress {
+                stage: "解压修图",
+                done: finished,
+                total,
+            });
+        }
+        Ok::<_, String>(())
+    });
+    for result in results {
+        result?;
     }
     Ok(())
 }
@@ -637,8 +923,25 @@ fn read_zip_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, Str
     Ok(buf)
 }
 
+/// 打开工程时回传给界面的阶段进度. `done` / `total` 为 0 表示这一阶段没有计数.
+#[derive(Clone, Debug)]
+pub struct LoadProgress {
+    pub stage: &'static str,
+    pub done: usize,
+    pub total: usize,
+}
+
 /// 读取工程 zip, 返回完整 DocState (不重新识别).
 pub fn load_project(path: &Path) -> Result<DocState, String> {
+    load_project_reporting(path, |_| {})
+}
+
+/// 同 [`load_project`], 并在解压页、修图和底色时回调进度.
+/// 回调可能来自工作线程, 必须自己同步.
+pub fn load_project_reporting(
+    path: &Path,
+    report: impl Fn(LoadProgress) + Send + Sync,
+) -> Result<DocState, String> {
     if !is_project_path(path) {
         return Err("不是 .staffcrop 工程文件".into());
     }
@@ -656,100 +959,31 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         ));
     }
 
-    let mut pages = Vec::with_capacity(meta.pages.len());
-    // 解压到会话 tmp, 不一次全解码进内存
+    let started = Instant::now();
     let session = crate::page_cache::session_dir();
-    let mut pdf_files: HashMap<String, PathBuf> = HashMap::new();
-    for p in &meta.pages {
-        let title_stem = std::path::Path::new(&p.title)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(p.title.as_str());
-        let blank = p.blank
-            || title_stem
-                .split("_copy")
-                .next()
-                .unwrap_or(title_stem)
-                .starts_with("blank_");
-        if blank {
-            pages.push(Page {
-                id: p.id.clone(),
-                path: if p.title.is_empty() {
-                    PathBuf::from(format!("blank_{}.png", p.id))
-                } else {
-                    PathBuf::from(&p.title)
-                },
-                disk_path: PathBuf::new(),
-                image: None,
-                img_w: 1,
-                img_h: 1,
-                regions: HashMap::new(),
-                vector: None,
-                blank: true,
-            });
-            continue;
+    report(LoadProgress {
+        stage: "读取工程",
+        done: 0,
+        total: meta.pages.len(),
+    });
+    let edit_names = edit_entry_names(&mut zip);
+    let bg_png = match meta.bg.as_ref() {
+        Some(bg) if bg.enabled && bg.solid_rgb.is_none() && !bg.image.is_empty() => {
+            Some(read_zip_entry(&mut zip, &bg.image)?)
         }
-        let vector = if p.coord == "pt" && !p.pdf.is_empty() {
-            let pdf_path = if let Some(path) = pdf_files.get(&p.pdf) {
-                path.clone()
-            } else {
-                let bytes = read_zip_entry(&mut zip, &p.pdf)?;
-                let dest = session.join(format!("proj_{}.pdf", sanitize_zip_name(&p.pdf)));
-                std::fs::write(&dest, &bytes)
-                    .map_err(|e| format!("写出 PDF 到会话目录失败 ({}): {e}", p.pdf))?;
-                pdf_files.insert(p.pdf.clone(), dest.clone());
-                dest
-            };
-            Some(
-                crate::pdf::load_vector_source(&pdf_path, p.pdf_page)
-                    .map_err(|e| format!("读取矢量页失败 ({}): {e}", p.id))?,
-            )
-        } else {
-            None
-        };
-        let (disk_path, w, h) = if let Some(src) = vector.as_ref() {
-            let (w, h) = src.logical_size();
-            (PathBuf::new(), w, h)
-        } else {
-            let png = read_zip_entry(&mut zip, &p.image)?;
-            let disk_path = session.join(format!("proj_{}.png", p.id));
-            std::fs::write(&disk_path, &png)
-                .map_err(|e| format!("写出页图到会话目录失败 ({}): {e}", p.id))?;
-            let (w, h) = image::image_dimensions(&disk_path)
-                .map_err(|e| format!("读取页尺寸失败 ({}): {e}", p.id))?;
-            (disk_path, w, h)
-        };
-        let mut regions = HashMap::new();
-        for r in &p.regions {
-            regions.insert(
-                r.id.clone(),
-                Region {
-                    id: r.id.clone(),
-                    page_id: r.page_id.clone(),
-                    y0: r.y0,
-                    y1: r.y1,
-                    kind: r.kind.clone(),
-                    color: r.color.clone(),
-                },
-            );
-        }
-        let display_path = if p.title.is_empty() {
-            PathBuf::from(if p.image.is_empty() { "page" } else { &p.image })
-        } else {
-            PathBuf::from(&p.title)
-        };
-        pages.push(Page {
-            id: p.id.clone(),
-            path: display_path,
-            disk_path,
-            image: None,
-            img_w: w,
-            img_h: h,
-            regions,
-            vector,
-            blank: false,
-        });
-    }
+        _ => None,
+    };
+    drop(zip);
+    crate::trace::log(&format!(
+        "load_project: project.json {} 页, {}ms",
+        meta.pages.len(),
+        started.elapsed().as_millis()
+    ));
+    let pages = assemble_pages(path, &meta.pages, &session, &report)?;
+    crate::trace::log(&format!(
+        "load_project: 解压页面 {}ms",
+        started.elapsed().as_millis()
+    ));
 
     let groups: Vec<Group> = meta
         .groups
@@ -856,7 +1090,7 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
                 doc.bg_solid = Some(c);
                 doc.bg_enabled = true;
             } else if !bg.image.is_empty() {
-                let png = read_zip_entry(&mut zip, &bg.image)?;
+                let png = bg_png.unwrap_or_default();
                 let image = image::load_from_memory(&png)
                     .map_err(|e| format!("解码底色失败: {e}"))?
                     .to_rgb8();
@@ -867,6 +1101,15 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
             }
         }
     }
+    report(LoadProgress {
+        stage: "整理工程",
+        done: meta.pages.len(),
+        total: meta.pages.len(),
+    });
+    crate::trace::log(&format!(
+        "load_project: 底色与文档 {}ms",
+        started.elapsed().as_millis()
+    ));
     if doc.current_page_index >= doc.pages.len() {
         doc.current_page_index = 0;
     }
@@ -884,8 +1127,14 @@ pub fn load_project(path: &Path) -> Result<DocState, String> {
         .collect();
     doc.selected_region_ids
         .retain(|id| valid_regions.contains(id));
-    extract_edit_entries(&mut zip, &session)?;
-    doc.retain_memory_window();
+    let edit_started = Instant::now();
+    extract_named_entries(path, &session, &edit_names, &report)?;
+    crate::trace::log(&format!(
+        "load_project: 解压修图 {} 个, {}ms; 合计 {}ms (页图像素等打开后再按窗口解码)",
+        edit_names.len(),
+        edit_started.elapsed().as_millis(),
+        started.elapsed().as_millis()
+    ));
     doc.rebuild_rid_index();
     doc.seed_guide_defaults();
     Ok(doc)

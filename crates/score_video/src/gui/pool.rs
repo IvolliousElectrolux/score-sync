@@ -2,6 +2,42 @@
 
 use super::*;
 
+/// 素材池只铺可视区附近的条目. 返回 (start, end, 顶部占位, 底部占位).
+fn pool_visible_range(app: &ScoreVideoApp) -> (usize, usize, f32, f32) {
+    const GAP: f32 = 4.0;
+    let n = app.pool.len();
+    if n == 0 {
+        return (0, 0, 0.0, 0.0);
+    }
+    let mut heights = Vec::with_capacity(n);
+    for item in &app.pool {
+        let expanded = app.expanded_pool.as_deref() == Some(item.group_id.as_str());
+        heights.push(if expanded { 200.0 } else { 32.0 });
+    }
+    let off = (-f32::from(app.pool_scroll.offset().y)).max(0.0);
+    let measured = f32::from(app.pool_scroll.bounds().size.height);
+    let view_h = if measured < 8.0 { 900.0 } else { measured };
+    let mut y = 0.0f32;
+    let mut start = 0usize;
+    let mut end = n;
+    for (i, h) in heights.iter().enumerate() {
+        let next = y + h + GAP;
+        if next < off - 48.0 {
+            start = i + 1;
+        }
+        if y > off + view_h + 96.0 {
+            end = i;
+            break;
+        }
+        y = next;
+    }
+    end = end.max(start);
+    let top = heights[..start].iter().sum::<f32>() + GAP * start.saturating_sub(1) as f32;
+    let hidden = n - end;
+    let bot = heights[end..].iter().sum::<f32>() + GAP * hidden.saturating_sub(1) as f32;
+    (start, end, top, bot)
+}
+
 impl ScoreVideoApp {
     pub fn right_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div()
@@ -16,7 +52,17 @@ impl ScoreVideoApp {
             .flex_col()
             .gap_1()
             .p_2();
-        for item in self.pool.clone() {
+        let (win_start, win_end, top_pad, bot_pad) = pool_visible_range(self);
+        if top_pad > 0.5 {
+            list = list.child(div().h(px(top_pad)).flex_shrink_0());
+        }
+        for item in self
+            .pool
+            .iter()
+            .skip(win_start)
+            .take(win_end.saturating_sub(win_start))
+            .cloned()
+        {
             let gid = item.group_id.clone();
             let gid2 = gid.clone();
             let expanded = self.expanded_pool.as_deref() == Some(gid.as_str());
@@ -100,6 +146,9 @@ impl ScoreVideoApp {
                 );
             }
             list = list.child(entry);
+        }
+        if bot_pad > 0.5 {
+            list = list.child(div().h(px(bot_pad)).flex_shrink_0());
         }
 
         // 竖直拖动条 (与宿主其它列表滚动条同款样式/交互, 仅内容溢出时显示).

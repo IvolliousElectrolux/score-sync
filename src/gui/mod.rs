@@ -41,7 +41,7 @@ pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) use std::sync::Arc;
-pub(crate) use std::time::Duration;
+pub(crate) use std::time::{Duration, Instant};
 
 actions!(
     score_sync,
@@ -276,6 +276,12 @@ pub(crate) struct ScoreSyncApp {
     saving: bool,
     /// 后台打开工程进行中
     opening: bool,
+    /// 标题栏转圈已经在跑, 避免保存和打开各起一个把相位加得太快
+    busy_spin: bool,
+    /// 打开进度, 例如 "正在打开 No. 2 (12/44)"
+    open_progress: SharedString,
+    /// 底色缩略图后台代数, 晚到的结果丢掉
+    bg_thumb_gen: u64,
     /// 视频素材池后台重算代次: 每次触发 `sync_video_pool` 自增, 供异步回调
     /// 判断自己是否已被更晚的一轮请求取代 (取代则丢弃结果, 避免旧结果
     /// 覆盖新状态; 例如快速连续应用/取消底色时).
@@ -554,6 +560,9 @@ impl ScoreSyncApp {
             project_path: None,
             saving: false,
             opening: false,
+            busy_spin: false,
+            open_progress: SharedString::default(),
+            bg_thumb_gen: 0,
             video_sync_gen: 0,
             crop_histories: HashMap::new(),
             page_struct_history: CropHistory::default(),
@@ -692,6 +701,9 @@ impl Render for ScoreSyncApp {
             "曲谱同步 / Score Sync".into()
         };
         let saving = self.saving;
+        let opening = self.opening;
+        let busy = saving || opening;
+        let open_progress = self.open_progress.clone();
         let dirty = self.dirty;
         let spin_phase = self.save_spin_phase;
 
@@ -1335,7 +1347,16 @@ impl Render for ScoreSyncApp {
                                     .whitespace_nowrap()
                                     .child(title_core),
                             )
-                            .when(saving, |d| {
+                            .when(opening, |d| {
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(ui_kit::chrome(0x2563eb))
+                                        .child(open_progress),
+                                )
+                            })
+                            .when(busy, |d| {
                                 d.child(
                                     div().w(px(18.)).h(px(18.)).flex_shrink_0().child(
                                         canvas(
@@ -1348,7 +1369,7 @@ impl Render for ScoreSyncApp {
                                     ),
                                 )
                             })
-                            .when(!saving && dirty, |d| {
+                            .when(!busy && dirty, |d| {
                                 d.child(
                                     div()
                                         .flex_shrink_0()

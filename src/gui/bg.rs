@@ -192,24 +192,47 @@ impl ScoreSyncApp {
             self.bg.applied_is_solid = self.doc.bg_enabled;
             self.set_bg_picker_rgb(c, true, cx);
         } else if let Some(img) = self.doc.bg_image.as_ref() {
-            let thumb = thumbnail_rgb(img, BG_THUMB_MAX);
-            self.bg.pending_preview = Some(rgb_to_render_image(&thumb));
             self.bg.applied_is_solid = false;
             self.bg.cached_image = Some(img.clone());
             self.bg.cached_source_path = self.doc.bg_source_path.clone();
-            if !self
+            let center = img.get_pixel(img.width() / 2, img.height() / 2);
+            self.set_bg_picker_rgb([center[0], center[1], center[2]], true, cx);
+            let need_cache = !self
                 .bg
                 .cached_session_path
                 .as_ref()
                 .map(|p| p.is_file())
-                .unwrap_or(false)
-            {
-                if let Ok(p) = crate::page_cache::write_rgb_png(img, "bg_cache") {
-                    self.bg.cached_session_path = Some(p);
-                }
-            }
-            let p = img.get_pixel(img.width() / 2, img.height() / 2);
-            self.set_bg_picker_rgb([p[0], p[1], p[2]], true, cx);
+                .unwrap_or(false);
+            let img = img.clone();
+            self.bg_thumb_gen = self.bg_thumb_gen.wrapping_add(1);
+            let gen = self.bg_thumb_gen;
+            let (tx, rx) = async_channel::bounded::<(image::RgbImage, Option<PathBuf>)>(1);
+            std::thread::spawn(move || {
+                let thumb = thumbnail_rgb(&img, BG_THUMB_MAX);
+                let session = if need_cache {
+                    crate::page_cache::write_rgb_png(&img, "bg_cache").ok()
+                } else {
+                    None
+                };
+                let _ = tx.send_blocking((thumb, session));
+            });
+            cx.spawn(async move |this, cx| {
+                let Ok((thumb, session)) = rx.recv().await else {
+                    return;
+                };
+                this.update(cx, |view, cx| {
+                    if view.bg_thumb_gen != gen {
+                        return;
+                    }
+                    view.bg.pending_preview = Some(rgb_to_render_image(&thumb));
+                    if let Some(path) = session {
+                        view.bg.cached_session_path = Some(path);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         } else {
             self.bg.pending_preview = None;
             self.bg.cached_image = None;
@@ -624,18 +647,45 @@ impl ScoreSyncApp {
         self.bg.pending_path = Some(path);
     }
 
-    pub(super) fn drop_bg_full_pixels(&mut self) {
-        self.ensure_bg_session_cache();
-        if self
+    pub(super) fn drop_bg_full_pixels(&mut self, cx: &mut Context<Self>) {
+        let have_file = self
             .bg
             .cached_session_path
             .as_ref()
             .map(|p| p.is_file())
-            .unwrap_or(false)
-        {
-            self.bg.cached_image = None;
+            .unwrap_or(false);
+        let Some(img) = self.bg.cached_image.take() else {
+            std::thread::spawn(crate::mem::release_unused_to_os);
+            return;
+        };
+        if have_file {
+            std::thread::spawn(move || {
+                drop(img);
+                crate::mem::release_unused_to_os();
+            });
+            return;
         }
-        crate::mem::release_unused_to_os();
+        let (tx, rx) = async_channel::bounded::<Option<PathBuf>>(1);
+        std::thread::spawn(move || {
+            let path = crate::page_cache::write_rgb_png(&img, "bg_cache").ok();
+            drop(img);
+            let _ = tx.send_blocking(path);
+            crate::mem::release_unused_to_os();
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(path) = rx.recv().await else {
+                return;
+            };
+            this.update(cx, |view, _| {
+                if view.bg.cached_session_path.is_none() {
+                    if let Some(path) = path {
+                        view.bg.cached_session_path = Some(path);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn ensure_bg_session_cache(&mut self) {

@@ -687,6 +687,9 @@ impl ScoreSyncApp {
         };
 
         let loading = render_image.is_none() && !self.doc.pages.is_empty();
+        let opening_empty = self.opening && self.doc.pages.is_empty();
+        let open_progress = self.open_progress.clone();
+        let spin_phase = self.save_spin_phase;
 
         div()
             .id("image_view")
@@ -895,6 +898,40 @@ impl ScoreSyncApp {
                         .text_color(ui_kit::chrome(0xe2e8f0))
                         .text_sm()
                         .child("加载中…"),
+                )
+            })
+            .when(opening_empty, |d| {
+                d.child(
+                    div()
+                        .id("project_opening")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .child(
+                            div().w(px(28.)).h(px(28.)).child(
+                                canvas(
+                                    |_, _, _| {},
+                                    move |bounds, _, window, _| {
+                                        super::paint_save_spinner(window, bounds, spin_phase);
+                                    },
+                                )
+                                .size_full(),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .text_color(ui_kit::chrome(0xe2e8f0))
+                                .text_sm()
+                                .child(if open_progress.is_empty() {
+                                    "正在打开工程…".into()
+                                } else {
+                                    open_progress
+                                }),
+                        ),
                 )
             })
     }

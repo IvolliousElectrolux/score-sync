@@ -263,7 +263,7 @@ Steps:\n\
 Other:\n\
   Double-click empty space or press F to fit. Drag the splitter to resize the side panel.\n\
   The right side switches Blocks / Background / Mask / Video.\n\
-  Title-bar icons: new, open, save, save as, help, settings. A * means unsaved; a spinner means saving.\n\
+  Title-bar icons: new, open, save, save as, help, settings. A * means unsaved; a spinner means saving or opening a project.\n\
   Shortcuts can be changed in Settings. The keys above are the defaults.\n\
   If Check for updates on startup is on and the machine is online, GitHub is checked once.\n\
   PDF and video export need pdfium and ffmpeg beside the program or on PATH.\n\

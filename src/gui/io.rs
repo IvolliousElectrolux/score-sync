@@ -554,7 +554,18 @@ impl ScoreSyncApp {
             return;
         }
         self.flush_mask_to_doc(cx);
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
         self.opening = true;
+        self.open_progress = format!("正在打开 {name}…").into();
+        self.status = self.open_progress.clone();
+        self.hint = self.status.clone();
+        self.save_spin_phase = 0.0;
+        cx.notify();
+        self.start_busy_spinner(cx);
         if self.pdf_import.is_some() {
             self.close_import_dialog(cx);
         }
@@ -565,29 +576,67 @@ impl ScoreSyncApp {
             self.close_photo_session(cx);
         }
         self.abandon_pdf_import();
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("project")
-            .to_string();
-        self.status = format!("正在打开工程: {name}…").into();
-        self.hint = self.status.clone();
-        cx.notify();
-
         let path_bg = path.clone();
         let (tx, rx) = async_channel::bounded::<Result<DocState, String>>(1);
+        let (ptx, prx) = async_channel::unbounded::<crate::project::LoadProgress>();
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(project::load_project(&path_bg));
+            let started = Instant::now();
+            let result =
+                project::load_project_reporting(&path_bg, |progress| {
+                    let _ = ptx.send_blocking(progress);
+                });
+            crate::trace::log(&format!(
+                "open_project: load_project {}ms ok={}",
+                started.elapsed().as_millis(),
+                result.is_ok()
+            ));
+            let _ = tx.send_blocking(result);
         });
+        let open_name = name.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(mut latest) = prx.recv().await else {
+                    break;
+                };
+                while let Ok(next) = prx.try_recv() {
+                    latest = next;
+                }
+                let text = if latest.total > 0 {
+                    format!(
+                        "正在打开 {open_name}: {} ({}/{})",
+                        latest.stage, latest.done, latest.total
+                    )
+                } else {
+                    format!("正在打开 {open_name}: {}", latest.stage)
+                };
+                this.update(cx, |view, cx| {
+                    if !view.opening {
+                        return;
+                    }
+                    view.open_progress = text.into();
+                    view.status = view.open_progress.clone();
+                    view.hint = view.status.clone();
+                    cx.notify();
+                })
+                .ok();
+                cx.background_executor()
+                    .timer(Duration::from_millis(33))
+                    .await;
+            }
+        })
+        .detach();
 
         cx.spawn(async move |this, cx| {
             let result = rx.recv().await;
+            let apply_started = Instant::now();
             this.update(cx, |view, cx| {
                 view.opening = false;
+                view.open_progress = SharedString::default();
                 match result {
                     Ok(Ok(doc)) => {
                         let video_snap = doc.video_state.clone();
-                        view.doc = doc;
+                        let old_doc = std::mem::replace(&mut view.doc, doc);
+                        std::thread::spawn(move || drop(old_doc));
                         view.project_path = Some(path.clone());
                         view.dirty = false;
                         view.clear_org_thumbs();
@@ -669,6 +718,10 @@ impl ScoreSyncApp {
                         );
                     }
                 }
+                crate::trace::log(&format!(
+                    "open_project: 主线程套用 {}ms",
+                    apply_started.elapsed().as_millis()
+                ));
                 cx.notify();
             })
             .ok();
@@ -865,7 +918,7 @@ impl ScoreSyncApp {
         self.status = "正在保存工程…".into();
         self.hint = self.status.clone();
         cx.notify();
-        self.start_save_spinner(cx);
+        self.start_busy_spinner(cx);
 
         // 快照后放到后台流式打 zip; clone_for_save 不拷页图像素, 避免整首页一次进内存
         let doc = self.doc.clone_for_save();

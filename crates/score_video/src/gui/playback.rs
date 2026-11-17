@@ -46,13 +46,41 @@ impl ScoreVideoApp {
     }
 
     pub fn set_pool(&mut self, pool: Vec<MaterialItem>, cx: &mut Context<Self>) {
-        // 素材内容可能已变化但 group_id 不变, 因此整体清空缓存; 正在后台
-        // 解码的旧内容用 `pool_gen` 标记过期, 回来时会被丢弃 (见 `image_for`).
-        self.pool_gen = self.pool_gen.wrapping_add(1);
-        self.item_gen.clear();
-        self.render_cache.clear();
-        self.image_loading.clear();
-        self.image_failed.clear();
+        // 路径和尺寸都没变的条目保留已解码缩略图. 变了的才作废, 用 item_gen
+        // 丢掉还在飞的旧解码, 不再整池 bump `pool_gen`.
+        let mut next_ids = std::collections::HashSet::new();
+        for item in &pool {
+            next_ids.insert(item.group_id.clone());
+            let same = self.pool.iter().any(|old| {
+                old.group_id == item.group_id
+                    && old.cache_path == item.cache_path
+                    && old.width == item.width
+                    && old.height == item.height
+            });
+            if !same {
+                *self.item_gen.entry(item.group_id.clone()).or_insert(0) += 1;
+                self.render_cache.remove(&item.group_id);
+                self.image_loading.remove(&item.group_id);
+                self.image_failed.remove(&item.group_id);
+            }
+        }
+        let mut stale: Vec<String> = self
+            .render_cache
+            .keys()
+            .filter(|gid| !next_ids.contains(*gid))
+            .cloned()
+            .collect();
+        for gid in &self.image_loading {
+            if !next_ids.contains(gid) && !stale.iter().any(|id| id == gid) {
+                stale.push(gid.clone());
+            }
+        }
+        for gid in stale {
+            *self.item_gen.entry(gid.clone()).or_insert(0) += 1;
+            self.render_cache.remove(&gid);
+            self.image_loading.remove(&gid);
+            self.image_failed.remove(&gid);
+        }
         self.pool = pool;
         if let Some(gid) = &self.expanded_pool {
             if !self.pool.iter().any(|m| &m.group_id == gid) {
