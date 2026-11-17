@@ -88,11 +88,13 @@ impl TimeStretch {
         let mut out = Vec::new();
         loop {
             let frames = self.available_frames();
-            let start = self.pos - self.origin as f64;
-            if start < 0.0 || start + self.n as f64 > frames as f64 {
+            let have_end = self.origin as f64 + frames as f64;
+            let radius = (self.hs / 2) as f64;
+            if self.pos + self.n as f64 + radius > have_end {
                 break;
             }
-            self.add_grain();
+            let delta = self.align_delta();
+            self.add_grain(delta);
             self.pos += self.hs as f64 * f64::from(self.speed);
             self.write_at += self.hs;
             self.discard_input();
@@ -101,7 +103,48 @@ impl TimeStretch {
         out
     }
 
-    fn add_grain(&mut self) {
+    /// 在自然起点附近找和上一段重叠区最像的偏移, 避免两段相位对不上把音高拉偏.
+    fn align_delta(&self) -> f64 {
+        if self.write_at == 0 || self.norm.is_empty() {
+            return 0.0;
+        }
+        let radius = (self.hs / 2) as isize;
+        let min_frame = self.origin as f64;
+        let max_frame = self.origin as f64 + self.available_frames() as f64;
+        let mut best = 0isize;
+        let mut best_score = f32::NEG_INFINITY;
+        let mut delta = -radius;
+        while delta <= radius {
+            let start = self.pos + delta as f64;
+            if start >= min_frame && start + self.hs as f64 <= max_frame {
+                let score = self.correlation(delta);
+                if score > best_score {
+                    best_score = score;
+                    best = delta;
+                }
+            }
+            delta += 1;
+        }
+        best as f64
+    }
+
+    fn correlation(&self, delta: isize) -> f32 {
+        let mut score = 0.0f32;
+        let start = self.pos + delta as f64;
+        for i in 0..self.hs {
+            let Some(norm) = self.norm.get(i).copied() else {
+                continue;
+            };
+            if norm < 1e-4 {
+                continue;
+            }
+            let prev = self.acc[0].get(i).copied().unwrap_or(0.0) / norm;
+            score += prev * self.sample(0, start + i as f64);
+        }
+        score
+    }
+
+    fn add_grain(&mut self, delta: f64) {
         let base = self.write_at - self.out_origin;
         let need = base + self.n;
         if self.norm.len() < need {
@@ -111,7 +154,7 @@ impl TimeStretch {
             }
         }
         for i in 0..self.n {
-            let frame = self.pos + i as f64;
+            let frame = self.pos + delta + i as f64;
             let weight = self.hann[i];
             let at = base + i;
             self.norm[at] += weight;
@@ -135,7 +178,8 @@ impl TimeStretch {
     }
 
     fn discard_input(&mut self) {
-        let keep_from = (self.pos.floor() as isize - 1).max(0) as usize;
+        let margin = (self.hs / 2) as isize + 2;
+        let keep_from = (self.pos.floor() as isize - margin).max(0) as usize;
         if keep_from <= self.origin {
             return;
         }
