@@ -191,19 +191,19 @@ impl ScoreSyncApp {
         if let Some(c) = self.doc.bg_solid {
             self.bg.applied_is_solid = self.doc.bg_enabled;
             self.set_bg_picker_rgb(c, true, cx);
-        } else if let Some(img) = self.doc.bg_image.as_ref() {
+        } else if let Some(img) = self.doc.bg_image.clone() {
             self.bg.applied_is_solid = false;
             self.bg.cached_image = Some(img.clone());
             self.bg.cached_source_path = self.doc.bg_source_path.clone();
             let center = img.get_pixel(img.width() / 2, img.height() / 2);
-            self.set_bg_picker_rgb([center[0], center[1], center[2]], true, cx);
+            let rgb = [center[0], center[1], center[2]];
             let need_cache = !self
                 .bg
                 .cached_session_path
                 .as_ref()
                 .map(|p| p.is_file())
                 .unwrap_or(false);
-            let img = img.clone();
+            self.set_bg_picker_rgb(rgb, true, cx);
             self.bg_thumb_gen = self.bg_thumb_gen.wrapping_add(1);
             let gen = self.bg_thumb_gen;
             let (tx, rx) = async_channel::bounded::<(image::RgbImage, Option<PathBuf>)>(1);

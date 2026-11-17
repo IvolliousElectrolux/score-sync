@@ -30,6 +30,9 @@ jobs:
       - name: Test libraries
         run: cargo test --workspace --lib
 
+      - name: Check app
+        run: cargo check -p score_sync
+
       - name: Clippy
         continue-on-error: true
         run: cargo clippy -p score_sync --all-targets -- -W clippy::all

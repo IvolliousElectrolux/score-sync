@@ -800,7 +800,7 @@ fn assemble_pages(
             .or_else(|| {
                 image::load_from_memory(&bytes)
                     .ok()
-                    .map(|image| image.dimensions())
+                    .map(|image| (image.width(), image.height()))
             })
             .ok_or_else(|| format!("读取页尺寸失败 ({})", job.image))?;
         write_bytes(&job.dest, &bytes)?;
