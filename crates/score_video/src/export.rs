@@ -425,7 +425,13 @@ struct FramePainter<'a> {
 }
 
 impl<'a> FramePainter<'a> {
-    fn new(pool: &'a [MaterialItem], w: u32, h: u32, layout: Option<Yuv420>, fade_bg: [u8; 3]) -> Self {
+    fn new(
+        pool: &'a [MaterialItem],
+        w: u32,
+        h: u32,
+        layout: Option<Yuv420>,
+        fade_bg: [u8; 3],
+    ) -> Self {
         let w = even_dim(w);
         let h = even_dim(h);
         let rgba_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
@@ -1073,7 +1079,8 @@ fn stretch_still_bytes(data: &mut [u8], frames: u64, fps: u32) -> Result<(), Str
     let mut slots = [None; 5];
     walk_timing(data, 0, data.len(), &mut slots)?;
     let [mvhd, mdhd, tkhd, elst, stts] = slots;
-    let (Some(mvhd), Some(mdhd), Some(tkhd), Some(elst), Some(stts)) = (mvhd, mdhd, tkhd, elst, stts)
+    let (Some(mvhd), Some(mdhd), Some(tkhd), Some(elst), Some(stts)) =
+        (mvhd, mdhd, tkhd, elst, stts)
     else {
         return Err("MP4 缺少时长盒".to_string());
     };
@@ -1532,7 +1539,13 @@ fn encode_held(
             Ok(()) => return Ok(()),
             Err(err) if err.contains("缺少图片") => return Err(err),
             Err(err) => {
-                let brief = err.lines().next().unwrap_or("").chars().take(180).collect::<String>();
+                let brief = err
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(180)
+                    .collect::<String>();
                 let _ = tx.send_blocking(ExportMsg::Progress(format!(
                     "硬件编码失败, 改用 {}: {brief}",
                     VideoEncoder::Software.ffmpeg_name(opts.codec)
@@ -1766,15 +1779,7 @@ fn run_export(
             stills,
             total_frames
         )));
-        if let Err(err) = encode_held(
-            pool,
-            timeline,
-            &runs,
-            opts,
-            &silent_video,
-            work.path(),
-            tx,
-        ) {
+        if let Err(err) = encode_held(pool, timeline, &runs, opts, &silent_video, work.path(), tx) {
             let missing = err.contains("缺少图片");
             if missing {
                 return Err(err);
@@ -1884,8 +1889,14 @@ mod tests {
         assert_eq!(format_eta(90.0), "1 分 30 秒");
         assert_eq!(format_eta(3720.0), "1 小时 2 分");
         assert_eq!(format_eta(3600.0), "1 小时");
-        assert_eq!(with_remaining("编码画面 1/4", 20.0, 10, 40), "编码画面 1/4, 剩余 1 分...");
-        assert_eq!(with_remaining("编码画面 1/4", 0.2, 1, 4), "编码画面 1/4, 剩余不到 1 秒...");
+        assert_eq!(
+            with_remaining("编码画面 1/4", 20.0, 10, 40),
+            "编码画面 1/4, 剩余 1 分..."
+        );
+        assert_eq!(
+            with_remaining("编码画面 1/4", 0.2, 1, 4),
+            "编码画面 1/4, 剩余不到 1 秒..."
+        );
         assert_eq!(with_remaining("编码画面 1/4", 0.0, 0, 4), "编码画面 1/4...");
         assert_eq!(progress_frame("frame=12"), Some(12));
         assert_eq!(progress_frame("frame=  3"), Some(3));
@@ -1935,7 +1946,10 @@ mod tests {
         stretch_still_bytes(&mut file, 1, 60).unwrap();
         assert_eq!(field(&file, b"stts", 12), 17);
 
-        let stts_at = file.windows(4).position(|w| w == b"stts".as_slice()).unwrap();
+        let stts_at = file
+            .windows(4)
+            .position(|w| w == b"stts".as_slice())
+            .unwrap();
         file[stts_at + 4 + 15] = 2;
         assert!(stretch_still_bytes(&mut file, 30, 60).is_err());
     }
@@ -1953,13 +1967,18 @@ mod tests {
             18,
             Path::new("a.mp4"),
         );
-        let text: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
         assert!(text.windows(2).any(|pair| pair == ["-framerate", "60"]));
         assert!(text.windows(2).any(|pair| pair == ["-frames:v", "1"]));
         assert!(text.windows(2).any(|pair| pair == ["-c:v", "hevc_qsv"]));
         assert!(text.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"]));
         assert!(text.windows(2).any(|pair| pair == ["-bf", "0"]));
-        assert!(text.windows(2).any(|pair| pair == ["-video_track_timescale", "60"]));
+        assert!(text
+            .windows(2)
+            .any(|pair| pair == ["-video_track_timescale", "60"]));
         assert!(!text.iter().any(|arg| arg == "-vf" || arg.contains('/')));
     }
 
@@ -1994,7 +2013,10 @@ mod tests {
             18,
             Path::new("c.mp4"),
         );
-        let mf_text: Vec<String> = mf.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let mf_text: Vec<String> = mf
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
         assert!(mf_text.windows(2).any(|pair| pair == ["-c:v", "h264_mf"]));
         assert!(!mf_text.windows(2).any(|pair| pair == ["-bf", "0"]));
         assert!(!mf_text.iter().any(|arg| arg == "-vf"));

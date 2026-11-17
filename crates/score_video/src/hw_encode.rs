@@ -467,7 +467,10 @@ fn linux_pci_vendors() -> Vec<u32> {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        let text = text.trim().trim_start_matches("0x").trim_start_matches("0X");
+        let text = text
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
         if let Ok(id) = u32::from_str_radix(text, 16) {
             ids.push(id);
         }
@@ -514,7 +517,12 @@ fn probe_encoder(codec: VideoCodec, encoder: VideoEncoder) -> bool {
         "2".to_string(),
     ];
     args.extend(video_codec_args(codec, encoder, 18));
-    args.extend(["-an".to_string(), "-f".to_string(), "null".to_string(), "-".to_string()]);
+    args.extend([
+        "-an".to_string(),
+        "-f".to_string(),
+        "null".to_string(),
+        "-".to_string(),
+    ]);
 
     let mut cmd = Command::new(ffmpeg_path());
     hidden(&mut cmd);
@@ -538,7 +546,10 @@ fn probe_encoder(codec: VideoCodec, encoder: VideoEncoder) -> bool {
         .unwrap_or(false)
 }
 
-fn wait_timeout(child: &mut std::process::Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+fn wait_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
     let start = Instant::now();
     loop {
         match child.try_wait() {

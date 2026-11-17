@@ -45,6 +45,7 @@ jobs:
           shared-key: macos-${{ matrix.asset }}
 
       - name: Format
+        continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: Clippy

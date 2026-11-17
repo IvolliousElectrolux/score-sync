@@ -661,8 +661,7 @@ fn write_bytes(dest: &Path, bytes: &[u8]) -> Result<(), String> {
 
 fn read_zip_file_entry(zip_path: &Path, name: &str) -> Result<Vec<u8>, String> {
     let file = File::open(zip_path).map_err(|e| format!("打开工程失败: {e}"))?;
-    let mut zip = ZipArchive::new(file)
-        .map_err(|e| format!("无法作为工程压缩包打开: {e}"))?;
+    let mut zip = ZipArchive::new(file).map_err(|e| format!("无法作为工程压缩包打开: {e}"))?;
     read_zip_entry(&mut zip, name)
 }
 
@@ -695,15 +694,13 @@ where
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         for _ in 0..conc {
-            scope.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    let value = f(&items[i]);
-                    *slots[i].lock().unwrap_or_else(|err| err.into_inner()) = Some(value);
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
                 }
+                let value = f(&items[i]);
+                *slots[i].lock().unwrap_or_else(|err| err.into_inner()) = Some(value);
             });
         }
     });

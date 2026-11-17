@@ -78,8 +78,7 @@ impl PhotoEditApp {
         };
         let show_handles = self.mode == ToolMode::Move;
         // 与蒙版滴管一致: 取色时用系统十字, 不要沿用画笔的隐藏光标和笔圈.
-        let color_pick =
-            self.eyedropper_armed || (self.mode == ToolMode::Paint && self.clone_alt);
+        let color_pick = self.eyedropper_armed || (self.mode == ToolMode::Paint && self.clone_alt);
         let show_stamp = self.mode == ToolMode::Clone && self.clone_alt && !color_pick;
         let paint_fill = if self.mode == ToolMode::Paint {
             Some(self.paint_color)

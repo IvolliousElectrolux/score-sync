@@ -2250,10 +2250,8 @@ impl ScoreSyncApp {
                         view.status = format!("视频工具 (素材 {cached_n} 张)").into();
                     } else {
                         view.status = if cached_n > 0 {
-                            format!(
-                                "视频工具 (已显示缓存 {cached_n} 张, 后台更新 {rebuild_n} 张)"
-                            )
-                            .into()
+                            format!("视频工具 (已显示缓存 {cached_n} 张, 后台更新 {rebuild_n} 张)")
+                                .into()
                         } else {
                             format!("视频工具 (正在生成素材 0/{rebuild_n})").into()
                         };
@@ -2367,7 +2365,8 @@ impl ScoreSyncApp {
                             crate::trace::log(&format!("video_pool: {gid} 无成员片段, 跳过渲染"));
                         }
                         if item.is_none() {
-                            if let Some((w, h)) = crate::page_cache::png_file_dimensions(&cache_path)
+                            if let Some((w, h)) =
+                                crate::page_cache::png_file_dimensions(&cache_path)
                             {
                                 item = Some(MaterialItem {
                                     group_id: gid.clone(),
@@ -2932,10 +2931,9 @@ fn write_pool_index(path: &Path, index: &PoolIndexFile) {
 
 fn remember_pool_index(path: &Path, gid: &str, w: u32, h: u32, fp: Option<u64>) {
     let mut index = read_pool_index(path);
-    index.groups.insert(
-        gid.to_string(),
-        PoolIndexEntry { w, h, fp },
-    );
+    index
+        .groups
+        .insert(gid.to_string(), PoolIndexEntry { w, h, fp });
     write_pool_index(path, &index);
 }
 
@@ -2972,10 +2970,9 @@ fn scan_pool_cache(
                     cache_path: snap.cache_path.clone(),
                 });
                 if entry.is_none() {
-                    index.groups.insert(
-                        snap.gid.clone(),
-                        PoolIndexEntry { w, h, fp: None },
-                    );
+                    index
+                        .groups
+                        .insert(snap.gid.clone(), PoolIndexEntry { w, h, fp: None });
                     index_dirty = true;
                 }
             }
@@ -3004,11 +3001,7 @@ fn scan_pool_cache(
     if index_dirty {
         write_pool_index(&index_path, &index);
     }
-    rebuild.sort_by_key(|gid| {
-        hot.iter()
-            .position(|id| id == gid)
-            .unwrap_or(usize::MAX)
-    });
+    rebuild.sort_by_key(|gid| hot.iter().position(|id| id == gid).unwrap_or(usize::MAX));
     crate::trace::log(&format!(
         "video_pool: 后台扫描缓存 {} 张, 待更新 {} 张, {}ms",
         cached.len(),

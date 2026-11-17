@@ -540,10 +540,7 @@ pub fn scale_from_target(pt: f32, px: u32) -> f32 {
 /// 内容框裁完之后套到导入目标.
 /// `lock_aspect` 时各页宽高比不同, 做不到同一宽高, 只把宽度拉齐, 高度跟着该页比例走.
 /// 不锁定则拉到确切的宽×高. `None` 表示按渲染倍率原样留下.
-pub fn fit_imported_page(
-    image: image::RgbImage,
-    fit: Option<(u32, u32, bool)>,
-) -> image::RgbImage {
+pub fn fit_imported_page(image: image::RgbImage, fit: Option<(u32, u32, bool)>) -> image::RgbImage {
     let Some((tw, th, lock)) = fit else {
         return image;
     };

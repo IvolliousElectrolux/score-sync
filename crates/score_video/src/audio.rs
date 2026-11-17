@@ -1112,7 +1112,11 @@ fn open_live_slice(path: &Path, start: f64, duration: f64, speed: f32) -> Option
     let mut input_left = input_frames.saturating_mul(u64::from(channels));
     let output_frames = (input_frames as f64 / f64::from(speed)).round().max(1.0) as u64;
     let mut stretch = if (speed - 1.0).abs() > 1e-3 {
-        Some(crate::time_stretch::TimeStretch::new(ch, speed, sample_rate))
+        Some(crate::time_stretch::TimeStretch::new(
+            ch,
+            speed,
+            sample_rate,
+        ))
     } else {
         None
     };

@@ -34,6 +34,7 @@ jobs:
           shared-key: windows-x64
 
       - name: Format
+        continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: Clippy

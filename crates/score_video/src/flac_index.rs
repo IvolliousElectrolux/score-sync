@@ -123,7 +123,8 @@ fn worker_loop() {
             *state = Kind::Running;
         }
         *job.started.lock().unwrap_or_else(|err| err.into_inner()) = Some(Instant::now());
-        let scanned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_index(&path, &job)));
+        let scanned =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_index(&path, &job)));
         let mut state = job.state.lock().unwrap_or_else(|err| err.into_inner());
         *state = match scanned {
             Ok(Some(index)) => {
@@ -321,7 +322,9 @@ fn table_is_usable(points: &[FramePoint], total_samples: u64, sample_rate: u32) 
     if points.len() < 2 || sample_rate == 0 {
         return false;
     }
-    let limit = MAX_SEEK_GAP.as_secs().saturating_mul(u64::from(sample_rate));
+    let limit = MAX_SEEK_GAP
+        .as_secs()
+        .saturating_mul(u64::from(sample_rate));
     if points[0].sample > limit {
         return false;
     }
@@ -332,7 +335,8 @@ fn table_is_usable(points: &[FramePoint], total_samples: u64, sample_rate: u32) 
         }
         prev = point.sample;
     }
-    if total_samples > 0 && total_samples.saturating_sub(prev) > limit.saturating_add(u64::from(sample_rate))
+    if total_samples > 0
+        && total_samples.saturating_sub(prev) > limit.saturating_add(u64::from(sample_rate))
     {
         return false;
     }
@@ -373,7 +377,12 @@ impl FlacDecoder {
         if sample_rate == 0 {
             return None;
         }
-        let channels = track.codec_params.channels.map(|n| n.count()).unwrap_or(1).max(1) as u16;
+        let channels = track
+            .codec_params
+            .channels
+            .map(|n| n.count())
+            .unwrap_or(1)
+            .max(1) as u16;
         let seeked = format
             .seek(
                 SeekMode::Accurate,
@@ -908,7 +917,7 @@ fn read_utf8(buf: &[u8]) -> Utf8 {
     if buf.len() < width {
         return Utf8::NeedMore;
     }
-    let mut value = u64::from(first & (0xFFu8 >> (width + 1))) ;
+    let mut value = u64::from(first & (0xFFu8 >> (width + 1)));
     if width == 7 {
         value = 0;
     }
@@ -975,7 +984,8 @@ fn read_info(file: &mut File) -> Result<FlacInfo, String> {
                 return Err("bad streaminfo".into());
             }
             let mut payload = vec![0u8; len as usize];
-            file.read_exact(&mut payload).map_err(|err| err.to_string())?;
+            file.read_exact(&mut payload)
+                .map_err(|err| err.to_string())?;
             let word = u64::from_be_bytes(payload[10..18].try_into().unwrap_or([0; 8]));
             sample_rate = ((word >> 44) & 0xF_FFFF) as u32;
             channels = (((word >> 41) & 0x7) + 1) as u16;
@@ -1006,7 +1016,8 @@ fn read_info(file: &mut File) -> Result<FlacInfo, String> {
 }
 
 fn read_seek_table(file: &mut File, info: &FlacInfo) -> Result<Option<Vec<FramePoint>>, String> {
-    file.seek(SeekFrom::Start(0)).map_err(|err| err.to_string())?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|err| err.to_string())?;
     skip_id3(file)?;
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic).map_err(|err| err.to_string())?;
@@ -1060,7 +1071,8 @@ fn skip_id3(file: &mut File) -> Result<(), String> {
     let mut hdr = [0u8; 10];
     file.read_exact(&mut hdr).map_err(|err| err.to_string())?;
     if &hdr[..3] != b"ID3" {
-        file.seek(SeekFrom::Start(0)).map_err(|err| err.to_string())?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|err| err.to_string())?;
         return Ok(());
     }
     let size = synchsafe(&hdr[6..10]).ok_or_else(|| "bad id3 size".to_string())?;
@@ -1112,7 +1124,9 @@ fn cache_path(path: &Path, len: u64, mtime_ns: u128) -> PathBuf {
 
 fn read_cache(path: &Path, len: u64, mtime_ns: u128) -> Option<FlacIndex> {
     let bytes = std::fs::read(cache_path(path, len, mtime_ns)).ok()?;
-    if bytes.len() < 4 + 1 + 8 + 16 + 8 + 8 + 4 || &bytes[..4] != CACHE_MAGIC || bytes[4] != CACHE_VERSION
+    if bytes.len() < 4 + 1 + 8 + 16 + 8 + 8 + 4
+        || &bytes[..4] != CACHE_MAGIC
+        || bytes[4] != CACHE_VERSION
     {
         return None;
     }
@@ -1289,7 +1303,9 @@ pub(crate) mod tests {
     }
 
     fn encode_flac(frame_count: u64, with_table: bool) -> Vec<u8> {
-        let frames: Vec<_> = (0..frame_count).map(|i| encode_frame(i, 1000 + i as i16)).collect();
+        let frames: Vec<_> = (0..frame_count)
+            .map(|i| encode_frame(i, 1000 + i as i16))
+            .collect();
         let info = streaminfo(frame_count * 192);
         let mut body = Vec::new();
         let mut points = Vec::new();
@@ -1374,7 +1390,10 @@ pub(crate) mod tests {
         );
         let start = Instant::now();
         while !seek_ready(&path) {
-            assert!(start.elapsed() < Duration::from_secs(5), "index build stalled");
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "index build stalled"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         let got = pull_n(&path, 192 + 10, 3);

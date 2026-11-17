@@ -922,16 +922,13 @@ impl ScoreSyncApp {
                                 .size_full(),
                             ),
                         )
-                        .child(
-                            div()
-                                .text_color(ui_kit::chrome(0xe2e8f0))
-                                .text_sm()
-                                .child(if open_progress.is_empty() {
-                                    "正在打开工程…".into()
-                                } else {
-                                    open_progress
-                                }),
-                        ),
+                        .child(div().text_color(ui_kit::chrome(0xe2e8f0)).text_sm().child(
+                            if open_progress.is_empty() {
+                                "正在打开工程…".into()
+                            } else {
+                                open_progress
+                            },
+                        )),
                 )
             })
     }

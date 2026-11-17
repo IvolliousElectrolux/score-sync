@@ -581,10 +581,9 @@ impl ScoreSyncApp {
         let (ptx, prx) = async_channel::unbounded::<crate::project::LoadProgress>();
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result =
-                project::load_project_reporting(&path_bg, |progress| {
-                    let _ = ptx.send_blocking(progress);
-                });
+            let result = project::load_project_reporting(&path_bg, |progress| {
+                let _ = ptx.send_blocking(progress);
+            });
             crate::trace::log(&format!(
                 "open_project: load_project {}ms ok={}",
                 started.elapsed().as_millis(),
@@ -593,36 +592,34 @@ impl ScoreSyncApp {
             let _ = tx.send_blocking(result);
         });
         let open_name = name.clone();
-        cx.spawn(async move |this, cx| {
-            loop {
-                let Ok(mut latest) = prx.recv().await else {
-                    break;
-                };
-                while let Ok(next) = prx.try_recv() {
-                    latest = next;
-                }
-                let text = if latest.total > 0 {
-                    format!(
-                        "正在打开 {open_name}: {} ({}/{})",
-                        latest.stage, latest.done, latest.total
-                    )
-                } else {
-                    format!("正在打开 {open_name}: {}", latest.stage)
-                };
-                this.update(cx, |view, cx| {
-                    if !view.opening {
-                        return;
-                    }
-                    view.open_progress = text.into();
-                    view.status = view.open_progress.clone();
-                    view.hint = view.status.clone();
-                    cx.notify();
-                })
-                .ok();
-                cx.background_executor()
-                    .timer(Duration::from_millis(33))
-                    .await;
+        cx.spawn(async move |this, cx| loop {
+            let Ok(mut latest) = prx.recv().await else {
+                break;
+            };
+            while let Ok(next) = prx.try_recv() {
+                latest = next;
             }
+            let text = if latest.total > 0 {
+                format!(
+                    "正在打开 {open_name}: {} ({}/{})",
+                    latest.stage, latest.done, latest.total
+                )
+            } else {
+                format!("正在打开 {open_name}: {}", latest.stage)
+            };
+            this.update(cx, |view, cx| {
+                if !view.opening {
+                    return;
+                }
+                view.open_progress = text.into();
+                view.status = view.open_progress.clone();
+                view.hint = view.status.clone();
+                cx.notify();
+            })
+            .ok();
+            cx.background_executor()
+                .timer(Duration::from_millis(33))
+                .await;
         })
         .detach();
 

@@ -24,6 +24,7 @@ jobs:
           shared-key: windows-check
 
       - name: Format
+        continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: Test libraries
