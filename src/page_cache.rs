@@ -38,15 +38,26 @@ static EXTRA_TMP_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// 启动时清掉异常退出残留的旧会话目录, 并创建本次会话目录.
 pub fn init_session() -> PathBuf {
+    // 测试会并行进来. 清理必须和建目录放在同一把锁里, 否则后进来的
+    // 会把先建好的会话目录当成过期目录删掉, 写页图就报找不到路径.
+    let Ok(mut guard) = SESSION_DIR.lock() else {
+        return fallback_session_dir();
+    };
+    if let Some(dir) = guard.as_ref() {
+        return dir.clone();
+    }
     cleanup_stale_sessions();
+    let dir = fallback_session_dir();
+    *guard = Some(dir.clone());
+    dir
+}
+
+fn fallback_session_dir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "score_sync_session_{}",
         &Uuid::new_v4().simple().to_string()[..12]
     ));
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut g) = SESSION_DIR.lock() {
-        *g = Some(dir.clone());
-    }
     dir
 }
 
@@ -131,6 +142,7 @@ pub fn ingest_file(src: &Path, preferred_name: &str) -> Result<PathBuf, String> 
 /// 将内存图写成会话 PNG, 返回路径.
 pub fn write_rgb_png(image: &RgbImage, preferred_name: &str) -> Result<PathBuf, String> {
     let dir = session_dir();
+    let _ = std::fs::create_dir_all(&dir);
     let safe: String = preferred_name
         .chars()
         .map(|c| {
