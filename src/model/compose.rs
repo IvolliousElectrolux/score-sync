@@ -683,54 +683,80 @@ impl DocState {
         self.prepare_group_render_job_inner(group_id, false)
     }
 
-    /// 终稿是否过期. 内存字段的哈希, 加上调用方再混入的文件长度/修改时间.
-    /// 返回 `(内存指纹, 需要 stat 的文件)`.
-    pub fn group_render_fingerprint(&self, group_id: &str) -> Option<(u64, Vec<PathBuf>)> {
-        use std::hash::{Hash, Hasher};
+    /// 终稿是否过期. 返回 `(内存指纹, 像素指纹, 需要 stat 的文件)`.
+    ///
+    /// 内存指纹含组 id, 区域 id 和磁盘路径, 用来判断「这一组的记录变了没」.
+    /// 像素指纹不含这些身份字段. 中间插入后, 后面的组如果只是身份对不上,
+    /// 像素指纹仍相同, 调用方只改缓存哈希, 不重画.
+    pub fn group_render_fingerprint(&self, group_id: &str) -> Option<(u64, u64, Vec<PathBuf>)> {
+        use std::hash::Hash;
+        fn put<T: Hash>(
+            full: &mut std::collections::hash_map::DefaultHasher,
+            pixel: &mut std::collections::hash_map::DefaultHasher,
+            identity: bool,
+            value: T,
+        ) {
+            use std::hash::Hasher;
+            value.hash(full);
+            if !identity {
+                value.hash(pixel);
+            }
+        }
         let group = self.groups.iter().find(|g| g.id == group_id)?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut full = std::collections::hash_map::DefaultHasher::new();
+        let mut pixel = std::collections::hash_map::DefaultHasher::new();
         let mut files = Vec::new();
-        self.ink_threshold.hash(&mut hasher);
-        self.mask_prefs.mask_opacity.to_bits().hash(&mut hasher);
-        self.bg_enabled.hash(&mut hasher);
-        self.bg_gen.hash(&mut hasher);
-        self.bg_solid.hash(&mut hasher);
-        self.bg_aspect_w.hash(&mut hasher);
-        self.bg_aspect_h.hash(&mut hasher);
-        self.is_spread().hash(&mut hasher);
-        group_id.hash(&mut hasher);
+        put(&mut full, &mut pixel, false, self.ink_threshold);
+        put(
+            &mut full,
+            &mut pixel,
+            false,
+            self.mask_prefs.mask_opacity.to_bits(),
+        );
+        put(&mut full, &mut pixel, false, self.bg_enabled);
+        put(&mut full, &mut pixel, false, self.bg_gen);
+        put(&mut full, &mut pixel, false, self.bg_solid);
+        put(&mut full, &mut pixel, false, self.bg_aspect_w);
+        put(&mut full, &mut pixel, false, self.bg_aspect_h);
+        put(&mut full, &mut pixel, false, self.is_spread());
+        put(&mut full, &mut pixel, true, group_id);
         for rid in &group.region_ids {
-            rid.hash(&mut hasher);
+            put(&mut full, &mut pixel, true, rid);
             let Some((pi, region)) = self.find_region(rid) else {
                 continue;
             };
-            region.y0.hash(&mut hasher);
-            region.y1.hash(&mut hasher);
+            put(&mut full, &mut pixel, false, region.y0);
+            put(&mut full, &mut pixel, false, region.y1);
             let Some(page) = self.pages.get(pi) else {
                 continue;
             };
-            page.img_w.hash(&mut hasher);
-            page.img_h.hash(&mut hasher);
-            page.blank.hash(&mut hasher);
-            page.disk_path.hash(&mut hasher);
+            put(&mut full, &mut pixel, false, page.img_w);
+            put(&mut full, &mut pixel, false, page.img_h);
+            put(&mut full, &mut pixel, false, page.blank);
+            put(&mut full, &mut pixel, true, &page.disk_path);
             if !page.disk_path.as_os_str().is_empty() {
                 files.push(page.disk_path.clone());
             }
             if let Some(vector) = &page.vector {
-                vector.pdf_path.hash(&mut hasher);
-                vector.page_index.hash(&mut hasher);
-                vector.w_pt.to_bits().hash(&mut hasher);
-                vector.h_pt.to_bits().hash(&mut hasher);
+                put(&mut full, &mut pixel, true, &vector.pdf_path);
+                put(&mut full, &mut pixel, false, vector.page_index);
+                put(&mut full, &mut pixel, false, vector.w_pt.to_bits());
+                put(&mut full, &mut pixel, false, vector.h_pt.to_bits());
                 files.push(vector.pdf_path.clone());
             }
             let applies = self.region_edit_applies(rid);
-            applies.hash(&mut hasher);
+            put(&mut full, &mut pixel, false, applies);
             if applies {
                 let kind = self.region_edit_kind(rid);
-                matches!(kind, EditKind::Vector).hash(&mut hasher);
+                put(
+                    &mut full,
+                    &mut pixel,
+                    false,
+                    matches!(kind, EditKind::Vector),
+                );
                 if let Some((w, h)) = self.region_edit_size(rid) {
-                    w.hash(&mut hasher);
-                    h.hash(&mut hasher);
+                    put(&mut full, &mut pixel, false, w);
+                    put(&mut full, &mut pixel, false, h);
                 }
                 let dir = Self::region_edit_dir(rid);
                 if matches!(kind, EditKind::Vector) {
@@ -741,47 +767,67 @@ impl DocState {
             }
         }
         for adj in self.get_block_layout(group_id) {
-            adj.region_id.hash(&mut hasher);
-            adj.extra_top.hash(&mut hasher);
-            adj.extra_bottom.hash(&mut hasher);
-            adj.extra_left.hash(&mut hasher);
-            adj.extra_right.hash(&mut hasher);
-            adj.gap_before.hash(&mut hasher);
-            adj.gap_after.hash(&mut hasher);
-            adj.shift_x.hash(&mut hasher);
-            adj.shift_y.hash(&mut hasher);
+            put(&mut full, &mut pixel, true, &adj.region_id);
+            put(&mut full, &mut pixel, false, adj.extra_top);
+            put(&mut full, &mut pixel, false, adj.extra_bottom);
+            put(&mut full, &mut pixel, false, adj.extra_left);
+            put(&mut full, &mut pixel, false, adj.extra_right);
+            put(&mut full, &mut pixel, false, adj.gap_before);
+            put(&mut full, &mut pixel, false, adj.gap_after);
+            put(&mut full, &mut pixel, false, adj.shift_x);
+            put(&mut full, &mut pixel, false, adj.shift_y);
         }
-        self.get_group_voff_shift(group_id).hash(&mut hasher);
-        self.group_leading_gap(group_id).hash(&mut hasher);
-        self.group_trailing_gap(group_id).hash(&mut hasher);
-        self.group_sheet_width(group_id).hash(&mut hasher);
+        put(
+            &mut full,
+            &mut pixel,
+            false,
+            self.get_group_voff_shift(group_id),
+        );
+        put(
+            &mut full,
+            &mut pixel,
+            false,
+            self.group_leading_gap(group_id),
+        );
+        put(
+            &mut full,
+            &mut pixel,
+            false,
+            self.group_trailing_gap(group_id),
+        );
+        put(
+            &mut full,
+            &mut pixel,
+            false,
+            self.group_sheet_width(group_id),
+        );
         if let Some(frame) = self.group_preview_frame(group_id) {
-            frame.canvas_w.hash(&mut hasher);
-            frame.canvas_h.hash(&mut hasher);
-            frame.content_scale.to_bits().hash(&mut hasher);
+            put(&mut full, &mut pixel, false, frame.canvas_w);
+            put(&mut full, &mut pixel, false, frame.canvas_h);
+            put(&mut full, &mut pixel, false, frame.content_scale.to_bits());
         }
         for mask in self.get_group_masks(group_id) {
-            mask.id.hash(&mut hasher);
-            mask.x0.hash(&mut hasher);
-            mask.y0.hash(&mut hasher);
-            mask.x1.hash(&mut hasher);
-            mask.y1.hash(&mut hasher);
-            mask.brush_radius.to_bits().hash(&mut hasher);
-            mask.color.hash(&mut hasher);
-            mask.opacity.to_bits().hash(&mut hasher);
-            mask.bound_block.hash(&mut hasher);
+            put(&mut full, &mut pixel, true, &mask.id);
+            put(&mut full, &mut pixel, false, mask.x0);
+            put(&mut full, &mut pixel, false, mask.y0);
+            put(&mut full, &mut pixel, false, mask.x1);
+            put(&mut full, &mut pixel, false, mask.y1);
+            put(&mut full, &mut pixel, false, mask.brush_radius.to_bits());
+            put(&mut full, &mut pixel, false, mask.color);
+            put(&mut full, &mut pixel, false, mask.opacity.to_bits());
+            put(&mut full, &mut pixel, false, &mask.bound_block);
             for (x, y) in &mask.brush_points {
-                x.to_bits().hash(&mut hasher);
-                y.to_bits().hash(&mut hasher);
+                put(&mut full, &mut pixel, false, x.to_bits());
+                put(&mut full, &mut pixel, false, y.to_bits());
             }
             for (x, y) in &mask.poly_points {
-                x.hash(&mut hasher);
-                y.hash(&mut hasher);
+                put(&mut full, &mut pixel, false, x);
+                put(&mut full, &mut pixel, false, y);
             }
         }
         files.sort();
         files.dedup();
-        Some((hasher.finish(), files))
+        Some((full.finish(), pixel.finish(), files))
     }
 
     fn prepare_group_render_job_inner(

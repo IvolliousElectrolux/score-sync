@@ -172,7 +172,7 @@ impl ScoreSyncApp {
                         Ok(_) => {
                             added += 1;
                             self.mark_dirty();
-                            self.mark_video_pool_dirty_all();
+                            self.video_pool_needs_diff = true;
                         }
                         Err(e) => {
                             self.show_error(
@@ -396,7 +396,7 @@ impl ScoreSyncApp {
                             {
                                 Ok(_) => {
                                     view.mark_dirty();
-                                    view.mark_video_pool_dirty_all();
+                                    view.video_pool_needs_diff = true;
                                     let note = if bands_empty {
                                         " (没有长水平谱线, 已收成整页一块)"
                                     } else {
@@ -479,7 +479,7 @@ impl ScoreSyncApp {
                 match self.doc.add_page(path.clone(), rgb, was_empty) {
                     Ok(_) => {
                         self.mark_dirty();
-                        self.mark_video_pool_dirty_all();
+                        self.video_pool_needs_diff = true;
                         self.status = format!(
                             "已导入图片 {} (共 {} 页)",
                             path.file_name().and_then(|s| s.to_str()).unwrap_or("img"),
@@ -639,6 +639,7 @@ impl ScoreSyncApp {
                         view.clear_org_thumbs();
                         view.video_pool_all_dirty = false;
                         view.video_pool_dirty.clear();
+                        view.seed_video_pool_sig();
                         config::remember_last_project(&path);
                         view.drag = None;
                         view.dialog = None;
@@ -773,6 +774,9 @@ impl ScoreSyncApp {
         self.clear_org_thumbs();
         self.video_pool_all_dirty = true;
         self.video_pool_dirty.clear();
+        self.video_pool_sig.clear();
+        self.video_pool_sig_ready = true;
+        self.video_pool_needs_diff = false;
         self.drag = None;
         self.dialog = None;
         self.spread_selected.clear();

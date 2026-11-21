@@ -172,7 +172,8 @@ impl ScoreSyncApp {
                 .update(cx, |m, _| m.purge_host_token(entry.token));
         }
         self.guide_redo.push(entry);
-        self.mark_video_pool_dirty_all();
+        self.mark_dirty();
+        self.video_pool_needs_diff = true;
         self.sync_current_mask_after_guides(cx, refresh);
         self.status = format!("已撤回{note}.").into();
         cx.notify();
@@ -203,7 +204,8 @@ impl ScoreSyncApp {
         if self.guide_undo.len() > CROP_HISTORY_LIMIT {
             self.guide_undo.remove(0);
         }
-        self.mark_video_pool_dirty_all();
+        self.mark_dirty();
+        self.video_pool_needs_diff = true;
         self.sync_current_mask_after_guides(cx, refresh);
         self.status = format!("已重做{note}.").into();
         cx.notify();

@@ -167,7 +167,6 @@ impl ScoreSyncApp {
         self.doc.rebuild_rid_index();
         self.doc.ensure_active_group();
         self.mark_dirty();
-        self.mark_video_pool_dirty_all();
     }
 
     /// 画布上正在显示的像素. 页 id 可以变 (粘贴出的新页和源页共用同一份图).

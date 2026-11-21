@@ -33,6 +33,9 @@ jobs:
       - name: Check app
         run: cargo check -p score_sync
 
+      - name: Test app
+        run: cargo test -p score_sync --bin score_sync
+
       - name: Clippy
         continue-on-error: true
         run: cargo clippy -p score_sync --all-targets -- -W clippy::all

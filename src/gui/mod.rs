@@ -317,10 +317,16 @@ pub(crate) struct ScoreSyncApp {
     pdf_load_gen: Arc<AtomicU64>,
     /// 仍有 PDF 页在后台渲染或登记 (保存会不完整)
     pdf_importing: bool,
-    /// 视频池组合脏标记 (分块/蒙版/底色变更后需重算缓存)
+    /// 视频池组合脏标记 (分块/蒙版/修图后只需重算这些组)
     video_pool_dirty: HashSet<String>,
     /// 全部视频池视为脏 (底色整体变更等)
     video_pool_all_dirty: bool,
+    /// 打开工程时每组的内存指纹. 之后只把对不上的组放进 `video_pool_dirty`.
+    video_pool_sig: HashMap<String, u64>,
+    /// `video_pool_sig` 已经对应当前文档, 而不是还没建立的空表.
+    video_pool_sig_ready: bool,
+    /// 文档有改动, 下次同步视频池时再和基线比. 拖动边线时不要每次都哈希.
+    video_pool_needs_diff: bool,
     /// 用户确认退出后允许关窗
     allow_close: bool,
     /// 保存中转圈动画相位 (0..1)
@@ -582,6 +588,9 @@ impl ScoreSyncApp {
             pdf_importing: false,
             video_pool_dirty: HashSet::new(),
             video_pool_all_dirty: true,
+            video_pool_sig: HashMap::new(),
+            video_pool_sig_ready: true,
+            video_pool_needs_diff: false,
             allow_close: false,
             save_spin_phase: 0.0,
             tab_add_press: false,

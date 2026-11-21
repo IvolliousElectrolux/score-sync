@@ -947,6 +947,76 @@ fn spread_repair_keeps_mask_when_members_stay() {
 }
 
 #[test]
+fn even_insert_keeps_later_spread_fingerprint() {
+    let mut doc = spread_pages(4);
+    let later = doc.groups[1].id.clone();
+    let before = doc.group_render_fingerprint(&later).unwrap();
+    doc.copy_pages_beside(&[0, 1], 1, true).unwrap();
+    let after = doc.group_render_fingerprint(&later).unwrap();
+    assert_eq!(before.0, after.0);
+    assert_eq!(before.1, after.1);
+}
+
+#[test]
+fn odd_insert_changes_repaired_spread_fingerprint() {
+    let mut doc = spread_pages(4);
+    let later = doc.groups[1].id.clone();
+    let before = doc.group_render_fingerprint(&later).unwrap().0;
+    doc.copy_pages_beside(&[2], 2, true).unwrap();
+    let after = doc.group_render_fingerprint(&later).unwrap();
+    assert_ne!(before, after.0);
+}
+
+#[test]
+fn copying_a_page_keeps_later_fingerprint_and_shares_pixel_hash() {
+    let mut doc = DocState::new();
+    for i in 0..2 {
+        let mut page = stub_page(40);
+        let image = image::RgbImage::from_pixel(page.img_w, page.img_h, image::Rgb([8, 8, 8]));
+        page.disk_path =
+            crate::page_cache::write_rgb_png(&image, &format!("fp-keep-{i}.png")).unwrap();
+        page.path = PathBuf::from(format!("scan_p{i:03}.png"));
+        doc.pages.push(page);
+    }
+    seed_bands(&mut doc, 0, &[(0, 10)]);
+    seed_bands(&mut doc, 1, &[(0, 10)]);
+    let (later, later_px, _) = doc.group_render_fingerprint("g1-0").unwrap();
+    let src_before = doc.group_render_fingerprint("g0-0").unwrap().0;
+    doc.set_group_masks(
+        "g0-0",
+        vec![MaskRect {
+            id: "m".into(),
+            x0: 1,
+            y0: 2,
+            x1: 3,
+            y1: 4,
+            brush_points: vec![],
+            brush_radius: 0.0,
+            color: [1, 2, 3],
+            poly_points: vec![],
+            opacity: 1.0,
+            bound_block: None,
+        }],
+    );
+    let (src, src_px, _) = doc.group_render_fingerprint("g0-0").unwrap();
+    assert_ne!(src, src_before);
+    assert_eq!(doc.group_render_fingerprint("g1-0").unwrap().0, later);
+    doc.copy_pages_beside(&[0], 0, true).unwrap();
+    assert_eq!(doc.group_render_fingerprint("g1-0").unwrap().0, later);
+    assert_eq!(doc.group_render_fingerprint("g1-0").unwrap().1, later_px);
+    assert_eq!(doc.group_render_fingerprint("g0-0").unwrap().0, src);
+    assert_eq!(doc.group_render_fingerprint("g0-0").unwrap().1, src_px);
+    let copy = doc
+        .groups
+        .iter()
+        .find(|g| g.id != "g0-0" && g.id != "g1-0")
+        .unwrap();
+    let (copy_full, copy_px, _) = doc.group_render_fingerprint(&copy.id).unwrap();
+    assert_eq!(copy_px, src_px);
+    assert_ne!(copy_full, src);
+}
+
+#[test]
 fn spread_drops_a_book_of_two_blanks() {
     let mut doc = spread_pages(2);
     assert!(doc.insert_blank_page(0).unwrap().is_some());

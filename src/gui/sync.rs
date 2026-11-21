@@ -15,28 +15,38 @@ struct VideoPoolRebuildEntry {
     job: Option<crate::model::GroupRenderJob>,
     /// 这次渲染对应的内容指纹. None 表示当时没算出指纹, 只记宽高.
     fp: Option<u64>,
+    /// 不含组 id / 区域 id / 路径的像素指纹. 和 `fp` 一起写入索引.
+    pixel: Option<u64>,
 }
 
+#[derive(Clone)]
 struct PoolSnap {
     gid: String,
     label: String,
     cache_path: PathBuf,
     mem_fp: Option<u64>,
+    pixel_fp: Option<u64>,
     files: Vec<PathBuf>,
+    /// 这一组的内容变过, 对不上已有指纹时要重画. 没标的组只允许改索引.
+    force: bool,
 }
 
 struct PoolScan {
     cached: Vec<MaterialItem>,
     rebuild: Vec<String>,
     fps: HashMap<String, u64>,
+    pixels: HashMap<String, u64>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
 struct PoolIndexEntry {
     w: u32,
     h: u32,
     #[serde(default)]
     fp: Option<u64>,
+    /// 像素没变时用来认出「只是身份或文件时间变了」.
+    #[serde(default)]
+    pixel: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
@@ -1454,6 +1464,7 @@ impl ScoreSyncApp {
     pub(super) fn mark_video_pool_dirty_all(&mut self) {
         self.video_pool_all_dirty = true;
         self.video_pool_dirty.clear();
+        self.video_pool_needs_diff = false;
         self.mark_dirty();
     }
 
@@ -1461,7 +1472,28 @@ impl ScoreSyncApp {
         if !self.video_pool_all_dirty {
             self.video_pool_dirty.insert(gid.to_string());
         }
+        if let Some((fp, _, _)) = self.doc.group_render_fingerprint(gid) {
+            self.video_pool_sig.insert(gid.to_string(), fp);
+        }
         self.mark_dirty();
+    }
+
+    /// 打开工程时记下每组现在的指纹. 之后的改动只和这份基线比.
+    pub(super) fn seed_video_pool_sig(&mut self) {
+        let started = Instant::now();
+        self.video_pool_sig.clear();
+        for group in &self.doc.groups {
+            if let Some((fp, _, _)) = self.doc.group_render_fingerprint(&group.id) {
+                self.video_pool_sig.insert(group.id.clone(), fp);
+            }
+        }
+        self.video_pool_sig_ready = true;
+        self.video_pool_needs_diff = false;
+        crate::trace::log(&format!(
+            "video_pool: 建立指纹基线 {} 组 {}ms",
+            self.video_pool_sig.len(),
+            started.elapsed().as_millis()
+        ));
     }
 
     pub(super) fn pool_cache_dir(&self) -> PathBuf {
@@ -2151,7 +2183,7 @@ impl ScoreSyncApp {
         }
         let cache_root = self.pool_cache_dir().join("pool");
         let all_dirty = self.video_pool_all_dirty;
-        let dirty_set = self.video_pool_dirty.clone();
+        let mut dirty_set = self.video_pool_dirty.clone();
         let hot: Vec<String> = self
             .score_video
             .read(cx)
@@ -2161,6 +2193,42 @@ impl ScoreSyncApp {
             .map(|clip| clip.0.clone())
             .collect();
         let snap_started = Instant::now();
+        // 底色这类全局变化要核每一组. 复制/插入/蒙版只把 needs_diff 留下,
+        // 这里和打开时的基线比一次, 变过的组才进入 dirty_set.
+        let mut computed: HashMap<String, (u64, u64, Vec<PathBuf>)> = HashMap::new();
+        if self.video_pool_needs_diff || all_dirty {
+            let mut next_sig = HashMap::new();
+            for group in &self.doc.groups {
+                let Some((mem, pixel, files)) = self.doc.group_render_fingerprint(&group.id)
+                else {
+                    continue;
+                };
+                if self.video_pool_needs_diff && !all_dirty {
+                    let changed = if self.video_pool_sig_ready {
+                        self.video_pool_sig.get(&group.id).copied() != Some(mem)
+                    } else {
+                        true
+                    };
+                    if changed {
+                        dirty_set.insert(group.id.clone());
+                    }
+                }
+                next_sig.insert(group.id.clone(), mem);
+                computed.insert(group.id.clone(), (mem, pixel, files));
+            }
+            self.video_pool_sig = next_sig;
+            self.video_pool_sig_ready = true;
+            self.video_pool_needs_diff = false;
+            self.video_pool_dirty = dirty_set.clone();
+        } else {
+            for gid in &dirty_set {
+                let Some((mem, pixel, files)) = self.doc.group_render_fingerprint(gid) else {
+                    continue;
+                };
+                self.video_pool_sig.insert(gid.clone(), mem);
+                computed.insert(gid.clone(), (mem, pixel, files));
+            }
+        }
         let snaps: Vec<PoolSnap> = group_ids
             .iter()
             .enumerate()
@@ -2171,26 +2239,27 @@ impl ScoreSyncApp {
                     .get(idx)
                     .map(|g| g.display_name(idx))
                     .unwrap_or_else(|| gid.clone());
-                let (mem_fp, files) = if all_dirty || dirty_set.contains(gid) {
-                    self.doc
-                        .group_render_fingerprint(gid)
-                        .map(|(fp, files)| (Some(fp), files))
-                        .unwrap_or((None, Vec::new()))
-                } else {
-                    (None, Vec::new())
-                };
+                let force = all_dirty || dirty_set.contains(gid);
+                let (mem_fp, pixel_fp, files) = computed
+                    .remove(gid)
+                    .map(|(mem, pixel, files)| (Some(mem), Some(pixel), files))
+                    .unwrap_or((None, None, Vec::new()));
                 PoolSnap {
                     gid: gid.clone(),
                     label,
                     cache_path: cache_root.join(format!("{gid}.png")),
                     mem_fp,
+                    pixel_fp,
                     files,
+                    force,
                 }
             })
             .collect();
+        let refresh_n = snaps.iter().filter(|snap| snap.force).count();
         crate::trace::log(&format!(
-            "video_pool: 主线程快照 {} 组 {}ms (all_dirty={all_dirty})",
+            "video_pool: 主线程快照 {} 组, 待核 {} 组, {}ms (all_dirty={all_dirty})",
             snaps.len(),
+            refresh_n,
             snap_started.elapsed().as_millis()
         ));
         self.status = "视频工具 (正在读取素材缓存…)".into();
@@ -2228,6 +2297,7 @@ impl ScoreSyncApp {
                 cached,
                 rebuild,
                 fps,
+                pixels,
             } = scan;
             let cached_n = cached.len();
             let rebuild_n = rebuild.len();
@@ -2298,6 +2368,7 @@ impl ScoreSyncApp {
                             cache_path,
                             job,
                             fp: fps.get(gid).copied(),
+                            pixel: pixels.get(gid).copied(),
                         });
                     }
                     Some(out)
@@ -2322,6 +2393,7 @@ impl ScoreSyncApp {
                             cache_path,
                             job,
                             fp,
+                            pixel,
                         } = entry;
                         let mut item = None;
                         if let Some(job) = job {
@@ -2388,6 +2460,7 @@ impl ScoreSyncApp {
                                 it.width,
                                 it.height,
                                 fp,
+                                pixel,
                             );
                             chunk_items.push(it);
                         }
@@ -2479,7 +2552,7 @@ impl ScoreSyncApp {
         self.doc.sync_group_colors();
         self.doc.seed_guide_defaults();
         self.mark_dirty();
-        self.mark_video_pool_dirty_all();
+        self.video_pool_needs_diff = true;
         // 若当前页尺寸变了不必重渲整图, 但区域会重绘
         if let Some(page) = self.doc.current_page() {
             if page.width() != self.img_w || page.height() != self.img_h {
@@ -2551,6 +2624,105 @@ mod layout_diff_tests {
             &[adj("a", 4)],
             &[adj("a", 5)]
         ));
+    }
+}
+
+#[cfg(test)]
+mod pool_scan_tests {
+    use super::{read_pool_index, scan_pool_cache, write_pool_index, PoolIndexEntry, PoolSnap};
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "score-sync-pool-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_png(path: &Path) {
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([9, 9, 9]));
+        img.save(path).unwrap();
+    }
+
+    fn snap(dir: &Path, gid: &str, force: bool) -> PoolSnap {
+        let cache_path = dir.join(format!("{gid}.png"));
+        write_png(&cache_path);
+        PoolSnap {
+            gid: gid.into(),
+            label: gid.into(),
+            cache_path,
+            mem_fp: Some(11),
+            pixel_fp: Some(22),
+            files: Vec::new(),
+            force,
+        }
+    }
+
+    #[test]
+    fn untouched_group_with_missing_fp_only_updates_hash() {
+        let dir = scratch("hash-only");
+        let snap = snap(&dir, "g-later", false);
+        let live = HashSet::from([snap.gid.clone()]);
+        let scan = scan_pool_cache(&dir, &[snap], &live, &[]);
+        assert!(scan.rebuild.is_empty(), "{:?}", scan.rebuild);
+        let entry = read_pool_index(&dir.join("index.json"))
+            .groups
+            .remove("g-later")
+            .unwrap();
+        assert!(entry.fp.is_some());
+        assert!(entry.pixel.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changed_group_without_stored_fp_rebuilds() {
+        let dir = scratch("rebuild");
+        let snap = snap(&dir, "g-edit", true);
+        let live = HashSet::from([snap.gid.clone()]);
+        let scan = scan_pool_cache(&dir, &[snap], &live, &[]);
+        assert_eq!(scan.rebuild, vec!["g-edit".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_pixels_do_not_rebuild_when_the_stored_fp_moved() {
+        let dir = scratch("pixel");
+        let snap = snap(&dir, "g-moved", false);
+        let live = HashSet::from([snap.gid.clone()]);
+        let first = scan_pool_cache(&dir, &[snap.clone()], &live, &[]);
+        assert!(first.rebuild.is_empty());
+        let mut index = read_pool_index(&dir.join("index.json"));
+        let stored = index.groups.get("g-moved").unwrap().clone();
+        assert!(stored.pixel.is_some());
+        index.groups.insert(
+            "g-moved".into(),
+            PoolIndexEntry {
+                fp: Some(1),
+                ..stored.clone()
+            },
+        );
+        write_pool_index(&dir.join("index.json"), &index);
+        let snap = PoolSnap {
+            force: true,
+            ..snap
+        };
+        let second = scan_pool_cache(&dir, &[snap], &live, &[]);
+        assert!(second.rebuild.is_empty(), "{:?}", second.rebuild);
+        let entry = read_pool_index(&dir.join("index.json"))
+            .groups
+            .remove("g-moved")
+            .unwrap();
+        assert_eq!(entry.fp, stored.fp);
+        assert_eq!(entry.pixel, stored.pixel);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -2913,6 +3085,54 @@ fn mix_file_fingerprint(mem: u64, paths: &[PathBuf]) -> u64 {
     hasher.finish()
 }
 
+/// 像素是否还是那一张. 页图和 PDF 不看路径, 也不看修改时间, 只抽几段字节;
+/// 修图文件同尺寸覆盖时字节头可能不变, 所以仍看修改时间.
+fn mix_pixel_fingerprint(mem: u64, paths: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mem.hash(&mut hasher);
+    for path in paths {
+        let edit = path.components().any(|c| c.as_os_str() == "edits");
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                let len = meta.len();
+                len.hash(&mut hasher);
+                if edit {
+                    meta.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .hash(&mut hasher);
+                } else {
+                    hash_file_sample(path, len, &mut hasher);
+                }
+            }
+            Err(_) => 0u8.hash(&mut hasher),
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_file_sample(path: &Path, len: u64, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        0u8.hash(hasher);
+        return;
+    };
+    let mut buf = [0u8; 4096];
+    let tail = len.saturating_sub(4096);
+    for off in [0u64, len / 2, tail] {
+        if file.seek(SeekFrom::Start(off)).is_err() {
+            0u8.hash(hasher);
+            continue;
+        }
+        let n = file.read(&mut buf).unwrap_or(0);
+        n.hash(hasher);
+        buf[..n].hash(hasher);
+    }
+}
+
 fn read_pool_index(path: &Path) -> PoolIndexFile {
     let Ok(bytes) = std::fs::read(path) else {
         return PoolIndexFile::default();
@@ -2929,11 +3149,19 @@ fn write_pool_index(path: &Path, index: &PoolIndexFile) {
     }
 }
 
-fn remember_pool_index(path: &Path, gid: &str, w: u32, h: u32, fp: Option<u64>) {
+fn remember_pool_index(
+    path: &Path,
+    gid: &str,
+    w: u32,
+    h: u32,
+    fp: Option<u64>,
+    pixel: Option<u64>,
+) {
     let mut index = read_pool_index(path);
-    index
-        .groups
-        .insert(gid.to_string(), PoolIndexEntry { w, h, fp });
+    index.groups.insert(
+        gid.to_string(),
+        PoolIndexEntry { w, h, fp, pixel },
+    );
     write_pool_index(path, &index);
 }
 
@@ -2951,45 +3179,97 @@ fn scan_pool_cache(
     let mut cached = Vec::new();
     let mut rebuild = Vec::new();
     let mut fps = HashMap::new();
+    let mut pixels = HashMap::new();
     let mut index_dirty = false;
+    let mut hash_only = 0usize;
     for snap in snaps {
         let exists = snap.cache_path.is_file();
-        let entry = index.groups.get(&snap.gid).cloned();
-        if exists {
-            let dims = entry
-                .as_ref()
+        let prev = index.groups.get(&snap.gid).cloned();
+        let dims = if exists {
+            prev.as_ref()
                 .map(|item| (item.w, item.h))
                 .filter(|(w, h)| *w > 0 && *h > 0)
-                .or_else(|| crate::page_cache::png_file_dimensions(&snap.cache_path));
-            if let Some((w, h)) = dims {
-                cached.push(MaterialItem {
-                    group_id: snap.gid.clone(),
-                    label: snap.label.clone().into(),
-                    width: w,
-                    height: h,
-                    cache_path: snap.cache_path.clone(),
-                });
-                if entry.is_none() {
-                    index
-                        .groups
-                        .insert(snap.gid.clone(), PoolIndexEntry { w, h, fp: None });
+                .or_else(|| crate::page_cache::png_file_dimensions(&snap.cache_path))
+        } else {
+            None
+        };
+        if let Some((w, h)) = dims {
+            cached.push(MaterialItem {
+                group_id: snap.gid.clone(),
+                label: snap.label.clone().into(),
+                width: w,
+                height: h,
+                cache_path: snap.cache_path.clone(),
+            });
+        }
+        let Some(mem) = snap.mem_fp else {
+            if !exists {
+                rebuild.push(snap.gid.clone());
+            } else if prev.is_none() {
+                if let Some((w, h)) = dims {
+                    index.groups.insert(
+                        snap.gid.clone(),
+                        PoolIndexEntry {
+                            w,
+                            h,
+                            fp: None,
+                            pixel: None,
+                        },
+                    );
                     index_dirty = true;
                 }
             }
+            continue;
+        };
+        let full = mix_file_fingerprint(mem, &snap.files);
+        let pixel = snap
+            .pixel_fp
+            .map(|px| mix_pixel_fingerprint(px, &snap.files));
+        fps.insert(snap.gid.clone(), full);
+        if let Some(px) = pixel {
+            pixels.insert(snap.gid.clone(), px);
         }
-        if snap.mem_fp.is_some() || !exists {
-            let fp = snap
-                .mem_fp
-                .map(|mem| mix_file_fingerprint(mem, &snap.files));
-            if let Some(fp) = fp {
-                fps.insert(snap.gid.clone(), fp);
+        let stored_fp = prev.as_ref().and_then(|item| item.fp);
+        let stored_px = prev.as_ref().and_then(|item| item.pixel);
+        let same_fp = stored_fp == Some(full);
+        let same_pixel = pixel.is_some() && stored_px == pixel;
+        // 没改过的组: 图还在就只把新指纹写进索引.
+        // 改过的组: 旧指纹对得上, 或像素指纹对得上, 同样不重画.
+        // 改过但索引里还没有指纹时, 不能假定旧图仍有效, 要重画.
+        let keep = exists && (same_fp || same_pixel || (!snap.force && stored_fp.is_none()));
+        if keep {
+            if let Some((w, h)) = dims {
+                let entry = PoolIndexEntry {
+                    w,
+                    h,
+                    fp: Some(full),
+                    pixel,
+                };
+                if prev.as_ref() != Some(&entry) {
+                    if !same_fp {
+                        hash_only += 1;
+                    }
+                    index.groups.insert(snap.gid.clone(), entry);
+                    index_dirty = true;
+                }
             }
-            let stale = match fp {
-                Some(fp) => entry.and_then(|item| item.fp) != Some(fp) || !exists,
-                None => !exists,
+            continue;
+        }
+        if !exists || snap.force || stored_px.is_some() {
+            rebuild.push(snap.gid.clone());
+            continue;
+        }
+        if let Some((w, h)) = dims {
+            let entry = PoolIndexEntry {
+                w,
+                h,
+                fp: Some(full),
+                pixel,
             };
-            if stale {
-                rebuild.push(snap.gid.clone());
+            if prev.as_ref() != Some(&entry) {
+                hash_only += 1;
+                index.groups.insert(snap.gid.clone(), entry);
+                index_dirty = true;
             }
         }
     }
@@ -3003,15 +3283,17 @@ fn scan_pool_cache(
     }
     rebuild.sort_by_key(|gid| hot.iter().position(|id| id == gid).unwrap_or(usize::MAX));
     crate::trace::log(&format!(
-        "video_pool: 后台扫描缓存 {} 张, 待更新 {} 张, {}ms",
+        "video_pool: 后台扫描缓存 {} 张, 重渲 {} 张, 只改指纹 {} 张, {}ms",
         cached.len(),
         rebuild.len(),
+        hash_only,
         started.elapsed().as_millis()
     ));
     PoolScan {
         cached,
         rebuild,
         fps,
+        pixels,
     }
 }
 
