@@ -689,14 +689,13 @@ impl DocState {
     /// 像素指纹不含这些身份字段. 中间插入后, 后面的组如果只是身份对不上,
     /// 像素指纹仍相同, 调用方只改缓存哈希, 不重画.
     pub fn group_render_fingerprint(&self, group_id: &str) -> Option<(u64, u64, Vec<PathBuf>)> {
-        use std::hash::Hash;
+        use std::hash::{Hash, Hasher};
         fn put<T: Hash>(
             full: &mut std::collections::hash_map::DefaultHasher,
             pixel: &mut std::collections::hash_map::DefaultHasher,
             identity: bool,
             value: T,
         ) {
-            use std::hash::Hasher;
             value.hash(full);
             if !identity {
                 value.hash(pixel);
