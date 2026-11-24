@@ -1637,6 +1637,89 @@ mod tests {
     }
 
     #[test]
+    fn page_cut_selection_spans_the_range_and_rejects_conflicts() {
+        let pool = vec![item("a"), item("b")];
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 1.0;
+        tl.fade_selection = Some((4.0, 8.0));
+        tl.insert_next_with_wipe(&pool).unwrap();
+        assert!((tl.playhead - 1.0).abs() < 1e-9);
+        assert!(tl.fade_selection.is_none());
+        assert_eq!(tl.video_clips[0].end, 4.0);
+        assert_eq!(tl.video_clips[1].group_id, "b");
+        let (prev, next, p) = tl.wipe_at(4.0).unwrap();
+        assert_eq!(prev, "a");
+        assert_eq!(next, "b");
+        assert!(p.abs() < 1e-9);
+        let (_, _, p) = tl.wipe_at(6.0).unwrap();
+        assert!((p - 0.5).abs() < 1e-9);
+        assert!(tl.wipe_at(8.0).is_none());
+        assert_eq!(tl.playback_tick_ms(1.0), PLAY_TICK_MS);
+        assert_eq!(tl.playback_tick_ms(3.85), WIPE_TICK_MS);
+        assert_eq!(tl.playback_tick_ms(6.0), WIPE_TICK_MS);
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 8.5;
+        tl.fade_selection = Some((2.0, 6.0));
+        tl.insert_next_with_dissolve(&pool).unwrap();
+        assert!((tl.playhead - 8.5).abs() < 1e-9);
+        let (prev, next, p, kind) = tl.page_blend_at(4.0).unwrap();
+        assert_eq!(prev, "a");
+        assert_eq!(next, "b");
+        assert_eq!(kind, FadeKind::Dissolve);
+        assert!((p - 0.5).abs() < 1e-9);
+        assert!(tl.wipe_at(4.0).is_none());
+        assert_eq!(tl.playback_tick_ms(4.0), FADE_TICK_MS);
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        let page_end = tl.video_clips[0].end;
+        tl.playhead = 0.5;
+        tl.fade_selection = Some((1.0, page_end));
+        tl.insert_next_with_wipe(&pool).unwrap();
+        assert!((tl.fades[0].start - 1.0).abs() < 1e-9);
+        assert!((tl.fades[0].end - page_end).abs() < 1e-6);
+        assert!((tl.video_clips[1].end - page_end).abs() < 1e-6);
+        assert!((tl.playhead - 0.5).abs() < 1e-9);
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 5.0;
+        tl.fade_selection = Some((0.05, 2.0));
+        let err = tl.insert_next_with_wipe(&pool).unwrap_err();
+        assert!(err.contains("太近"), "{err}");
+        assert!((tl.playhead - 5.0).abs() < 1e-9);
+        assert_eq!(tl.video_clips.len(), 1);
+        assert!(tl.fade_selection.is_some());
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        tl.fade_selection = Some((6.0, 8.0));
+        tl.mark_fade(FadeKind::Out, 0.0);
+        tl.playhead = 2.0;
+        tl.fade_selection = Some((5.5, 7.0));
+        let err = tl.insert_next_with_dissolve(&pool).unwrap_err();
+        assert!(err.contains("重叠"), "{err}");
+        assert!((tl.playhead - 2.0).abs() < 1e-9);
+        assert_eq!(tl.video_clips.len(), 1);
+        assert_eq!(tl.fades.len(), 1);
+        assert_eq!(tl.fades[0].kind, FadeKind::Out);
+        assert!(tl.fade_selection.is_some());
+
+        let mut tl = Timeline::new();
+        tl.playhead = 3.0;
+        tl.fade_selection = Some((1.0, 2.0));
+        let err = tl.insert_next_with_wipe(&pool).unwrap_err();
+        assert!(err.contains("上一页"), "{err}");
+        assert!((tl.playhead - 3.0).abs() < 1e-9);
+        assert!(tl.video_clips.is_empty());
+        assert!(tl.fade_selection.is_some());
+    }
+
+    #[test]
     fn wipe_rejected_on_empty_or_fade_overlap() {
         let mut tl = Timeline::new();
         let pool = vec![item("a"), item("b")];
