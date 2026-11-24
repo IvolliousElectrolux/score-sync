@@ -2141,7 +2141,7 @@ impl ScoreSyncApp {
                     .focus(window);
                 self.status = "视频工具".into();
                 self.hint =
-                    "N 插入下一张组合 | W 刷入下一张 | X 交叠下一张 | 空格播放/暂停 | ←→ 快退快进 | I/O 标记淡入淡出."
+                    "N 插入下一张组合 | W 刷入下一张 | X 交叠下一张 (有选区则按选区, 否则跟播放头 1 秒) | 空格播放/暂停 | ←→ 快退快进 | I/O 标记淡入淡出."
                         .into();
                 self.sync_video_pool(cx);
             }

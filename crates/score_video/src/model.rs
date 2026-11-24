@@ -435,17 +435,20 @@ impl Timeline {
             .collect()
     }
 
-    /// 在播放头切到下一张组合, 并在翻页边界挂上默认 1 秒的左→右刷入转场.
+    /// 切到下一张组合, 并在翻页边界挂上左→右刷入.
+    /// 特效轨道有选区时从选区开头铺到结束, 不看播放头; 否则在播放头挂默认 1 秒.
     pub fn insert_next_with_wipe(&mut self, pool: &[MaterialItem]) -> Result<(), String> {
         self.insert_next_with_page_cut(pool, FadeKind::WipeLtr)
     }
 
-    /// 在播放头切到下一张组合, 并在翻页边界挂上默认 1 秒的交叠 (上一页溶进下一页).
+    /// 切到下一张组合, 并在翻页边界挂上交叠 (上一页溶进下一页).
+    /// 特效轨道有选区时从选区开头铺到结束, 不看播放头; 否则在播放头挂默认 1 秒.
     pub fn insert_next_with_dissolve(&mut self, pool: &[MaterialItem]) -> Result<(), String> {
         self.insert_next_with_page_cut(pool, FadeKind::Dissolve)
     }
 
     /// 刷入和交叠都钉在翻页点: 不能落在第一页之前, 也不能和淡入淡出叠置.
+    /// `fade_selection` 有足够长度时, 翻页点和转场终点都取自选区, 播放头保持不动.
     fn insert_next_with_page_cut(
         &mut self,
         pool: &[MaterialItem],
@@ -462,7 +465,22 @@ impl Timeline {
         if self.video_clips.is_empty() {
             return Err("还没有上一页, 请先插入第一张组合".to_string());
         }
-        let t = self.playhead.max(0.0);
+        let selection = self.fade_selection.map(|(a, b)| {
+            if a <= b {
+                (a, b)
+            } else {
+                (b, a)
+            }
+        });
+        let saved_playhead = self.playhead;
+        let t = if let Some((start, end)) = selection {
+            if end - start < MIN_CLIP_DUR {
+                return Err(format!("{name}选区太短"));
+            }
+            start.max(0.0)
+        } else {
+            self.playhead.max(0.0)
+        };
         if self.covering_fade(t).is_some_and(|f| !f.kind.is_page_cut()) {
             return Err(format!("此处已有淡入淡出, 不能叠置{name}转场"));
         }
@@ -471,9 +489,13 @@ impl Timeline {
         let page_end = if t >= last_end {
             self.timeline_end().max(t + MIN_CLIP_DUR)
         } else {
-            let idx = self
-                .covering_clip_index(t)
-                .ok_or_else(|| "播放头不在任何素材片段内".to_string())?;
+            let idx = self.covering_clip_index(t).ok_or_else(|| {
+                if selection.is_some() {
+                    "选区开头不在任何素材片段内".to_string()
+                } else {
+                    "播放头不在任何素材片段内".to_string()
+                }
+            })?;
             if t - self.video_clips[idx].start < MIN_CLIP_DUR {
                 return Err("距该片段起点太近, 无法在此插入".to_string());
             }
@@ -483,13 +505,30 @@ impl Timeline {
             .covering_fade(t)
             .filter(|f| f.kind.is_page_cut())
             .map(|f| f.id);
-        let span_end = self
-            .wipe_end_for(t, page_end, covering)
-            .ok_or_else(|| format!("翻页后剩余时间太短, 或与已有转场冲突, 无法放下{name}"))?;
-        self.insert_next(pool)?;
+        let span_end = if let Some((_, sel_end)) = selection {
+            if sel_end > page_end + 1e-6 {
+                return Err(format!("{name}选区超出这一页"));
+            }
+            if self.interval_overlaps_fades(t, sel_end, covering) {
+                return Err(format!("选区与已有转场重叠, 无法放下{name}"));
+            }
+            sel_end
+        } else {
+            self.wipe_end_for(t, page_end, covering)
+                .ok_or_else(|| format!("翻页后剩余时间太短, 或与已有转场冲突, 无法放下{name}"))?
+        };
+        self.playhead = t;
+        if let Err(e) = self.insert_next(pool) {
+            self.playhead = saved_playhead;
+            return Err(e);
+        }
         self.truncate_wipe_before(t);
         self.push_page_cut_span(t, span_end, kind);
         self.clamp_wipe_spans();
+        if selection.is_some() {
+            self.playhead = saved_playhead;
+            self.fade_selection = None;
+        }
         Ok(())
     }
 
@@ -1544,6 +1583,57 @@ mod tests {
         assert_eq!(prev, "a");
         assert_eq!(next, "b");
         assert!((p - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn page_cut_uses_fade_selection_and_leaves_playhead() {
+        let mut tl = Timeline::new();
+        let pool = vec![item("a"), item("b"), item("c")];
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 2.0;
+        tl.fade_selection = Some((7.5, 4.0));
+        tl.insert_next_with_wipe(&pool).unwrap();
+        assert!((tl.playhead - 2.0).abs() < 1e-9);
+        assert!(tl.fade_selection.is_none());
+        assert_eq!(tl.video_clips[0].end, 4.0);
+        assert_eq!(tl.video_clips[1].group_id, "b");
+        assert_eq!(tl.fades[0].kind, FadeKind::WipeLtr);
+        assert!((tl.fades[0].start - 4.0).abs() < 1e-9);
+        assert!((tl.fades[0].end - 7.5).abs() < 1e-9);
+
+        let mut tl = Timeline::new();
+        tl.insert_next(&pool).unwrap();
+        tl.playhead = 9.0;
+        tl.fade_selection = Some((1.0, 3.0));
+        tl.insert_next_with_dissolve(&pool).unwrap();
+        assert!((tl.playhead - 9.0).abs() < 1e-9);
+        assert!(tl.fade_selection.is_none());
+        assert_eq!(tl.video_clips[0].end, 1.0);
+        assert_eq!(tl.video_clips[1].group_id, "b");
+        assert_eq!(tl.fades.len(), 1);
+        assert_eq!(tl.fades[0].kind, FadeKind::Dissolve);
+        assert!((tl.fades[0].start - 1.0).abs() < 1e-9);
+        assert!((tl.fades[0].end - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn page_cut_selection_rejects_short_or_overflow_without_moving_playhead() {
+        let mut tl = Timeline::new();
+        let pool = vec![item("a"), item("b")];
+        tl.insert_next(&pool).unwrap();
+        let page_end = tl.video_clips[0].end;
+        tl.playhead = 3.0;
+        tl.fade_selection = Some((4.0, 4.0));
+        assert!(tl.insert_next_with_wipe(&pool).is_err());
+        assert!((tl.playhead - 3.0).abs() < 1e-9);
+        assert_eq!(tl.video_clips.len(), 1);
+        assert!(tl.fade_selection.is_some());
+
+        tl.fade_selection = Some((page_end - 1.0, page_end + 2.0));
+        assert!(tl.insert_next_with_dissolve(&pool).is_err());
+        assert_eq!(tl.video_clips.len(), 1);
+        assert!((tl.playhead - 3.0).abs() < 1e-9);
+        assert!(tl.fade_selection.is_some());
     }
 
     #[test]

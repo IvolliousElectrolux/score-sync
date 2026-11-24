@@ -109,8 +109,9 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 \n\
 【视频】快捷键 (右侧切到视频后, 先在轨道/预览区点一下获得焦点):\n\
   空格 播放/暂停 | ← / → 快退/快进 1 秒 | Shift+← / Shift+→ 快退/快进 5 秒\n\
-  N 在播放头插入下一张组合 (按素材池顺序自动顺延) | W 刷入下一张 (切页并附 1 秒左→右转场)\n\
-  X 交叠下一张 (切页并附 1 秒叠化, 上一页溶进下一页) | I 标记淡入 | O 标记淡出\n\
+  N 在播放头插入下一张组合 (按素材池顺序自动顺延) | W 刷入下一张 | X 交叠下一张\n\
+  特效轨道没有选区时, W/X 在播放头切页并附 1 秒转场; 有选区时从选区开头切页, 效果持续到选区结束, 播放头不动\n\
+  I 标记淡入 | O 标记淡出\n\
   Delete / Backspace 删除当前选中的视频片段/淡入淡出/音频片段\n\
   {m}Z/Y 撤重 (时间轴操作)\n\
   鼠标: 拖动片段两端裁剪, 拖动片段整体移动; 淡入淡出轨道可直接拖选一段生成区间,\n\
@@ -240,6 +241,7 @@ const HELP_TEMPLATE_EN: &str = "\
 [Video] (after switching the right side to Video, click the timeline or preview first):\n\
   Space play/pause | Left / Right seek 1 second | Shift+Left / Shift+Right seek 5 seconds\n\
   N insert the next group | W wipe in the next page | X crossfade the next page\n\
+  With no effect-track range, W/X cut at the playhead for 1 second. With a range, they cut at its start and run until its end, and the playhead stays put\n\
   I mark fade in | O mark fade out\n\
   Delete / Backspace deletes the selection\n\
   {m}Z/Y undo timeline edits\n\
