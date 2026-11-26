@@ -441,9 +441,16 @@ impl PhotoEditApp {
         {
             layer.ink = Some(Arc::new(RgbaImage::new(w, h)));
         }
-        let ink = Arc::make_mut(layer.ink.as_mut().unwrap());
-        stamp_color(ink, lx, ly, radius, hardness, rgb, alpha);
-        layer.stroke_rev = layer.stroke_rev.wrapping_add(1);
+        // 半透明或软边不能逐章叠到已有墨水上, 否则交叉处会越叠越实.
+        // 整笔按覆盖重画这一小块, 和松开后的重建一致.
+        if alpha < 255 || hardness < 1.0 - 1e-3 {
+            let pad = radius + 2;
+            layer.rebuild_ink_rect(lx - pad, ly - pad, lx + pad + 1, ly + pad + 1);
+        } else {
+            let ink = Arc::make_mut(layer.ink.as_mut().unwrap());
+            stamp_color(ink, lx, ly, radius, hardness, rgb, alpha);
+            layer.stroke_rev = layer.stroke_rev.wrapping_add(1);
+        }
         self.dirty = true;
         true
     }

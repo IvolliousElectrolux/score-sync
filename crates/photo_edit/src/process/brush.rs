@@ -273,6 +273,109 @@ pub fn stamp_color(
     }
 }
 
+/// 一笔里的圆章先取覆盖的最大值, 再按笔画不透明度混一次.
+/// 逐章源覆盖相叠时, 半透明笔迹的交叉处会越叠越实.
+pub fn composite_dabs(
+    dst: &mut RgbaImage,
+    points: &[(i32, i32)],
+    origin_x: i32,
+    origin_y: i32,
+    radius: i32,
+    hardness: f32,
+    rgb: [u8; 3],
+    alpha: u8,
+) {
+    if points.is_empty() || alpha == 0 {
+        return;
+    }
+    let radius = radius.max(1);
+    let dw = dst.width() as i32;
+    let dh = dst.height() as i32;
+    if dw < 1 || dh < 1 {
+        return;
+    }
+    let margin = radius + 2;
+    let mut x0 = dw;
+    let mut y0 = dh;
+    let mut x1 = 0i32;
+    let mut y1 = 0i32;
+    let mut any = false;
+    for &(px, py) in points {
+        let x = px - origin_x;
+        let y = py - origin_y;
+        if x + margin < 0 || y + margin < 0 || x - margin >= dw || y - margin >= dh {
+            continue;
+        }
+        any = true;
+        x0 = x0.min((x - margin).max(0));
+        y0 = y0.min((y - margin).max(0));
+        x1 = x1.max((x + margin + 1).min(dw));
+        y1 = y1.max((y + margin + 1).min(dh));
+    }
+    if !any || x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let bw = (x1 - x0) as usize;
+    let bh = (y1 - y0) as usize;
+    let mut cover = vec![0f32; bw * bh];
+    let kernel = brush_kernel(radius, hardness);
+    for &(px, py) in points {
+        let cx = px - origin_x;
+        let cy = py - origin_y;
+        if cx + margin < x0 || cy + margin < y0 || cx - margin >= x1 || cy - margin >= y1 {
+            continue;
+        }
+        let top = (cy - radius - 1).max(y0);
+        let bottom = (cy + radius + 2).min(y1);
+        let left = (cx - radius - 1).max(x0);
+        let right = (cx + radius + 2).min(x1);
+        for y in top..bottom {
+            let row = (y - y0) as usize * bw;
+            for x in left..right {
+                let wt = kernel.weight(x - cx, y - cy);
+                if wt <= 0.001 {
+                    continue;
+                }
+                let slot = &mut cover[row + (x - x0) as usize];
+                if wt > *slot {
+                    *slot = wt;
+                }
+            }
+        }
+    }
+    let a_scale = alpha as f32 / 255.0;
+    let width = dw as usize;
+    let raw: &mut [u8] = dst.as_mut();
+    for y in 0..bh {
+        let dy = y0 as usize + y;
+        for x in 0..bw {
+            let src_a = cover[y * bw + x] * a_scale;
+            if src_a <= 0.001 {
+                continue;
+            }
+            let i = (dy * width + x0 as usize + x) * 4;
+            let px = &mut raw[i..i + 4];
+            if src_a >= 0.999 {
+                px[0] = rgb[0];
+                px[1] = rgb[1];
+                px[2] = rgb[2];
+                px[3] = 255;
+                continue;
+            }
+            let da = px[3] as f32 / 255.0;
+            let out_a = src_a + da * (1.0 - src_a);
+            if out_a <= 1e-6 {
+                continue;
+            }
+            let inv_da = da * (1.0 - src_a);
+            px[0] = ((rgb[0] as f32 * src_a + px[0] as f32 * inv_da) / out_a).round() as u8;
+            px[1] = ((rgb[1] as f32 * src_a + px[1] as f32 * inv_da) / out_a).round() as u8;
+            px[2] = ((rgb[2] as f32 * src_a + px[2] as f32 * inv_da) / out_a).round() as u8;
+            px[3] = (out_a * 255.0).round().min(255.0) as u8;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +422,26 @@ mod tests {
         img.put_pixel(1, 1, Rgba([10, 20, 30, 255]));
         let p = sample_bilinear(&img, 1.0, 1.0).unwrap();
         assert_eq!(p.0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn partial_alpha_does_not_stack_inside_one_stroke() {
+        let mut img = RgbaImage::from_pixel(32, 16, Rgba([0, 0, 0, 0]));
+        composite_dabs(
+            &mut img,
+            &[(8, 8), (12, 8)],
+            0,
+            0,
+            5,
+            1.0,
+            [255, 255, 255],
+            128,
+        );
+        let alone = img.get_pixel(4, 8).0;
+        let overlap = img.get_pixel(10, 8).0;
+        assert!(alone[3] > 100 && alone[3] < 150, "single dab {alone:?}");
+        assert_eq!(alone[3], overlap[3], "overlap alpha {overlap:?}");
+        assert_eq!(&overlap[..3], &[255, 255, 255]);
     }
 
     #[test]

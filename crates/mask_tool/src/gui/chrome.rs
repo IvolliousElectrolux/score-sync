@@ -339,10 +339,18 @@ impl MaskToolApp {
     pub(super) fn color_picker_popover(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let slider_op = self.slider_opacity_value();
         let opacity_pct = (slider_op * 100.0).round() as i32;
-        let opacity_label = if self.selected.is_empty() {
-            format!("不透明度  {opacity_pct}%")
+        let kind = match self.color_picker_target {
+            ColorPickerTarget::Brush => "画笔",
+            ColorPickerTarget::Mask => "蒙版",
+        };
+        let has_kind = self
+            .masks
+            .iter()
+            .any(|m| self.selected.contains(&m.id) && self.picker_matches(m));
+        let opacity_label = if has_kind {
+            format!("选中{kind}不透明度  {opacity_pct}%")
         } else {
-            format!("选中项不透明度  {opacity_pct}%")
+            format!("{kind}不透明度  {opacity_pct}%")
         };
         let frac = ((slider_op - 0.05) / 0.95).clamp(0.0, 1.0);
         let sb_img = self.sb_image.clone();

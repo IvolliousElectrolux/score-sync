@@ -8,7 +8,7 @@ mod heal;
 mod select;
 mod transform;
 
-pub use brush::{erase_stamp, stamp_color};
+pub use brush::{composite_dabs, erase_stamp, stamp_color};
 pub use canvas::*;
 pub use clone_stamp::*;
 pub use grade::{

@@ -21,6 +21,14 @@ impl MaskToolApp {
         }
     }
 
+    /// 画笔色盘只动画笔, 蒙版色盘只动框选和套索.
+    pub(super) fn picker_matches(&self, mask: &MaskRect) -> bool {
+        match self.color_picker_target {
+            ColorPickerTarget::Brush => mask.is_brush(),
+            ColorPickerTarget::Mask => !mask.is_brush(),
+        }
+    }
+
     pub(super) fn sync_picker_hsv_from_target(&mut self) {
         let (h, s, v) = rgb_to_hsv(self.current_target_color());
         self.picker_h = h;
@@ -418,13 +426,17 @@ impl MaskToolApp {
             ColorPickerTarget::Mask => self.mask_color = c,
             ColorPickerTarget::Brush => self.brush_color = c,
         }
-        if !self.selected.is_empty() {
+        let brush_target = matches!(self.color_picker_target, ColorPickerTarget::Brush);
+        let touches = self.masks.iter().any(|m| {
+            self.selected.contains(&m.id) && (m.is_brush() == brush_target)
+        });
+        if touches {
             if !self.opacity_undid {
                 self.push_undo();
                 self.opacity_undid = true;
             }
             for m in &mut self.masks {
-                if self.selected.contains(&m.id) {
+                if self.selected.contains(&m.id) && m.is_brush() == brush_target {
                     m.color = c;
                 }
             }
@@ -443,13 +455,17 @@ impl MaskToolApp {
             ColorPickerTarget::Mask => self.mask_opacity = v,
             ColorPickerTarget::Brush => self.brush_opacity = v,
         }
-        if !self.selected.is_empty() {
+        let brush_target = matches!(self.color_picker_target, ColorPickerTarget::Brush);
+        let touches = self.masks.iter().any(|m| {
+            self.selected.contains(&m.id) && (m.is_brush() == brush_target)
+        });
+        if touches {
             if !self.opacity_undid {
                 self.push_undo();
                 self.opacity_undid = true;
             }
             for m in &mut self.masks {
-                if self.selected.contains(&m.id) {
+                if self.selected.contains(&m.id) && m.is_brush() == brush_target {
                     m.opacity = v;
                 }
             }
@@ -502,13 +518,10 @@ impl MaskToolApp {
 
     /// 当前滑条应对应的显示值: 有选中则取选中项平均透明度, 否则当前目标默认透明度.
     pub(super) fn slider_opacity_value(&self) -> f32 {
-        if self.selected.is_empty() {
-            return self.current_target_opacity();
-        }
         let mut sum = 0.0f32;
         let mut n = 0usize;
         for m in &self.masks {
-            if self.selected.contains(&m.id) {
+            if self.selected.contains(&m.id) && self.picker_matches(m) {
                 sum += m.effective_opacity();
                 n += 1;
             }

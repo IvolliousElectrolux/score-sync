@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geom::{rotate_rgba, rotated_aabb};
 use crate::ids::new_id;
-use crate::process::stamp_color;
+use crate::process::composite_dabs;
 
 /// 一笔涂抹. 身份是这条有序点列和它的笔属性, 不是像素是否连在一起.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,8 +245,7 @@ fn stamp_strokes_into(dst: &mut RgbaImage, strokes: &[PaintStroke], origin_x: i3
     let y1 = origin_y + dst.height() as i32;
     for stroke in strokes {
         let radius = stroke.radius.max(1);
-        let margin = radius + 2;
-        let margin_i = i64::from(margin);
+        let margin_i = i64::from(radius + 2);
         if let Some((bx0, by0, bx1, by1)) = stroke.point_bounds() {
             if i64::from(bx1) + margin_i < i64::from(origin_x)
                 || i64::from(by1) + margin_i < i64::from(origin_y)
@@ -256,24 +255,16 @@ fn stamp_strokes_into(dst: &mut RgbaImage, strokes: &[PaintStroke], origin_x: i3
                 continue;
             }
         }
-        for &(px, py) in &stroke.points {
-            if px + margin < origin_x
-                || py + margin < origin_y
-                || px - margin >= x1
-                || py - margin >= y1
-            {
-                continue;
-            }
-            stamp_color(
-                dst,
-                px - origin_x,
-                py - origin_y,
-                radius,
-                stroke.hardness,
-                stroke.color,
-                stroke.alpha,
-            );
-        }
+        composite_dabs(
+            dst,
+            &stroke.points,
+            origin_x,
+            origin_y,
+            radius,
+            stroke.hardness,
+            stroke.color,
+            stroke.alpha,
+        );
     }
 }
 

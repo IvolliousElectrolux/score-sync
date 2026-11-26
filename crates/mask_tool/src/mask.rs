@@ -352,36 +352,29 @@ fn blend_color(p: &mut Rgb<u8>, color: [u8; 3], a: f32) {
     p[2] = (p[2] as f32 * inv + color[2] as f32 * a).round() as u8;
 }
 
-fn stamp_disk(
-    rgb: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
-    cx: i32,
-    cy: i32,
-    radius: i32,
-    color: [u8; 3],
-    a: f32,
-) {
-    let (w, h) = rgb.dimensions();
-    let r = radius.max(1);
+fn stamp_coverage_disk(hit: &mut [u8], bw: usize, bh: usize, ox: i32, oy: i32, cx: i32, cy: i32, r: i32) {
     let r2 = (r as i64) * (r as i64);
-    let x0 = (cx - r).max(0) as u32;
-    let y0 = (cy - r).max(0) as u32;
-    let x1 = ((cx + r).max(0) as u32).min(w.saturating_sub(1));
-    let y1 = ((cy + r).max(0) as u32).min(h.saturating_sub(1));
+    let x0 = (cx - r).max(ox);
+    let y0 = (cy - r).max(oy);
+    let x1 = (cx + r).min(ox + bw as i32 - 1);
+    let y1 = (cy + r).min(oy + bh as i32 - 1);
     if x0 > x1 || y0 > y1 {
         return;
     }
     for y in y0..=y1 {
+        let row = (y - oy) as usize * bw;
         for x in x0..=x1 {
             let dx = x as i64 - cx as i64;
             let dy = y as i64 - cy as i64;
-            if dx * dx + dy * dy > r2 {
-                continue;
+            if dx * dx + dy * dy <= r2 {
+                hit[row + (x - ox) as usize] = 1;
             }
-            blend_color(rgb.get_pixel_mut(x, y), color, a);
         }
     }
 }
 
+/// 一笔只盖一次: 圆章先并成覆盖, 再用笔画不透明度混一次.
+/// 逐章往上叠的话, 半透明笔尖交叉的地方会越叠越实.
 fn stamp_polyline(
     rgb: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
     points: &[(f32, f32)],
@@ -389,23 +382,54 @@ fn stamp_polyline(
     color: [u8; 3],
     a: f32,
 ) {
-    if points.is_empty() {
+    if points.is_empty() || a <= 0.0 {
         return;
     }
-    let r = radius.round().max(1.0) as i32;
-    let step = (r as f32 * 0.5).max(1.0);
-    let stamp_at = |rgb: &mut ImageBuffer<Rgb<u8>, Vec<u8>>, x: f32, y: f32| {
-        stamp_disk(rgb, x.round() as i32, y.round() as i32, r, color, a);
+    let (w, h) = rgb.dimensions();
+    let r = radius.round().max(1.0);
+    let ri = r as i32;
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for &(x, y) in points {
+        min_x = min_x.min(x - r);
+        min_y = min_y.min(y - r);
+        max_x = max_x.max(x + r);
+        max_y = max_y.max(y + r);
+    }
+    let x0 = min_x.floor().max(0.0) as i32;
+    let y0 = min_y.floor().max(0.0) as i32;
+    let x1 = max_x.ceil().min(w.saturating_sub(1) as f32) as i32;
+    let y1 = max_y.ceil().min(h.saturating_sub(1) as f32) as i32;
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let bw = (x1 - x0 + 1) as usize;
+    let bh = (y1 - y0 + 1) as usize;
+    let mut hit = vec![0u8; bw * bh];
+    let step = (r * 0.5).max(1.0);
+    let mut stamp_at = |x: f32, y: f32| {
+        stamp_coverage_disk(&mut hit, bw, bh, x0, y0, x.round() as i32, y.round() as i32, ri);
     };
-    stamp_at(rgb, points[0].0, points[0].1);
-    for w in points.windows(2) {
-        let (x0, y0) = (w[0].0, w[0].1);
-        let (x1, y1) = (w[1].0, w[1].1);
-        let dist = ((x1 - x0).hypot(y1 - y0)).max(0.001);
+    stamp_at(points[0].0, points[0].1);
+    for wdw in points.windows(2) {
+        let (sx, sy) = (wdw[0].0, wdw[0].1);
+        let (ex, ey) = (wdw[1].0, wdw[1].1);
+        let dist = (ex - sx).hypot(ey - sy).max(0.001);
         let n = (dist / step).ceil() as i32;
         for i in 1..=n {
             let t = i as f32 / n as f32;
-            stamp_at(rgb, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+            stamp_at(sx + (ex - sx) * t, sy + (ey - sy) * t);
+        }
+    }
+    for y in y0..=y1 {
+        let row = (y - y0) as usize * bw;
+        for x in x0..=x1 {
+            if hit[row + (x - x0) as usize] == 0 {
+                continue;
+            }
+            blend_color(rgb.get_pixel_mut(x as u32, y as u32), color, a);
         }
     }
 }
@@ -578,6 +602,29 @@ mod tests {
         apply_masks_to_sheet(&mut sheet, &masks, 0.5, 1.0);
         assert_eq!(*sheet.get_pixel(10, 12), Rgb([255, 255, 255]));
         assert_eq!(*sheet.get_pixel(5, 6), Rgb([10, 20, 30]));
+    }
+
+    #[test]
+    fn brush_opacity_stays_flat_where_dabs_overlap() {
+        let mut rgb = image::RgbImage::from_pixel(40, 24, Rgb([0, 0, 0]));
+        let brush = MaskRect {
+            id: "b".into(),
+            x0: 0,
+            y0: 0,
+            x1: 20,
+            y1: 20,
+            brush_points: vec![(8.0, 12.0), (14.0, 12.0)],
+            brush_radius: 6.0,
+            color: [255, 255, 255],
+            poly_points: Vec::new(),
+            opacity: 0.5,
+            bound_block: None,
+        };
+        apply_masks_rgb(&mut rgb, &[brush], 1.0);
+        let alone = rgb.get_pixel(3, 12).0;
+        let overlap = rgb.get_pixel(11, 12).0;
+        assert!(alone[0] > 100 && alone[0] < 150, "single dab {alone:?}");
+        assert_eq!(alone, overlap, "overlap should not stack");
     }
 
     fn brush_mask(points: Vec<(f32, f32)>, radius: f32) -> MaskRect {
